@@ -12,3 +12,10 @@ socs/exynos9810/include/hakios.exynos9810_soc.h bsd/sys/hakios.exynos9810_soc.h
 drivers/usb/hakios.dwc3.c bsd/dev/hakios.dwc3.c
 drivers/power/exynos/hakios.exynos_tmu.h bsd/sys/hakios.exynos_tmu.h
 drivers/power/exynos/hakios.scion_gov.c bsd/dev/hakios.scion_gov.c
+drivers/wifi/brcmfmac/hakios.exynos_pcie.c bsd/dev/hakios.exynos_pcie.c
+drivers/wifi/brcmfmac/hakios.brcmfmac.c bsd/dev/hakios.brcmfmac.c
+drivers/wifi/lx/hakios.lx.c bsd/dev/hakios.lx.c
+drivers/wifi/hakios.sta.c bsd/dev/hakios.sta.c
+drivers/wifi/hakios.apple80211.c bsd/dev/hakios.apple80211.c
+drivers/wifi/hakios.wlan.cpp iokit/Kernel/hakios.wlan.cpp
+drivers/net/hakios.net.c bsd/dev/hakios.net.c

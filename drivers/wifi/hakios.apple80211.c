@@ -1,36 +1,36 @@
 /*
- * Darwin-on-hakios: Apple80211, answered in the kernel.
- *
- * Darwin's Wi-Fi side -- wifid, and through it Settings and the status bar -- talks to a Wi-Fi
- * driver in requests that were once ioctls and are, where the driver offers no user client,
- * ioctls still: SIOCGA80211 and SIOCSA80211 on any socket, with a struct apple80211req that
- * names the interface, a request type, a value, and a buffer in the caller's memory
- * (IO80211.framework: Apple80211Get/Set and their kin all end there). XNU hands an interface
- * ioctl it does not know to the interface, so they arrive in drivers/net/hakios.net.c, which
- * passes them here when its link is a radio.
- *
- * What is asked is answered from the station boundary (sys/hakios.sta.h): the radio's power,
- * its channels, a scan and what it heard, the network joined. What happens there by itself is
- * told to Darwin the way a driver tells it: kernel events of class 6 (IEEE 802.11), subclass 1,
- * whose code is Apple80211's own event number and whose data begins with the interface's name
- * in 16 bytes (IO80211.framework reads them from a PF_SYSTEM socket and compares the name).
- *
- * Every request is still written to the log -- who asks, get or set, the type, the value, the
- * length -- because which of them wifid needs is found that way. Never what a request carries:
- * a network's name or its key may be in there.
- *
- * The request types and the layouts are Apple's. The old ones are as the headers of its open
- * IO80211 sources once described them (apple80211_ioctl.h, apple80211_var.h); where Darwin userland 16.5
- * differs the layout was read out of IO80211.framework of 16.5, which fills and reads the same
- * structures on the other side (Apple80211GetWithIOCTL, _getScanData, _addScanResultToList,
- * _performAssociation, _dispatchAsyncAssocEvent, _dispatchLinkChangedEvent).
- *
- * A join: ASSOCIATE (20) carries the network's name, perhaps its access point, and the
- * passphrase as typed (the framework does not make the key of it), and is answered at once;
- * when the station has joined or failed, event 9 says so, and ASSOCIATE_RESULT (21) gives the
- * outcome as one of Apple80211's result numbers, which the framework turns into its errors:
- * 1 success, 21 "invalid PMK" (a wrong passphrase), 9 a timeout, 2 anything else.
+ * Darwin-on-hakios: Apple80211, answered in the kernel. Darwin's Wi-Fi side (wifid, and through it Settings and the status bar)
+ * talks to a driver in requests that were once ioctls and are, where the driver offers no user client, ioctls still: SIOCGA80211
+ * and SIOCSA80211 on any socket, with a struct apple80211req naming the interface, a request type, a value, and a buffer in the
+ * caller's memory (IO80211.framework: Apple80211Get/Set and their kin end there). XNU hands an interface ioctl it does not know
+ * to the interface: hakios.net.c passes them here when its link is a radio. They are answered from the station boundary
+ * (sys/hakios.sta.h): power, channels, a scan and what it heard, the network joined. What happens there by itself is told as a
+ * driver tells it: kernel events of class 6 (IEEE 802.11), subclass 1, code = Apple80211's event number, data = the interface's
+ * name in 16 bytes and the event's (read from a PF_SYSTEM socket). Every request is logged (who, get or set, type, value, length:
+ * which ones wifid needs is found that way), never what it carries. The types and layouts are Apple's: the old ones as its open
+ * IO80211 headers once described them (apple80211_ioctl.h, apple80211_var.h); where Darwin userland 16.5 or 27 differs, as read out
+ * of that version's IO80211.framework, which fills and reads the same structures (_getScanData, _performAssociation and kin).
+ * A join: ASSOCIATE (20) carries the name, maybe the access point, the passphrase as typed, and is answered at once; when the
+ * station has joined or failed, event 9 says so and ASSOCIATE_RESULT (21) gives the result: 1 success, 21 a wrong passphrase
+ * ("invalid PMK"), 9 a timeout, 2 anything else.
  */
+#ifdef HAKIOS_APPLE80211_27     /* iOS 27 (24A446; the ios-27 tree defines it): requests, events and the ioctl path as in 16.5, */
+#define A80211_SCAN_LEN_BAD(n, ours)    n < ours                /* but SCAN_REQ is 5528 bytes, the first 5456 these; */
+#define A80211_RESULT_ELEMENTS          0x8e8 - 0x8c            /* SCAN_RESULT / CURRENT_NETWORK 2280: 2048 of elements, 92 more; */
+#define A80211_RESULT_SIZE              2280
+#define A80211_ASSOC_AUTH               uint16_t mode, unused_0; uint32_t auth_lower, auth_upper       /* ASSOCIATE 656, its */
+#define A80211_ASSOC_REST               0x290 - 0x8c            /* authentication 32 bits wide: all after it 4 bytes on */
+#define A80211_ASSOC_SIZE               656
+#define A80211_ASSOC_KEY                0x4c
+#else                           /* Darwin userland 16.5 */
+#define A80211_SCAN_LEN_BAD(n, ours)    n != ours
+#define A80211_RESULT_ELEMENTS          1024
+#define A80211_RESULT_SIZE              1164
+#define A80211_ASSOC_AUTH               uint16_t mode, auth_lower, auth_upper, unused_0
+#define A80211_ASSOC_REST               0x250 - 0x88
+#define A80211_ASSOC_SIZE               592
+#define A80211_ASSOC_KEY                0x48
+#endif
 #include <kern/kalloc.h>
 #include <kern/locks.h>
 #include <libkern/libkern.h>
@@ -147,20 +147,20 @@ struct apple80211_scan_result {
 	uint32_t age_ms;
 	uint8_t flags, unused_2;
 	uint16_t elements_length;               /* comes in as the room there is */
-	uint8_t elements[1024];
+	uint8_t elements[A80211_RESULT_ELEMENTS];
 };
 
 /* ASSOCIATE (20): 592 bytes; of what follows the key (the RSN element wifid built, flags) nothing is used */
 struct apple80211_assoc {
 	uint32_t version;
-	uint16_t mode, auth_lower, auth_upper, unused_0;
+	A80211_ASSOC_AUTH;
 	uint32_t ssid_length;
 	uint8_t ssid[32];
 	uint8_t bssid[6], unused_1[2];
 	uint32_t key_version, key_length, key_cipher;   /* cipher 10: a passphrase as typed; 6: the key (from 64 hex digits) */
 	uint16_t key_flags, key_index;
 	uint8_t key[64];
-	uint8_t rest[0x250 - 0x88];
+	uint8_t rest[A80211_ASSOC_REST];
 };
 
 #define CIPHER_PMK              6
@@ -202,7 +202,7 @@ struct apple80211_rssi_changed {
 _Static_assert(sizeof(struct apple80211_rssi_changed) == 0xb4 && offsetof(struct apple80211_rssi_changed, tx_fail) == 0x14 &&
     offsetof(struct apple80211_rssi_changed, has_beacons) == 0x30 && offsetof(struct apple80211_rssi_changed, tx_rate) == 0x40,
     "the RSSI event as Darwin userland 16.5 reads it");
-_Static_assert(sizeof(struct apple80211_assoc) == 592 && offsetof(struct apple80211_assoc, key) == 0x48,
+_Static_assert(sizeof(struct apple80211_assoc) == A80211_ASSOC_SIZE && offsetof(struct apple80211_assoc, key) == A80211_ASSOC_KEY,
     "the association request as Darwin userland 16.5 has it");
 _Static_assert(sizeof(struct apple80211_link_changed) == 32 && offsetof(struct apple80211_link_changed, reason) == 0x14,
     "the link event as Darwin userland 16.5 reads it");
@@ -212,7 +212,7 @@ _Static_assert(sizeof(struct apple80211_channels_info) == 10016 && offsetof(stru
 _Static_assert(sizeof(struct apple80211_scan_request) == 5456 && offsetof(struct apple80211_scan_request, channels) == 0x48 &&
     offsetof(struct apple80211_scan_request, flags) == 0x1308 && offsetof(struct apple80211_scan_request, names) == 0x1318,
     "the scan request as Darwin userland 16.5 has it");
-_Static_assert(sizeof(struct apple80211_scan_result) == 1164 && offsetof(struct apple80211_scan_result, ssid_length) == 0x60 &&
+_Static_assert(sizeof(struct apple80211_scan_result) == A80211_RESULT_SIZE && offsetof(struct apple80211_scan_result, ssid_length) == 0x60 &&
     offsetof(struct apple80211_scan_result, age_ms) == 0x84 && offsetof(struct apple80211_scan_result, elements) == 0x8c,
     "a scan's result as Darwin userland 16.5 has it");
 
@@ -495,7 +495,7 @@ set_scan(const struct apple80211req *request, char *said, size_t said_size)
 	unsigned unknown = 0;
 	int error;
 
-	if (request->req_len != sizeof(*asked)) {
+	if (A80211_SCAN_LEN_BAD(request->req_len, sizeof(*asked))) {
 		return EINVAL;
 	}
 	if (!hakios_sta_present()) {

@@ -13,6 +13,7 @@
 # no minimal UBSan, the firehose library from build/firehose-ios/) and runs it, with a hook the patch has: after dxb has built
 # libfirehose_kernel.a against the macOS SDK, tools/ios27/firehose-ios.py makes the iOS one from it (LC_BUILD_VERSION: ld refuses a
 # macOS object in an iOS link). Every step is incremental: the second run builds what changed.
+# The S9's Wi-Fi driver object is linked in when tools/mk-brcmfmac.sh made one (xnu-deps/build/brcmfmac/out/brcmfmac.o).
 # Needs: a Mac, Xcode (DEVELOPER_DIR), the Kernel Debug Kit (KDKROOT: Apple's, not in this repository), and jq, gum, xcodes, cmake and
 # ninja on PATH (TOOLS_BIN=<directory> adds one). A full build takes about 25 minutes at -j4.
 # The exit status is dxb's. The kernel is removed first, so one that is there afterwards was linked by this run; the kernel's symbol-set
@@ -48,6 +49,21 @@ cp build.sh build-ios.sh
 patch -s -p1 build-ios.sh < "$ROOT/tools/ios27/dxb-ios.patch" ||
 	dxb_die "tools/ios27/dxb-ios.patch does not apply to darwin-xnu-build $DXB_SHA's build.sh (tools/ios27/dxb.pin)"
 export XNU_FIREHOSE_IOS=$ROOT/tools/ios27/firehose-ios.py XNU_JOBS=$jobs
+# The S9's Wi-Fi radio driver: brcmfmac's object (ISC; tools/mk-brcmfmac.sh), when one was made, is linked into the kernel
+# (HAKIOS_OBJECTS, which the fork's makedefs/MakeInc.def adds to the link), else hakios.lx.c says the driver is not built in.
+# Its debug map is stripped first: the kernel's CTF step cannot read Linux's types. make does not see the object change, so
+# the kernel is linked again when it has (a stamp, as xnu-build.sh keeps for the other profiles).
+LX=$ROOT/xnu-deps/build/brcmfmac/out/brcmfmac.o
+lx_now=none
+if [ -f "$LX" ]; then
+	xcrun strip -S -o "$DXB/brcmfmac.o" "$LX" || dxb_die "cannot strip $LX"
+	export XNU_EXTRA_MAKEARGS="${XNU_EXTRA_MAKEARGS:-} HAKIOS_OBJECTS=$DXB/brcmfmac.o"
+	lx_now=$(shasum -a 256 "$DXB/brcmfmac.o" | cut -c1-16)
+fi
+if [ "$(cat "$DXB/.hakios-objects" 2>/dev/null)" != "$lx_now" ]; then
+	rm -f "$(dirname "$(dxb_kernel_ios)")"/mach.*.unstripped "$(dirname "$(dxb_kernel_ios)")"/mach.*.unstripped.noctf
+	echo "$lx_now" > "$DXB/.hakios-objects"
+fi
 KERNEL=$(dxb_kernel_ios)
 rm -f "$KERNEL"
 start=$(date +%s)
