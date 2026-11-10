@@ -113,10 +113,14 @@ def in_ext(a, n):
     rv = cref.view(a, n)                                               # in-image padding: must have been zero in the reference
     return rv is not None and len(rv) == n and not np.asarray(rv).any()
 b = rg.b
-ivs = []; nsite = 0; ninpl = 0; seen_body = {}; word_kinds = collections.Counter()
+ivs = []; nsite = 0; ninpl = 0; ndata = 0; seen_body = {}; word_kinds = collections.Counter()
 for line in open(LOG):
     if line[0] == '#': continue
     f = line.split(); site, word = int(f[0], 16), int(f[1], 16)
+    if len(f) == 3 and f[2] == 'D':      # data word left alone (TEXTDATA_SKIP): must still hold its stock value
+        ndata += 1
+        if struct.unpack('<I', bytes(c.view(site, 4)))[0] != word or struct.unpack('<I', bytes(cref.view(site, 4)))[0] != word: fail(f'data site {site:#x} not left alone')
+        continue
     nsite += 1
     if f[2] == 'I':
         nw = int(f[3], 16)
@@ -145,6 +149,7 @@ for line in open(LOG):
 ivs = sorted(set(ivs))
 for x, y in zip(ivs, ivs[1:]):
     if x[1] > y[0]: fail(f'overlapping stub intervals {x} {y}')
+print('data words left alone', ndata)
 print('sites replayed', nsite, 'in-place', ninpl, 'distinct bodies', len(seen_body), 'stub intervals', len(ivs))
 # unused bytes inside the grown extensions are zero
 used_bytes = sum(e - s for s, e in ivs)

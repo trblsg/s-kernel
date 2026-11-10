@@ -34,6 +34,10 @@ Modes:
   lse-rewrite.py cache CACHE_MAIN [--skip SUBSTR ...] [--only SUBSTR ...] [--dry-run] [--log FILE]
   lse-rewrite.py macho FILE --pool-sym SYM [--dry-run]   (test binaries: stubs go into SYM's zero area)
 Files are modified in place (copy them first).
+
+TEXTDATA_SKIP=skip.npy (textdata-guard.py map; docs/ios27/TEXT-DATA.md): the words of the skip map are data, not
+instructions. A candidate among them is left as it is (no thunk, no body), counted as data_left and logged as
+"SITE WORD D".
 """
 import argparse, bisect, glob, json, os, struct, sys
 import numpy as np
@@ -727,14 +731,39 @@ class Bodies:
         return a, words
 
 
-def rewrite_section(words, addr, pool, write_at, stats, log, dry, bodies=None, far=False):
-    """words: uint32 view of a section at addr. Rewrites LSE sites."""
+_TD = None
+
+
+def textdata_idx(addr, n):
+    """TEXTDATA_SKIP=skip.npy (sorted uint64 addresses, made by textdata-guard.py map): the indexes of the words of the
+    n-word section at addr that are data and must be left alone; None when the variable is not set"""
+    global _TD
+    if _TD is None:
+        p = os.environ.get('TEXTDATA_SKIP')
+        _TD = np.load(p) if p else False
+    if _TD is False:
+        return None
+    lo, hi = np.searchsorted(_TD, np.uint64(addr)), np.searchsorted(_TD, np.uint64(addr + 4 * n))
+    return ((_TD[lo:hi] - np.uint64(addr)) // np.uint64(4)).astype(np.int64)
+
+
+def rewrite_section(words, addr, pool, write_at, stats, log, dry, bodies=None, far=False, keep=None):
+    """words: uint32 view of a section at addr. Rewrites LSE sites. keep: indexes of words that are data (textdata_idx):
+    candidates among them stay as they are, are counted in stats['data_left'] and logged as "SITE WORD D"."""
     w = words
     m = inscope_thunk_mask(w)
     # in-place 1:1 rewrites (LDLAR/STLLR/LDAPUR#0/STLUR#0 -> LDAR/STLR): no thunk
     ik = np.array(sorted(_INPL), dtype='<u4')
+    inp = np.isin(w, ik) if len(ik) else np.zeros(len(w), bool)
+    if keep is not None and len(keep):
+        for i in keep[m[keep] | inp[keep]]:
+            stats['data_left'] = stats.get('data_left', 0) + 1
+            if log:
+                log.write(f'{addr + 4 * int(i):#x} {int(w[i]):08x} D\n')
+        m[keep] = False
+        inp[keep] = False
     if len(ik):
-        for i in np.flatnonzero(np.isin(w, ik)):
+        for i in np.flatnonzero(inp):
             word = int(w[i]); site = addr + 4 * int(i); nw = _INPL[word]
             if not dry:
                 w[i] = nw
@@ -843,6 +872,8 @@ def main():
             if line.startswith('#'):
                 continue
             f = line.split()
+            if len(f) == 3 and f[2] == 'D':             # data word left alone: nothing to verify or restore
+                continue
             site, word, typ, at = int(f[0], 16), int(f[1], 16), f[2], int(f[3], 16)
             cur = rd(site, 1)[0]
             if a.mode == 'restore':
@@ -910,12 +941,14 @@ def main():
                 if v is None:
                     continue
                 w = v.view(np.uint32) if not a.dry_run else np.array(v).view(np.uint32)
-                rewrite_section(w, addr, pool, write_at, stats, log, a.dry_run, bodies, far=a.far and prio(path) < len(HOT))
+                rewrite_section(w, addr, pool, write_at, stats, log, a.dry_run, bodies, keep=textdata_idx(addr, len(w)), far=a.far and prio(path) < len(HOT))
             nimg += 1
             if log:
                 miss = stats.get('no_room', 0) - before.get('no_room', 0)
                 log.write(f'# {path} no_room {miss}\n')
         print(f'{nimg} images', stats, f'pool left {pool.left()}')
+        if os.environ.get('TEXTDATA_SKIP'):
+            print(f'textdata: {stats.get("data_left", 0)} words left alone')
         if gp:
             if a.dry_run:
                 for g in gp.gaps:

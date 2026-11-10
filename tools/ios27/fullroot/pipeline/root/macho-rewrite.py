@@ -20,6 +20,7 @@ for d, dirs, files in os.walk(root):
             k, t = m.do_macho(p, dry)
             if k:
                 n += 1; m.add(tot, t)
+                if t.get('data_left'): print('data_left', p, t['data_left'])      # words the data guard left alone (docs/ios27/TEXT-DATA.md)
         except Exception as e:
             errs += 1; print('ERR', p, e, file=sys.stderr)
 print(n, 'files rewritten', tot, 'errors', errs)
