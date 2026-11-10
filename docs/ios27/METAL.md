@@ -57,6 +57,8 @@ buffers were `NotRepresentable`. `patches/frontend-dexr.diff` is the answer trie
 formats (BGRA10_XR 552/553, BGR10_XR 554/555) of textures that live in device memory only are held as RGBA16Float, with the pipelines' attachments to match. **Not run** when this
 was written: that patch on a phone, and the frame rate of CoreAnimation on Metal against `sbca`'s OpenGL ES path.
 
+What came of the frame rate question is in [LIQUID-GLASS.md](LIQUID-GLASS.md): where the Metal path lost its time, what was changed, and the runs.
+
 ## Not done
 
 - The wallpaper (above), and the 12 `NotRepresentable` no-copy buffers.

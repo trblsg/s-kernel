@@ -1,0 +1,94 @@
+--- a/tools/ios27/metal2/NativeBridgeMetalFrontend.mm	2026-11-09 20:51:46
++++ b/tools/ios27/metal2/NativeBridgeMetalFrontend.mm	2026-11-09 20:51:46
+@@ -470,15 +470,72 @@
+ // owners keep the mapping live through this phase. Maintain each exact CPU
+ // range once; no address identity or decision is carried into another phase
+ // or command, and distinct/partially overlapping ranges retain their calls.
+-static void flushSurfaces(NSMutableSet *surfaces) {
++// ios27-fable: SWEET_MTL2_FLUSH (mtl2-env) chooses how much CPU-cache maintenance imported IOSurfaces get. The GPU is
++// not IO-coherent, so memory the CPU wrote must be cleaned before the GPU reads it and lines the CPU holds must be
++// invalidated after the GPU wrote. Doing both for every surface of every command buffer (mode 0, the default, as before)
++// walks ~6 MiB of DC CIVAC per full-screen surface, twice a frame for the framebuffer.
++//  1: at commit, a surface is cleaned only when it is new to this process or its IOSurface seed changed since the last
++//     clean (every CPU writer unlocks with a seed bump); written surfaces are still invalidated at completion.
++//  2: 1, and a surface the GPU has written 4 times in a row with no seed change (the swap chain, CoreAnimation's
++//     render targets: nobody reads them on the CPU) is invalidated at completion only every 64th time.
++// The state lives on the IOSurface object, so a recycled surface ID never inherits it.
++static int gFlushMode=-1;
++static std::atomic<uint64_t> gFlushSkippedCommit,gFlushSkippedFinish,gFlushDoneCommit,gFlushDoneFinish;
++@interface NBSurfaceFlushState : NSObject {
++@public
++ uint32_t seed;uint32_t gpuWrites;bool cleaned;
++}
++@end
++@implementation NBSurfaceFlushState
++@end
++static char gFlushStateKey;
++static int flushMode() {
++ if(gFlushMode<0){const char *e=getenv("SWEET_MTL2_FLUSH");gFlushMode=(e && *e>='0' && *e<='2')?*e-'0':0;}
++ return gFlushMode;
++}
++// true: this surface needs its maintenance in this phase (finish: after a GPU write; else before the GPU uses it)
++static bool surfaceNeedsFlush(IOSurfaceRef surface,bool finish) {
++ const int mode=flushMode();
++ if(mode==0)return true;
++ // A surface over a client's own memory (CoreAnimation wraps an image's bitmap that way: pixel format 0, any alignment) is
++ // written with no lock and so no seed bump, and it may be wrapped first and drawn into after: its seed says nothing.
++ // Such a surface, and any small one (an icon is 12 KiB: its clean costs nothing), is cleaned at every commit as in mode 0.
++ // (A guess at Settings' row icons in stripes on the first Metal builds with mode 2; cleaning more is never wrong.)
++ if(!finish && (IOSurfaceGetPixelFormat(surface)==0 || IOSurfaceGetAllocSize(surface)<(1u<<20) ||
++    (reinterpret_cast<uintptr_t>(IOSurfaceGetBaseAddress(surface))&0x3fff)!=0)){gFlushDoneCommit++;return true;}
++ id object=(__bridge id)surface;
++ @synchronized(object) {
++  NBSurfaceFlushState *state=objc_getAssociatedObject(object,&gFlushStateKey);
++  if(!state){state=[NBSurfaceFlushState new];objc_setAssociatedObject(object,&gFlushStateKey,state,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
++  const uint32_t seed=IOSurfaceGetSeed(surface);
++  if(!finish) {
++   if(state->cleaned && state->seed==seed){gFlushSkippedCommit++;return false;}
++   if(state->cleaned)state->gpuWrites=0;   // a CPU writer: no longer GPU-only
++   state->cleaned=true;state->seed=seed;gFlushDoneCommit++;return true;
++  }
++  if(state->seed!=seed){state->gpuWrites=0;gFlushDoneFinish++;return true;}
++  const uint32_t writes=++state->gpuWrites;
++  if(mode>=2 && writes>4 && (writes&63)!=0){gFlushSkippedFinish++;return false;}
++  gFlushDoneFinish++;return true;
++ }
++}
++static void flushSurfaces(NSMutableSet *surfaces,bool finish=false) {
+  if(!surfaces.count)return;
+  std::vector<std::pair<uintptr_t,size_t>> ranges;
+  ranges.reserve(surfaces.count);
+  const size_t page=(size_t)getpagesize();
++ NSMutableSet *seen=flushMode()?[NSMutableSet new]:nil;
+  for(id item in surfaces) {
+   IOSurfaceRef surface=[item isKindOfClass:[NBTexture class]]?[(NBTexture *)item surface]:
+                        ([item isKindOfClass:[NBBuffer class]]?[(NBBuffer *)item surfaceOwner]:nullptr);
+   if(!surface)continue;
++  if(seen) {
++   // one decision per surface per phase: several textures/views of one surface must not count as several GPU writes
++   NSValue *key=[NSValue valueWithPointer:surface];
++   if([seen containsObject:key])continue;
++   [seen addObject:key];
++   if(!surfaceNeedsFlush(surface,finish))continue;
++  }
+   void *rawBase=IOSurfaceGetBaseAddress(surface);
+   const size_t allocation=IOSurfaceGetAllocSize(surface);
+   if(!rawBase || !allocation)continue;
+@@ -1498,7 +1555,7 @@
+ }
+ // After completion (or a refusal): invalidate the CPU's view of GPU-written imported surfaces, then completed handlers, once.
+ - (void)finish {
+- if(!self.failedLocally)flushSurfaces(_writtenSurfaces);
++ if(!self.failedLocally)flushSurfaces(_writtenSurfaces,true);
+  // Actual GPU completion (or a local refusal that never submitted) is the
+  // release point. A retained completed command must not pin every old frame.
+  [_surfaces removeAllObjects];[_writtenSurfaces removeAllObjects];[_resourceOwners removeAllObjects];
+@@ -2745,6 +2802,8 @@
+  row("J surface cache n=%llu bytes=%llu dup=%llu us=%llu max=%llu",(unsigned long long)gTimeSurfaceFlush.count.load(),
+   (unsigned long long)gSurfaceFlushBytes.load(),(unsigned long long)gSurfaceFlushDuplicates.load(),
+   (unsigned long long)gTimeSurfaceFlush.total.load(),(unsigned long long)gTimeSurfaceFlush.slowest.load());
++ row("J flush mode=%d commit done=%llu skip=%llu finish done=%llu skip=%llu",flushMode(),(unsigned long long)gFlushDoneCommit.load(),
++  (unsigned long long)gFlushSkippedCommit.load(),(unsigned long long)gFlushDoneFinish.load(),(unsigned long long)gFlushSkippedFinish.load());
+  {
+   uint64_t pbytes=0;size_t pcnt=0;
+   {std::lock_guard<std::mutex> lock(gTexturePoolLock);pbytes=gTexturePoolBytes;pcnt=gTexturePool.size();}

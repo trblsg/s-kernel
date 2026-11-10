@@ -1,0 +1,16 @@
+# settings.ui : unlock, open Settings from the home screen by its icon, look at the top level, the scrolled list and one pane.
+# The icon's place depends on the home screen: run smoke.ui first, find the Settings icon in 1-home.png, and pass its place:
+#   uirun.sh 2 -c "$(sed 's/@SX@/333/; s/@SY@/475/' settings.ui)"      (thousandths of the screen)
+home; wait 1.5; home; wait 2
+shot 1-home
+tap @SX@ @SY@; wait 5
+shot 2-settings-top
+swipe 500 750 500 350 400; wait 2
+shot 3-settings-scrolled
+swipe 500 750 500 350 400; wait 2
+shot 4-settings-scrolled2
+tap 500 400; wait 4
+shot 5-a-pane
+swipe 20 500 600 500 300; wait 2
+home; wait 2
+shot 6-home-again

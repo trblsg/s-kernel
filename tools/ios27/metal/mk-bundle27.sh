@@ -10,9 +10,10 @@ BRIDGE=$SB/build/m2v-bridge/ios/libnative_metal_bridge.a
 PANVK=$W/build/mesa/build-vk26/src/panfrost/vulkan/libvulkan_panfrost.dylib
 B=$W/stage/StarbiteMetal.bundle
 rm -rf "$B" && mkdir -p "$B" $W/sym $W/stage
-# the frontend and HotMetal2 are built from a copy with patches/frontend-dexr.diff and hotmetal2-diag.diff applied (NOPATCH=1: as they are in tools/ios27/metal2)
+# the frontend and HotMetal2 are built from a copy with patches/frontend-dexr.diff, hotmetal2-diag.diff and frontend-flush.diff applied
+# (NOPATCH=1: as they are in tools/ios27/metal2)
 rm -rf $W/src27 && mkdir -p $W/src27/tools/ios27 && cp -R tools/ios27/metal2 $W/src27/tools/ios27/
-[ -n "${NOPATCH:-}" ] || for p in frontend-dexr hotmetal2-diag; do patch -s -p1 -d $W/src27 < tools/ios27/metal/patches/$p.diff || exit 1; done
+[ -n "${NOPATCH:-}" ] || for p in frontend-dexr hotmetal2-diag frontend-flush; do patch -s -p1 -d $W/src27 < tools/ios27/metal/patches/$p.diff || exit 1; done
 M2=$W/src27/tools/ios27/metal2
 $CC -x objective-c++ -std=c++17 -fobjc-arc -O2 -g -Wall -Wno-deprecated-declarations -Wno-unused-function -bundle \
 	-o "$B/StarbiteMetal" $M2/HotMetal2.mm $M2/NativeBridgeMetalFrontend.mm -x none "$BRIDGE" \

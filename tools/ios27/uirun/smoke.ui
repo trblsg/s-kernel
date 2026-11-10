@@ -1,0 +1,14 @@
+# smoke.ui : do the console verbs work on this kernel? (touch, button, shot) ~25 s
+raw uptime
+home; wait 1.5; home; wait 2
+shot 1-home
+swipe 880 500 120 500; wait 2
+shot 2-page2
+swipe 120 500 880 500; wait 2
+swipe 930 3 930 500 350; wait 2
+shot 3-control-center
+home; wait 2
+lock; wait 2
+shot 4-locked
+home; wait 1.5; home; wait 2
+shot 5-unlocked
