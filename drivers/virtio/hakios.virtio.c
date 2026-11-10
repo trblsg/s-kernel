@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /*
  * The virtio transport layer of sys/hakios.virtio.h: virtio-pci 1.x and virtio-mmio v2
  * behind one interface, split virtqueues, interrupts through the GIC or polling.

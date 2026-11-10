@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # Release notes (draft)
 
 **Draft, not a release.** No tag has been cut for this. The notes cover `main` since `v0.1.0`, upstream's

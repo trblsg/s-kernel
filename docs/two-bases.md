@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # One tree, two XNU bases
 
 Scion builds one kernel tree on two of Apple's XNU releases: **xnu-8796.121.2** (iOS 16.5, arm64) for phones whose CPUs lack

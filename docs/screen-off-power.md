@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # Screen-off power on the Galaxy S9
 
 Status: **built, not yet run on a phone** (7 November). Everything here is behind boot-args that are off by default.

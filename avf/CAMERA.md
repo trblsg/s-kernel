@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # Camera under AVF: SCCAM, the phone's camera in iOS
 
 With the Scion app's per-install **Camera** setting, iOS's Camera.app (and everything else on

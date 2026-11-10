@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT-0
 """A picture of a framebuffer in the guest's RAM, through QEMU's monitor (a Unix socket: QEMU_MONITOR= of the lga scripts).
 
 usage: fbshot.py SOCKET OUT.png [BASE [WIDTH HEIGHT [STRIDE_BYTES]]]     defaults: 0x100000000 1080 2424 4320 (XRGB8888)

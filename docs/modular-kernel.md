@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # A modular kernel: how this tree maps onto UniXNU's layers
 
 What it would take for this kernel to sit on pristine XNU with an ordered patch series and separate drivers, as

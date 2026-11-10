@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /*
  * tools/bcm_shub_test.c: drivers/input/ssp/hakios.bcm_shub.h on a computer, under the sanitizers (tools/bcm-shub-test.sh).
  * What it checks:

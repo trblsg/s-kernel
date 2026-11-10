@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT-0
 """A disk image with a GUID partition table of 4096-byte blocks (a UFS logical unit's), for QEMU's -device ufs-lu.
 
 usage: mkgpt.py OUT NAME:MIB[:FILE] ...

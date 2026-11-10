@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT-0
 """Take a seed of the data volume out of a store: the newest good slot of var_store's store, as one file.
 
 usage: tools/var-seed.py STORE OUT [--store-at BYTES] [--slot-bytes BYTES]

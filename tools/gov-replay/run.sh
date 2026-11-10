@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT-0
 # The S9 CPU governor's real source (drivers/power/exynos/hakios.exynos_cpufreq.c) run on the host against a model of the M3s, for
 # comparing the governor's policies before a phone is free. Not a phone: see README.md.
 #   tools/gov-replay/run.sh CONSOLE.log          the log's cpufreq_gov lines replayed, both policies

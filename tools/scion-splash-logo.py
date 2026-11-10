@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT-0
 """Make xnuloader/scion_splash_logo.h: the Scion sprout of the boot screen, as data the loader can draw.
 
 usage: tools/scion-splash-logo.py [--width 420] [SVG] > xnuloader/scion_splash_logo.h

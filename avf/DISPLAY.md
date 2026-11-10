@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # Display and touch under AVF (crosvm on the Pixel)
 
 HakiOS needs a framebuffer: without `disp0`, SpringBoard doesn't start. On

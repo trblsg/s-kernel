@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /*
  * virtio-gpu 2D: a scanout for the display (sys/hakios.vgpu.h), on the virtio core
  * (sys/hakios.virtio.h). Without the core this is only stubs that say ENODEV.

@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: MIT-0
 # The boot chooser's pure part (xnuloader/chooser.h) on this machine, and its promise: no partition is written.
 set -e
 cd "$(dirname "$0")/.."

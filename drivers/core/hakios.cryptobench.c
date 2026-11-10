@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /*
  * sysctl kern.hakios.crypto_bench: the kernel's SHA-256, SHA-1 and AES-128-CBC over a page, with the ARMv8 crypto instructions
  * and in C, in MB/s, on whichever core the reader is on (osfmk/minicrypto/mc_ce.c). Measured when it is read: about 0.6 s of

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /*
  * A compositing workload in the shape of CoreAnimation's: LAYERS full-screen textured quads,
  * blended source-over, per frame. It runs twice: on the host GPU through gfxstream (encoded

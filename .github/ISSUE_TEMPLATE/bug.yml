@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT-0
 name: Bug report
 description: Something went wrong on your phone, such as a crash, a restart or a part that stopped working.
 labels: [bug]

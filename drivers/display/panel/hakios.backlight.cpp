@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /*
  * The panel's brightness, whichever phone: a panel driver that can set it registers here
  * (hakios_panel_register()), and what iOS asks for reaches it through hakios_panel_brightness(), 0-255. Today the

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /* Replay harness: the governor's real source, a model of the M3s and the A55s, a virtual clock. */
 #include <setjmp.h>
 #include <stdlib.h>

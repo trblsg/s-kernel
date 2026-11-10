@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # Pixel 10: to a framebuffer, with software rendering
 
 **Draft. Nothing here has run on a phone. This page asks no one to run it; [scion-frankel's FIRST-TEST.md](https://github.com/Scion-Project/scion-frankel/blob/main/FIRST-TEST.md) does, with its wipe warning.** Only the Exynos 9810 has booted

@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # Ideas of 5 November: findings
 
 Findings only; nothing here is built or booted. Where a fact is from memory or a public figure and not checked in this tree, it says so.

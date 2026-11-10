@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT-0
 # tools/soc-compile.sh [soc ...]: link a kernel with each SoC's table, one after another in this tree, after the tree's first
 # build. A compile target: nothing here says a kernel runs on the SoC. Its defconfig is QEMU's with the blocks soc-check says
 # are built; tools/soc-check.py --status names the rest.

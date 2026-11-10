@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /*
  * The SoC's temperature, whichever phone: the driver that reads a phone's sensors registers here
  * (hakios_thermal_register()), and drivers/power/hakios.thermal_provider.c publishes what it reads under the one set of

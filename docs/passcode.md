@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # The passcode
 
 Settings > Face ID & Passcode (Touch ID & Passcode on some images) can turn a passcode on, change it and

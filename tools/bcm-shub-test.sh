@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: MIT-0
 # The Galaxy S9's sensor hub's byte formats (drivers/input/ssp/hakios.bcm_shub.h: the SSI frames' status, the transport
 # layer's packets and CRC-8, the RPCs, the firmware patch's records, SSP's instructions and data frames; what
 # drivers/input/ssp/hakios.ssp.c uses) on this machine: tools/bcm_shub_test.c built against it under the address and

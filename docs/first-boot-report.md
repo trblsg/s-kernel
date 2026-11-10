@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # First-boot report
 
 The job `com.hakios.selftest` (`userland/src/selftest.c`) writes one plain report 60 s into the first boot. Nothing is sent anywhere.

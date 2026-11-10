@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /*
  * What the USB gadget driver (drivers/usb/hakios.dwc3.c, device-neutral: a DesignWare DWC3 in device mode with a
  * CDC-ACM function) needs from the SoC it runs on: where the controller is, and how its clocks, power and PHY are

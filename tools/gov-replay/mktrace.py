@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT-0
 import re,sys
 rx=re.compile(r'cpufreq_gov: (\d+) s: lit (\d+) MHz(?: asked)? load (\d+)% \(avg (\d+)%, (\d+) online, (\d+) max, measured (\S+)\) \| big (\d+) MHz(?: asked)? load (\d+)% \(avg (\d+)%, (\d+) online, (\d+) max, measured (\S+)\) \| temp big (\S+) lit (\S+) C \| (\d+) changes \| boost: (\d+) touch, (\d+) frames, (\d+) raised')
 seen=set();out=[]

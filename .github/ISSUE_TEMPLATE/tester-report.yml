@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT-0
 name: Tester report
 description: You ran Scion on a phone. Tell us how it went, even if everything worked.
 labels: [tester-report]

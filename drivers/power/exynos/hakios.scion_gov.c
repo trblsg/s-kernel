@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /*
  * The scion CPU governor: the control law, apart from any kernel or SoC (hakios.exynos_cpufreq.c measures and acts on it,
  * gov_policy=3; tools/gov-replay runs this file on a host).

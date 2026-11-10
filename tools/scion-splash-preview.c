@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /*
  * scion-splash-preview: draws the boot screen the way the loader does, on the host, into a PPM, to look at it
  * (no phone, no QEMU): the same scion_splash.h and scion_splash_logo.h as the loader's, the same unpacking and scaling.

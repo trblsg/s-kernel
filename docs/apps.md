@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # Apps without an App Store account
 
 The aim: a person with a Scion phone can put apps on it without an Apple account, with nothing cracked and nothing decrypted. The

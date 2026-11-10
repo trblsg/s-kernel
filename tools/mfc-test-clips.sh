@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT-0
 # The video decoder's test clips (userland/src/mfc_vt.m, mfc_player.html), all made here and silent: testsrc2 and smptebars through ffmpeg, a list of each
 # one's frame CRCs (NV12, as mfc_vt computes them), HEIC stills by a Mac's sips. tools/mfc-test-clips.sh DIR; copied to a test ramdisk's share/mfc by hand.
 set -e

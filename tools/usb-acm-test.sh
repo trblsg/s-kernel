@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: MIT-0
 # The USB gadget's CDC-ACM descriptors and control requests (drivers/usb/hakios.usb_acm.h, what drivers/usb/hakios.dwc3.c
 # answers a host with) on this machine: tools/usb_acm_test.c built against it under the address and undefined-behaviour
 # sanitizers, and run. The header is plain C.

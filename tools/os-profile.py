@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT-0
 """The OS profile a build is for: profiles/<name>.conf. docs/two-bases.md says how profiles, XNU bases and devices fit together.
 
   tools/os-profile.py get KEY     a key's value (xnu_tag, xnu_commit, base, ...); fails if the profile does not build

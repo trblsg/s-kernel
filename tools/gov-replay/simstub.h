@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 #pragma once
 #define EINVAL 22
 #define ENXIO 6

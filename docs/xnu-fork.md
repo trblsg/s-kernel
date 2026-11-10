@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # The kernel is a fork: Scion-Project/xnu
 
 Scion's kernel source is [Scion-Project/xnu](https://github.com/Scion-Project/xnu), a fork of Apple's

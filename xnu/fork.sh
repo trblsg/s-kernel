@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT-0
 # xnu/fork.sh: sourced by xnu/apply.sh and xnu/apply-series.sh (HERE set). The kernel tree comes from Scion-Project/xnu, a fork
 # of Apple's repository, where Scion's changes are ordinary commits on Apple's tags (docs/xnu-fork.md): the profile names the
 # fork, its branch and the commit a build takes (profiles/*.conf: xnu_fork, fork_branch, fork_commit). What may not be in git

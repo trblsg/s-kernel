@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /*
  * HakiosBluetooth: the registry entry by which iOS's bluetoothd finds the S9's Bluetooth (drivers/bluetooth/
  * hakios.bcm4361_bt.c, bt=7).

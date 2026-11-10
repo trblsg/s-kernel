@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /*
  * SCSND: the sink of /dev/hakios-audio under AVF, the Scion app (sys/hakios.scsnd.h, patch 1401).
  *

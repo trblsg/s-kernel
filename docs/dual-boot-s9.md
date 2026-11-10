@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # Android beside iOS on the Galaxy S9 (design, nothing run)
 
 > **Nothing on this page has been run on a phone.** The chooser, the partition plan and the write fence below were written on

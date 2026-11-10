@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: MIT-0
 # The Galaxy S9 panel's gamma (drivers/display/panel/hakios.s6e3ha8_gamma.h, the calculation drivers/display/panel/hakios.s6e3ha8.c sends
 # from) on this machine: tools/s6e3ha8_gamma_test.c built against it under the address and undefined-behaviour
 # sanitizers, and run. The header is plain C: nothing of the kernel is needed.

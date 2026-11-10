@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT-0
 """Make the web clips Scion starts with: Info.plist and icon.png for each web app of a manifest.
 
 usage: tools/mk-webclips.py --out DIR [--manifest FILE] [--only ID,ID] [--fullscreen] [--flat]

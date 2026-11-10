@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT-0
 # iOS 16.5 under AVF as a Scion install: puts the boot files into Scion's files/ios165 (owned by
 # the app, via run-as), registers that folder as an install ("iOS 16.5 (AVF)", backend AVF,
 # security Bring-up), boots it once through the debug build's developer hook and collects its

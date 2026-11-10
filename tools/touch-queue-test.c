@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /* From danstronics/ios-s9plus-exynos core/drivers/input (MIT, "HakiOS authors"); see docs/star2lte-absorb.md. */
 #include <assert.h>
 #include <stdio.h>

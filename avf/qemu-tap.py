@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT-0
 """tap.py X Y (pixels of the 1125x2436 framebuffer): a one-finger tap on QEMU's virtio multitouch, over QMP (env QMP, default 4455)."""
 import json, os, socket, sys, time
 x, y = int(sys.argv[1]), int(sys.argv[2])

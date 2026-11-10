@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT-0
 """The kernel source of an OS profile as the fork holds it (docs/xnu-fork.md), for the tools that read it.
 
   tools/xnu-tree.py path [PROFILE]      a cached, pristine checkout of the profile's fork commit (no drivers, no configuration:

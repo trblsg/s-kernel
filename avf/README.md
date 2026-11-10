@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # AVF / crosvm platform
 
 Scion runs HakiOS's XNU as a hardware-virtualized guest on Android's own hypervisor (pKVM), through

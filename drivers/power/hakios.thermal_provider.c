@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /*
  * The SoC's temperature, whichever phone (hakios.thermal_provider.h): the one owner of kern.hakios.thermal_* and
  * hakios_thermal_max_mc(). A phone's temperature driver registers its variables (hakios_thermal_register()); the names

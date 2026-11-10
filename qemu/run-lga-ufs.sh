@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT-0
 # The Pixel 10's whole route in QEMU, with the system image read from a UFS disk as it would be from the phone's userdata:
 # the boot shim at EL2, xnuloader ("qemu-lga"), the frankel_ufs kernel, the small root in RAM (ALONE=1 RC=rc.launchd), and a
 # QEMU UFS device (read only, on the host side too) whose first logical unit holds a test GPT with the system image in `userdata`.

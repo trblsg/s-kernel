@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /*
  * The flashlight under AVF (patch 1402): the phone's own torch, switched by the Scion app.
  *

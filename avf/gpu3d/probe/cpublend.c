@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /*
  * The software side of the compositing comparison (bench.c): what a CPU compositor does for
  * one full-screen layer, a scaled texture blended source-over onto the frame. Built with NEON

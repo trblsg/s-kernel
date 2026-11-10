@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT-0
 """Test of the boot screen's drawing (docs/boot-screen.md): tools/scion-splash-preview.c, the loader's own code, built for
 the host and run at the S9's panel size, the iPhone X's size (what QEMU's ramfb is) and a small one.
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT-0
 """
 What someone holding the flash can do with /private/var/hakios-keybag (MiniAppleKeyStore.cpp, docs/keystore.md), and what they cannot,
 checked from outside the kernel with independent implementations of Argon2id (argon2-cffi, the reference code) and AES key wrap

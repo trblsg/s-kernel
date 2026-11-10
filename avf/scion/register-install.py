@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT-0
 """Add the iOS 16.5 (AVF) install to Scion's install list (shared_prefs/installs.xml).
 
   register-install.py IN.xml OUT.xml VM_DIR

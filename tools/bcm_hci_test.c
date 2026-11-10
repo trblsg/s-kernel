@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /*
  * The Galaxy S9's Bluetooth bring-up, its byte formats and arithmetic (drivers/bluetooth/bcm4361/hakios.bcm_hci.h, what
  * drivers/bluetooth/bcm4361/hakios.bcm4361_bt.c talks to the BCM4361 with) checked on this machine:

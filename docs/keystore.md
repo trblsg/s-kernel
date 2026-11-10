@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # The real key store
 
 **On by default on the Galaxy S9 (`starlte`), off everywhere else.** `keystore_real=0` turns it off on the S9, `keystore_real=1` turns it on elsewhere. The S9's default is compiled in (`HAKIOS_DEVICE` from `CONFIG_DEVICE`, in `hakios.drivers.h`), because its boot line has no room for another argument. With it off the kernel behaves as [the passcode](passcode.md) describes: the passcode gates the screen and

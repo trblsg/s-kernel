@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT-0
 """Check tools/mk-webclips.py and userland/webclips/manifest.json without a phone, an IPSW or a network.
 
 usage: tools/webclips-test.py        exit 1 and the list of what failed (CI runs it)

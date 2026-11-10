@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT-0
 """The Scion app's side of the camera region (SCCAM, avf/CAMERA.md), for QEMU: a test pattern.
 
   avf/sccam-host.py RAMFILE RAM_BASE ADDR SIZE [--prime-only | --serve-only] [--secs N]

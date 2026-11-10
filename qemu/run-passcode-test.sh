@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT-0
 # The key store's passcode (iokit/Kernel/MiniAppleKeyStore.cpp in the fork of XNU, scion/xnu-8796) across restarts, in QEMU: userland/src/passcode_test.c
 # as process 1 of a tiny APFS root, /private/var an HFS Plus volume on a writable virtio disk (virtio_blk=2), one boot after another
 # on the same volume. Each boot ends with "passcode_test: PASS" or FAIL; the kernel's "MiniAppleKeyStore: selftest N:" lines say which check.

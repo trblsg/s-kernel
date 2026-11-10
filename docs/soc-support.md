@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # SoCs other than the Exynos 9810
 
 **Only the Exynos 9810 has ever booted.** Everything else here is compile-tested at most; nothing on this page has run on a

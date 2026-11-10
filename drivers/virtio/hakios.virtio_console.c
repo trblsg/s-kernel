@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /*
  * A virtio console as a serial console of the kernel (pexpert/arm/pe_serial.c), for virtual
  * machines with no PL011 or 8250 to print on: crosvm's consoles (the Android Virtualization

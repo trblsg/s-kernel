@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /*
  * What the bring-up aids and the personas change in kern_exec.c, kept here: boot-arg systrace (the stage of an exec that refused
  * the image), applog= and applog_name= (a program's standard output on the console), the sysctl kern.exec_inject (libraries

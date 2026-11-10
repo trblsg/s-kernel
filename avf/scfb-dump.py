@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT-0
 """Save the SCFB framebuffer as a PNG.
 
   avf/scfb-dump.py --qemu ADDR OUT.png        from a running avf/qemu-scfb.sh (QMP port 4455)

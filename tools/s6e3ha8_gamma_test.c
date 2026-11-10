@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /*
  * The Galaxy S9 panel's gamma (drivers/display/panel/hakios.s6e3ha8_gamma.h) on this machine: its tables checked against what
  * they must be, and the gamma worked out for made-up MTPs (the panel's calibration, register C8) and checked for sense.

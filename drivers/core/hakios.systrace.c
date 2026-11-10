@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/proc_internal.h>

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT-0
 # Boot avfboot + an XNUP payload as a custom AVF VM on a phone, through the AVF probe app
 # (Scion-Project/scion-avf, probe/), and collect the VM's console.
 #

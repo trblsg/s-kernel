@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: MIT-0 -->
 # The boot screen
 
 `splash=1` replaces the wall of text on the screen while the phone starts with Scion's sprout, a thin progress line and, under it, a few

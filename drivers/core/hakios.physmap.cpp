@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT-0 */
 /*
  * hakios_physmap_wc(): physical memory that XNU does not manage, mapped into the kernel write-combined, once
  * (sys/hakios.physmap.h says when and why). One copy of what the camera's (hakios.exynos_camera.c) and UFS's own mode

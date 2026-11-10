@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT-0
 """Host-side checks of the kernel's read-only ext4 reader (bsd/sys/hakios.ext4.h in the fork of XNU, scion/xnu-8796), without the phone.
 
 usage: tools/ext4-test.py
