@@ -894,6 +894,18 @@ firmware_start(void)
 		}
 		say("exynos_mfc: 3: the %s partition answers after %d ms more (%llu bytes)\n", partition, waited * 500, got);
 		if (hakios_partition_file(partition, "/vendor", "/firmware/mfc_fw.bin", FW_CODE, &data, &size) != 0 || data == NULL) {
+			/*
+			 * The partition may answer reads and still not be an ext4 file system this reader knows (this S9's
+			 * VENDOR is EROFS). Ask the image once more before giving up, so the log names where the bytes came
+			 * from.
+			 */
+			data = hakios_image_file("fw", "mfc_fw.bin", &size, NULL);
+			if (data != NULL) {
+				say("exynos_mfc: 3: mfc_fw.bin, %llu bytes, from fw/ of the small image (the %s partition did not supply it)\n",
+				    size, partition);
+			}
+		}
+		if (data == NULL) {
 			say("exynos_mfc: 3: /firmware/mfc_fw.bin is neither in fw/ of the small image nor on the phone's %s partition: no hardware video\n", partition);
 			return false;
 		}
