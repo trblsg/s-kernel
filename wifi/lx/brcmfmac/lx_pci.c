@@ -275,14 +275,20 @@ lkpi_request_irq(struct device *dev, unsigned int irq, irq_handler_t handler, ir
 		lx_os_pci_say_dma("the interrupt looked at");
 	} else if (lx_brcmf_reached(5) && lx_brcmf_may(5, "the chip's interrupt by INTx: SPI 253 through the root complex's latch")) {
 		lp.line = true;
-		if ((error = lx_os_irq_line_attach(line_fired, NULL)) != 0) {
-			lp.line = false;
-			lx_tell("lx: pci: INTx cannot be attached (%d): the interrupt is not taken\n", error);
-			return (-EIO);
+		if ((error = lx_os_irq_line_attach(line_fired, NULL)) == 0) {
+			lx_tell("lx: pci: %s's interrupt handler is called when INTx fires\n", name);
+			lx_os_irq_line_enable();
+			return (0);
 		}
-		lx_tell("lx: pci: %s's interrupt handler is called when INTx fires\n", name);
-		lx_os_irq_line_enable();
-		return (0);
+		lp.line = false;
+		/*
+		 * The line is not usable (no GIC vector, the root complex not ready): fall back to the poller
+		 * instead of failing the probe. brcmfmac then works as it does with brcmfmac_poll=1; the log says
+		 * which path is in use, so a heat/test log can tell them apart.
+		 */
+		lx_tell("lx: pci: INTx cannot be attached (%d): %s's interrupt is looked at by a thread every "
+		    "brcmfmac_poll_ms instead\n", error, name);
+		lx_os_pci_say_dma("the interrupt looked at (INTx not attached)");
 	}
 	lp.polling = true;
 	lx_tell("lx: pci: %s's interrupt handler is called by a thread every brcmfmac_poll_ms (INTx from brcmfmac=5)\n",
