@@ -14,6 +14,7 @@
 #include <kern/locks.h>
 #include <kern/startup.h>
 #include <libkern/libkern.h>
+#include <machine/machine_routines.h>
 #include <sys/sysctl.h>
 #include <sys/systm.h>
 #include <sys/hakios.log.h>
@@ -71,15 +72,25 @@ hakios_platform_init(void)
 STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, hakios_platform_init);
 
 
+/*
+ * A driver's line: the loader's log, and the console when that may be written. With interrupts off -- on the way back to
+ * the loader (loader_return()'s quiesce steps, hakios_ddr_quiesce()) -- the loader's log only: the kernel's console may
+ * not be written there, and printf was a panic ("Console I/O from interrupt-disabled context") at the end of the
+ * 12 November 2026 run, after "loader_return_after expired". The line is in the loader's log, which survives the run.
+ */
 int
 hakios_say(const char *format, ...)
 {
 	char line[600];
 	va_list list;
+	int length;
 
 	va_start(list, format);
-	vsnprintf(line, sizeof(line), format, list);
+	length = vsnprintf(line, sizeof(line), format, list);
 	va_end(list);
 	loader_log_line(line);
-	return printf("%s", line);
+	if (ml_get_interrupts_enabled()) {
+		printf("%s", line);
+	}
+	return length;
 }
