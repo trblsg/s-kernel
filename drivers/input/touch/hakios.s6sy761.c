@@ -17,9 +17,11 @@
  * which run on the S9+ with the same bus, address and supplies.
  */
 #include <kern/clock.h>
+#include <kern/sched_prim.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
+#include <os/atomic_private.h>
 #include <pexpert/pexpert.h>
 #include <sys/hakios.exynos_acpm.h>
 #include <sys/hakios.exynos_hsi2c.h>
@@ -38,6 +40,17 @@
 #define GPA1                    0x040
 #define IRQ_PIN                 0
 #define CHIP                    0x48
+/*
+ * The wakeup EINT registers of the ALIVE block (Linux's pinctrl-exynos.h: EXYNOS7_WKUP_*). gpa1 is the
+ * second bank, +0x04 in each register; one pin is four bits in CON, one bit in MASK and PEND. SPI 44 is
+ * gpa1-0 of the Exynos 9810's device tree (the gpa1 bank's first interrupt, level low).
+ */
+#define EINT_CON                0x700
+#define EINT_MASK               0x900
+#define EINT_PEND               0xa00
+#define EINT_GPA1               0x04
+#define TOUCH_SPI               44
+#define TOUCH_INTID             (32u + TOUCH_SPI)
 
 /*
  * Addresses:
@@ -87,12 +100,19 @@ static struct hakios_hsi2c bus = {
 #define EVENTS_MOST             31      /* most events read in one batch; more than this empties the queue */
 #define FINGERS                 10
 
-#define POLL_MS                 4       /* the IRQ pin is polled this often */
+#define POLL_MS                 4       /* the IRQ pin is polled this often without s6sy761_irq=1 */
 #define MINUTE_TICKS            (60 * 1000 / POLL_MS)
+#define IRQ_MINUTE_TICKS        60      /* s6sy761_irq=1: the polling thread checks once a second */
 
 static vm_offset_t alive;
 static uint32_t res_x = 4096, res_y = 4096;
 static uint32_t ldo_cycles = 1;       /* s6sy761_ldo=0: never switch the chip's supplies */
+static bool irq_wanted;               /* s6sy761_irq=1: use gpa1-0's SPI instead of polling */
+static volatile bool irq_attached;    /* the GIC's SPI 44 and the pin's EINT are set up */
+static volatile bool irq_running;     /* the IRQ thread is reading the queue */
+static uint32_t irq_pending;          /* the line has fired, the IRQ thread has not read the queue yet */
+static uint64_t irqs;                 /* interrupts taken (for the minute line and the log) */
+static thread_t irq_thread;
 static struct {
 	uint64_t events, downs;
 } stats;
@@ -102,6 +122,12 @@ static inline uint32_t
 rd(vm_offset_t base, uint32_t off)
 {
 	return *(volatile uint32_t *)(base + off);
+}
+
+static inline void
+wr(vm_offset_t base, uint32_t off, uint32_t value)
+{
+	*(volatile uint32_t *)(base + off) = value;
 }
 
 /* write a command byte and its data to the chip */
@@ -269,6 +295,119 @@ static bool
 irq_low(void)
 {
 	return ((rd(alive, GPA1 + 4) >> IRQ_PIN) & 1) == 0;
+}
+
+/* ---- the interrupt: gpa1-0, SPI 44 -------------------------------------------------------------- */
+
+/*
+ * The same line the poller looks at, as an interrupt: the pin's CON function 0xF (external interrupt),
+ * EINT_CON level low (0), EINT_PEND write-one-to-clear, EINT_MASK 1 masked. The GIC's SPI 44 is attached
+ * level-triggered (the device tree's gpa1-bank interrupts are level high; the EINT block makes the low
+ * level an assertion), the SPI masked in interrupt context and the thread below told. It reads the queue
+ * until the pin is high, clears EINT_PEND, and unmasks the SPI: if the chip still holds the line low,
+ * the level fires again at once and the next read continues. A failed attach leaves the poller in place.
+ */
+extern kern_return_t gic_v3_spi_attach(uint32_t intid, bool edge, void (*handler)(void *context, uint32_t intid),
+    void *context);
+extern void gic_v3_spi_mask(uint32_t intid);
+extern void gic_v3_spi_unmask(uint32_t intid);
+extern void gic_v3_spi_detach(uint32_t intid);
+
+static void
+irq_arrived(__unused void *context, uint32_t intid)
+{
+	gic_v3_spi_mask(intid);
+	os_atomic_store(&irq_pending, 1, release);
+	thread_wakeup((event_t)&irq_pending);
+}
+
+static void
+irq_runs(__unused void *parameter, __unused wait_result_t result)
+{
+	for (;;) {
+		for (;;) {
+			assert_wait((event_t)&irq_pending, THREAD_UNINT);
+			if (os_atomic_xchg(&irq_pending, 0, acquire) != 0) {
+				clear_wait(current_thread(), THREAD_AWAKENED);
+				break;
+			}
+			thread_block(THREAD_CONTINUE_NULL);
+		}
+		if (!irq_attached) {
+			break;
+		}
+		irq_running = true;
+		/* at most eight rounds per interrupt: a queue that stays full fires again after the unmask */
+		for (int rounds = 0; rounds < 8 && irq_low(); rounds++) {
+			read_events();
+		}
+		wr(alive, EINT_PEND + EINT_GPA1, 1u << IRQ_PIN);
+		irqs++;
+		irq_running = false;
+		if (irq_attached) {
+			gic_v3_spi_unmask(TOUCH_INTID);
+		}
+	}
+	thread_terminate(current_thread());
+}
+
+static void
+irq_pin_input(void)
+{
+	wr(alive, GPA1, rd(alive, GPA1) & ~(0xfu << (4 * IRQ_PIN)));
+}
+
+static bool
+irq_start(void)
+{
+	kern_return_t kr;
+	uint32_t con;
+
+	wr(alive, EINT_MASK + EINT_GPA1, rd(alive, EINT_MASK + EINT_GPA1) | (1u << IRQ_PIN));
+	wr(alive, EINT_PEND + EINT_GPA1, 1u << IRQ_PIN);
+	con = rd(alive, EINT_CON + EINT_GPA1) & ~(0xfu << (4 * IRQ_PIN));
+	wr(alive, EINT_CON + EINT_GPA1, con);                 /* level low */
+	wr(alive, GPA1, (rd(alive, GPA1) & ~(0xfu << (4 * IRQ_PIN))) | (0xfu << (4 * IRQ_PIN)));
+	if (kernel_thread_start_priority((thread_continue_t)irq_runs, NULL, 92, &irq_thread) != KERN_SUCCESS) {
+		say("s6sy761: no thread for the IRQ: polling\n");
+		irq_pin_input();
+		return false;
+	}
+	thread_deallocate(irq_thread);
+	irq_attached = true;
+	if ((kr = gic_v3_spi_attach(TOUCH_INTID, false, irq_arrived, NULL)) != KERN_SUCCESS) {
+		say("s6sy761: the GIC refuses SPI %u (%d)\n", TOUCH_SPI, kr);
+		irq_attached = false;
+		os_atomic_store(&irq_pending, 1, release);      /* the new thread must see why it ends */
+		thread_wakeup((event_t)&irq_pending);
+		irq_pin_input();
+		return false;
+	}
+	say("s6sy761: gpa1-0 is SPI %u (INTID %u), level low: CON %x, EINT_CON %x, MASK %x, PEND %x, PUD %x\n", TOUCH_SPI,
+	    TOUCH_INTID, rd(alive, GPA1) & 0xf, rd(alive, EINT_CON + EINT_GPA1) & 0xf,
+	    rd(alive, EINT_MASK + EINT_GPA1) & 1, rd(alive, EINT_PEND + EINT_GPA1) & 1, rd(alive, GPA1 + 8) & 3);
+	wr(alive, EINT_MASK + EINT_GPA1, rd(alive, EINT_MASK + EINT_GPA1) & ~(1u << IRQ_PIN));
+	gic_v3_spi_unmask(TOUCH_INTID);
+	return true;
+}
+
+static void
+irq_stop(void)
+{
+	if (!irq_attached) {
+		return;
+	}
+	irq_attached = false;
+	wr(alive, EINT_MASK + EINT_GPA1, rd(alive, EINT_MASK + EINT_GPA1) | (1u << IRQ_PIN));
+	gic_v3_spi_mask(TOUCH_INTID);
+	os_atomic_store(&irq_pending, 1, release);
+	thread_wakeup((event_t)&irq_pending);
+	/* the thread may be in the bus; wait for it before the SPI is detached (100 ms at most) */
+	for (int ms = 0; ms < 100 && irq_running; ms++) {
+		delay_for_interval(1, NSEC_PER_MSEC);
+	}
+	gic_v3_spi_detach(TOUCH_INTID);
+	irq_pin_input();
 }
 
 /* ---- the chip's supplies, switched off and on ---- */
@@ -439,24 +578,43 @@ touch_thread(void *arg, __unused wait_result_t wr_)
 		goto out;
 	}
 
-	say("s6sy761: step 6: watching the IRQ pin every %u ms; the coordinates are 0-%u x 0-%u\n", POLL_MS, res_x - 1,
-	    res_y - 1);
-	/* up to four rounds of reads per tick while the pin is low */
-	for (unsigned tick = 1;; tick++) {
-		for (int rounds = 0; rounds < 4 && irq_low(); rounds++) {
-			read_events();
+	if (irq_wanted && irq_start()) {
+		say("s6sy761: step 6: the IRQ pin is gpa1-0 (SPI %u, level low): the queue is read when it falls; the "
+		    "coordinates are 0-%u x 0-%u\n", TOUCH_SPI, res_x - 1, res_y - 1);
+		for (unsigned tick = 1;; tick++) {
+			delay_for_interval(1000, NSEC_PER_MSEC);
+			if (tick % IRQ_MINUTE_TICKS == 0) {
+				say("s6sy761: a minute: %llu touches, %llu events, %llu transfers, %llu failed (last %x), "
+				    "%llu IRQs\n", stats.downs, stats.events, bus.transfers, bus.errors, bus.last_error, irqs);
+			}
+			/* give up when more than half of at least 1000 transfers have failed */
+			if (bus.errors >= 1000 && bus.errors * 2 > bus.transfers) {
+				say("s6sy761: more than half of %llu transfers have failed: giving up\n", bus.transfers);
+				irq_stop();
+				all_up();       /* (no finger left down for good) */
+				break;
+			}
 		}
-		if (tick % MINUTE_TICKS == 0) {
-			say("s6sy761: a minute: %llu touches, %llu events, %llu transfers, %llu failed (last %x)\n", stats.downs,
-			    stats.events, bus.transfers, bus.errors, bus.last_error);
+	} else {
+		say("s6sy761: step 6: watching the IRQ pin every %u ms; the coordinates are 0-%u x 0-%u\n", POLL_MS, res_x - 1,
+		    res_y - 1);
+		/* up to four rounds of reads per tick while the pin is low */
+		for (unsigned tick = 1;; tick++) {
+			for (int rounds = 0; rounds < 4 && irq_low(); rounds++) {
+				read_events();
+			}
+			if (tick % MINUTE_TICKS == 0) {
+				say("s6sy761: a minute: %llu touches, %llu events, %llu transfers, %llu failed (last %x)\n",
+				    stats.downs, stats.events, bus.transfers, bus.errors, bus.last_error);
+			}
+			/* give up when more than half of at least 1000 transfers have failed */
+			if (bus.errors >= 1000 && bus.errors * 2 > bus.transfers) {
+				say("s6sy761: more than half of %llu transfers have failed: giving up\n", bus.transfers);
+				all_up();               /* (no finger left down for good) */
+				break;
+			}
+			delay_for_interval(POLL_MS, NSEC_PER_MSEC);
 		}
-		/* give up when more than half of at least 1000 transfers have failed */
-		if (bus.errors >= 1000 && bus.errors * 2 > bus.transfers) {
-			say("s6sy761: more than half of %llu transfers have failed: giving up\n", bus.transfers);
-			all_up();               /* (no finger left down for good) */
-			break;
-		}
-		delay_for_interval(POLL_MS, NSEC_PER_MSEC);
 	}
 out:
 	if (step < 6 && steps < 6) {
@@ -468,12 +626,13 @@ out:
 /*
  * Boot args: s6sy761=1 enables the driver. s6sy761_steps=N (default 6, see touch_thread()). s6sy761_ldo=0 never
  * switches the supplies. s6sy761_ipclk=MHz sets the HSI2C's input clock (default 400; the other drivers assume
- * 200). s6sy761_trace=N, s6sy761_pri=N: see above.
+ * 200). s6sy761_irq=1 takes gpa1-0 as SPI 44 instead of polling it; if it cannot be attached, the poller stays.
+ * s6sy761_trace=N, s6sy761_pri=N: see above.
  */
 void
 hakios_s6sy761_init(void)
 {
-	uint32_t enabled = 0, steps = 6;
+	uint32_t enabled = 0, steps = 6, irq = 0;
 	thread_t thread;
 
 	if (!PE_parse_boot_argn("s6sy761", &enabled, sizeof(enabled)) || enabled == 0) {
@@ -482,6 +641,8 @@ hakios_s6sy761_init(void)
 	PE_parse_boot_argn("s6sy761_steps", &steps, sizeof(steps));
 	PE_parse_boot_argn("s6sy761_ldo", &ldo_cycles, sizeof(ldo_cycles));
 	PE_parse_boot_argn("s6sy761_ipclk", &bus.ipclk_mhz, sizeof(bus.ipclk_mhz));
+	PE_parse_boot_argn("s6sy761_irq", &irq, sizeof(irq));
+	irq_wanted = irq != 0;
 	if (steps == 0 || bus.ipclk_mhz < 26 || bus.ipclk_mhz > 400) {
 		return;
 	}

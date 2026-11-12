@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 669 symbols in 20 groups; 54 are set, 45 of them drivers built in.
+# 670 symbols in 20 groups; 54 are set, 45 of them drivers built in.
 #
 
 #
@@ -468,6 +468,9 @@ CONFIG_TOUCHSCREEN=y
 
 # read by hakios.s6sy761.c (kernel)
 # CONFIG_S6SY761_IPCLK is not set
+
+# read by hakios.s6sy761.c (kernel)
+# CONFIG_S6SY761_IRQ is not set
 
 # read by hakios.s6sy761.c (kernel)
 # CONFIG_S6SY761_LDO is not set

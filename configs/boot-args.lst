@@ -409,6 +409,7 @@ root_apfs	u
 rtc_pmic	k
 s6sy761	k
 s6sy761_ipclk	k
+s6sy761_irq	k
 s6sy761_ldo	k
 s6sy761_pri	k
 s6sy761_steps	k

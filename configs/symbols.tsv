@@ -388,6 +388,7 @@ ROOT_APFS	arg	root_apfs	User space	u	init.c	the root is to be the Darwin root vo
 RTC_PMIC	arg	rtc_pmic	User space	k	hakios.s2mps18_rtc.c	read the clock at start-up (the kernel's first ask for the time of day), log it, use it when valid
 S6SY761	arg	s6sy761	Touch and buttons	k	hakios.s6sy761.c	
 S6SY761_IPCLK	arg	s6sy761_ipclk	Touch and buttons	k	hakios.s6sy761.c	
+S6SY761_IRQ	arg	s6sy761_irq	Touch and buttons	k	hakios.s6sy761.c	
 S6SY761_LDO	arg	s6sy761_ldo	Touch and buttons	k	hakios.s6sy761.c	
 S6SY761_PRI	arg	s6sy761_pri	Touch and buttons	k	hakios.s6sy761.c	
 S6SY761_STEPS	arg	s6sy761_steps	Touch and buttons	k	hakios.s6sy761.c	
