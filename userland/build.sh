@@ -115,7 +115,7 @@
 #                      MODEM=1      stage checked local MPSS firmware from ../fw-modem in system.apfs /fw.
 #                      DEVICE=NAME  with the firmware of a device's own repository, devices/NAME/firmware/
 #                                   (every file but its READMEs and SHA256SUMS), in fw/: DEVICE=starlte for the Galaxy S9's
-#                                   audio, Wi-Fi, Bluetooth and sensor hub (ABOX's calliope images, DSM ...). The vendor's
+#                                   audio, Wi-Fi, Bluetooth, sensor hub and MFC (ABOX's calliope images, DSM ...). The vendor's
 #                                   files are not in the repository, only their sums: devices/NAME/tools/fetch-firmware.sh
 #                                   makes them complete first (FIRMWARE_FROM=DIR: from a directory of your own, else the
 #                                   public sources it pins; devices/starlte/firmware/audio/README.md).

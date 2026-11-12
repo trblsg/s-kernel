@@ -10,7 +10,8 @@
  * Boot args. mfc=N runs steps 1 through N; without it nothing is touched.
  *   mfc=1  look: the domain's and the clocks' state, read only
  *   mfc=2  block: power domain, clocks and Q-channels on; the IP version and SysMMU state read
- *   mfc=3  firmware: mfc_fw.bin from the VENDOR partition (or mfc_fw_part=) into the block's memory; RISC started; SYS_INIT
+ *   mfc=3  firmware: mfc_fw.bin from fw/ of the small image, else the VENDOR partition (or mfc_fw_part=), into the block's
+ *          memory; RISC started; SYS_INIT
  *   mfc=4  self-test: a stream decoded at boot, each frame's CRC checked against ffmpeg's
  *   mfc=5  device: /dev/hakios-mfc for user space (sys/hakios.mfc.h), one client at a time
  *   mfc_zc=1        with 5: frames decoded straight into the client's IOSurfaces (property HakiosMFCFrame, set by mediaserverd's
@@ -58,6 +59,7 @@
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern boolean_t pmap_valid_page(ppnum_t);
+extern const uint8_t *hakios_image_file(const char *dir, const char *name, uint64_t *size, int *disk_out);
 
 
 /* say() output also goes to the log the boot loader keeps across a return to it; TWRP shows a run's log from there */
@@ -875,19 +877,29 @@ firmware_start(void)
 		return false;
 	}
 	/*
-	 * The storage may come up late, and hakios_partition_file remembers a failure for the rest of the run. So first wait (up to 60 s)
-	 * until the partition answers a read.
+	 * The firmware travels in fw/ of the small image when the device repository carries it (this S9's VENDOR partition is
+	 * EROFS, which this kernel does not read). Otherwise read it from the partition, which may come up late;
+	 * hakios_partition_file remembers a failure for the rest of the run, so first wait (up to 60 s) until it answers.
 	 */
-	static uint8_t probe[4096];
-	uint64_t got = 0;
-	int waited;
+	data = hakios_image_file("fw", "mfc_fw.bin", &size, NULL);
+	if (data != NULL) {
+		say("exynos_mfc: 3: mfc_fw.bin, %llu bytes, from fw/ of the small image\n", size);
+	} else {
+		static uint8_t probe[4096];
+		uint64_t got = 0;
+		int waited;
 
-	for (waited = 0; waited < 120 && hakios_ufs_read_partition(partition, 0, probe, sizeof(probe), &got) != 0; waited++) {
-		IOSleep(500);
+		for (waited = 0; waited < 120 && hakios_ufs_read_partition(partition, 0, probe, sizeof(probe), &got) != 0; waited++) {
+			IOSleep(500);
+		}
+		say("exynos_mfc: 3: the %s partition answers after %d ms more (%llu bytes)\n", partition, waited * 500, got);
+		if (hakios_partition_file(partition, "/vendor", "/firmware/mfc_fw.bin", FW_CODE, &data, &size) != 0 || data == NULL) {
+			say("exynos_mfc: 3: /firmware/mfc_fw.bin is neither in fw/ of the small image nor on the phone's %s partition: no hardware video\n", partition);
+			return false;
+		}
 	}
-	say("exynos_mfc: 3: the %s partition answers after %d ms more (%llu bytes)\n", partition, waited * 500, got);
-	if (hakios_partition_file(partition, "/vendor", "/firmware/mfc_fw.bin", FW_CODE, &data, &size) != 0 || data == NULL) {
-		say("exynos_mfc: 3: /firmware/mfc_fw.bin is not on the phone's %s partition: no hardware video\n", partition);
+	if (size == 0 || size > FW_CODE) {
+		say("exynos_mfc: 3: mfc_fw.bin is %llu bytes, not 1..%u: no hardware video\n", size, FW_CODE);
 		return false;
 	}
 	code = mfc_alloc(FW_CODE + DEV_CTX);

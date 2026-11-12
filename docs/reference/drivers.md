@@ -107,7 +107,7 @@ Every driver the kernel can be built with. `CONFIG_HAKIOS_<NAME>=y` in a defconf
 
 | Driver | Files | Requires | Boot arguments | blazer | crownlte | frankel | qemu | redwood | star2lte | starlte | |
 |---|---|---|---|---|---|---|---|---|---|---|
-| **`HAKIOS_EXYNOS_MFC`**<br>the Exynos 9810's hardware video decoder, MFC v10 (mfc=N: 1 a look, 2 the block, 3 the firmware from the phone's VENDOR partition, 4 a test stream decoded at boot and checked against ffmpeg's CRCs, 5 /dev/hakios-mfc). Off by default | `hakios.exynos_mfc.c` | `HAKIOS_EXYNOS_ACPM` | `mfc_fw_part=`, `mfc_int_khz=`, `mfc_irq=`, `mfc_mif_khz=`, `mfc_zc=` |  |  |  |  |  |  | built | |
+| **`HAKIOS_EXYNOS_MFC`**<br>the Exynos 9810's hardware video decoder, MFC v10 (mfc=N: 1 a look, 2 the block, 3 the firmware from `fw/` of the small image, else the phone's VENDOR partition, 4 a test stream decoded at boot and checked against ffmpeg's CRCs, 5 /dev/hakios-mfc). Off by default | `hakios.exynos_mfc.c` | `HAKIOS_EXYNOS_ACPM` | `mfc_fw_part=`, `mfc_int_khz=`, `mfc_irq=`, `mfc_mif_khz=`, `mfc_zc=` |  |  |  |  |  |  | built | |
 
 ## modem
 
