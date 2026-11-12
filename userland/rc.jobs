@@ -6,6 +6,9 @@
 /redwood/bin/mg_test
 # the processors: how many, and -- once the system has settled -- whether they work at the same time
 /redwood/bin/cpu_test
+# who takes the processors, every 5 s, one line in the run's log (src/cputop.c): the heat runs need the owner of
+# the 2-3 cores the cpufreq line reports; it samples until the run ends
+/redwood/bin/cputop 5 &
 # the Galaxy S9's GPU from a program (says one line and stops where there is no HakiosMali: anywhere but mali=9)
 /redwood/bin/mali_test
 /redwood/bin/vk_test
