@@ -81,6 +81,13 @@ remove_tree(const char *path)
 	}
 }
 
+/*
+ * Owners. Everything in the bootstrap and in Sileo's package is root:wheel but var/mobile (for_mobile() below), so
+ * the copy is made root:wheel whatever the image says. An image made or edited without root (a mount without owners
+ * on the builder's machine) carries the builder's user ID, or 99, "unknown", which the kernel shows to each process as
+ * that process's own: a prefix whose programs any application could rewrite, and a giveMeRoot whose set-user-ID bit
+ * names nobody.
+ */
 static int
 copy_file(const char *from, const char *to, const struct stat *st)
 {
@@ -104,7 +111,7 @@ copy_file(const char *from, const char *to, const struct stat *st)
 		}
 	}
 	/* owner first: chown takes set-user-ID off, and giveMeRoot and login live by it */
-	ok = ok && n == 0 && fchown(out, st->st_uid, st->st_gid) == 0 && fchmod(out, st->st_mode & 07777) == 0;
+	ok = ok && n == 0 && fchown(out, 0, 0) == 0 && fchmod(out, st->st_mode & 07777) == 0;
 	close(out);
 	close(in);
 	return ok;
@@ -136,7 +143,7 @@ copy_tree(const char *from, const char *to)
 			ssize_t length = readlink(f, link, sizeof(link) - 1);
 
 			link[length > 0 ? length : 0] = 0;
-			ok = length > 0 && symlink(link, t) == 0 && lchown(t, entry.st_uid, entry.st_gid) == 0;
+			ok = length > 0 && symlink(link, t) == 0 && lchown(t, 0, 0) == 0;
 		} else if (ok) {
 			ok = copy_file(f, t, &entry);
 		}
@@ -147,7 +154,75 @@ copy_tree(const char *from, const char *to)
 	}
 	closedir(dir);
 	/* last: the directory was 0700 while it was filled */
-	return ok && chown(to, st.st_uid, st.st_gid) == 0 && chmod(to, st.st_mode & 07777) == 0;
+	return ok && chown(to, 0, 0) == 0 && chmod(to, st.st_mode & 07777) == 0;
+}
+
+/* PATH and all under it root:wheel, modes as they are (chown takes the set-ID bits off: put back); how many were not */
+static int
+root_tree(const char *path)
+{
+	struct stat st;
+	DIR *dir;
+	struct dirent *de;
+	char entry[1024];
+	int n = 0;
+
+	if (lstat(path, &st) != 0) {
+		return 0;
+	}
+	if ((st.st_uid != 0 || st.st_gid != 0) && lchown(path, 0, 0) == 0) {
+		n++;
+		if ((st.st_mode & S_IFMT) != S_IFLNK) {
+			chmod(path, st.st_mode & 07777);
+		}
+	}
+	if ((st.st_mode & S_IFMT) == S_IFDIR && (dir = opendir(path)) != NULL) {
+		while ((de = readdir(dir)) != NULL) {
+			if (strcmp(de->d_name, ".") != 0 && strcmp(de->d_name, "..") != 0 && join(entry, sizeof(entry), path, de->d_name)) {
+				n += root_tree(entry);
+			}
+		}
+		closedir(dir);
+	}
+	return n;
+}
+
+/*
+ * The same for what an iOS 27 root carries for the prefix outside it (tools/ios27/fullroot/steps.d/60-sileo.sh):
+ * this program, var_sync, the five names in /bin that Sileo runs, and the image's copy of the prefix. A root built as
+ * root has them root's already and nothing is touched; one edited without root gets them made so here, by the first
+ * process that runs any of it. Only these names, and a name in /bin only if it is a link into the prefix.
+ */
+static void
+claim(const char *from)
+{
+	static const char *const paths[] = { "/usr/local/bin/jb_seed", "/usr/local/bin/var_sync", "/bin/chmod", "/bin/cp",
+		                             "/bin/mkdir", "/bin/mv", "/bin/rm",
+		                             "/usr/local/libexec/scion-sileo-selftest.sh" /* a test root's */ };
+	struct stat st;
+	char link[64];
+	int n = 0;
+
+	for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+		if (lstat(paths[i], &st) != 0 || (st.st_uid == 0 && st.st_gid == 0)) {
+			continue;
+		}
+		if ((st.st_mode & S_IFMT) == S_IFLNK) {
+			ssize_t length = readlink(paths[i], link, sizeof(link) - 1);
+
+			link[length > 0 ? length : 0] = 0;
+			if (strncmp(link, "/var/jb/", 8) == 0 && lchown(paths[i], 0, 0) == 0) {
+				n++;
+			}
+		} else if ((st.st_mode & S_IFMT) == S_IFREG && lchown(paths[i], 0, 0) == 0) {
+			chmod(paths[i], 0755);
+			n++;
+		}
+	}
+	n += root_tree(from);
+	if (n > 0) {
+		printf("jb_seed: %d paths of the image made root's (it was made without owners)\n", n);
+	}
 }
 
 /* The user's corner of the prefix: applications run as mobile and keep their data there (Sileo's database). */
@@ -342,6 +417,7 @@ main(void)
 		return 0;
 	}
 	setpriority(PRIO_PROCESS, 0, 10);
+	claim(from);
 	if (strcmp(fs.f_fstypename, "hfs") == 0) {
 		(void)reseed_if_changed(from);
 		if (stat(PREFIX MARK, &st) != 0 && !seed(from)) {
