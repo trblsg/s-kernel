@@ -1937,7 +1937,7 @@ g3d_idle_gate(void)
 	off = (rd(pmu, PMU_G3D_STATUS) & G3D_ON) != G3D_ON;
 	if (off) {
 		g3d_awake = false;
-		g3d_off_at = now;
+		g3d_off_at = mach_absolute_time();
 		say("mali: g3d_sleep: the G3D is off; the first job will power it on\n");
 	} else {
 		g3d_awake = true;
