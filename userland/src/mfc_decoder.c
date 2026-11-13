@@ -330,6 +330,16 @@ decode_unit(struct mfc_decoder *d, const uint8_t *stream, size_t bytes, uint32_t
 			return why == EBADMSG ? ERR_BAD_DATA : ERR_MALFUNCTION;
 		}
 		d->first_done = true;
+		/*
+		 * The block writes the frame itself, by DMA: no lock of the pixel buffer has raised the surface's seed, as
+		 * the copy path's CVPixelBufferLockBaseAddress does, so whoever caches the pixels (eagl's textures, a shadow
+		 * of the frame) would go on showing the frame the surface held before -- the picture stands still. A write
+		 * lock raises it; taken after the ioctl, when the frame is in memory.
+		 */
+		if (surface != NULL && !request.finished) {
+			IOSurfaceLock(surface, 0, NULL);
+			IOSurfaceUnlock(surface, 0, NULL);
+		}
 		if (finished != NULL) {
 			*finished = request.finished != 0;
 		}
