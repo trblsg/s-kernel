@@ -185,6 +185,8 @@ FBTRACE	arg	fbtrace	GPU and display	k	MiniIOMobileFramebuffer.cpp	log the first 
 FBWIDTH	arg	fbwidth	GPU and display	ku	MiniIOMobileFramebuffer.cpp,inject_sb.c	
 FP_S9	arg	fp_s9	User space	k	hakios.exynos_iris.c	
 FPS_LOG	arg	fps_log	GPU and display	k	MiniIOMobileFramebuffer.cpp,hakios.ufs.c	a line a second while frames come ("fps: ...", in the loader's log and the kernel's): swaps
+G3D_SLEEP	arg	g3d_sleep	GPU and display	k	hakios.mali.c	after `g3d_sleep_ms` with no GPU job and no frame, power the G3D domain off and put BUCK6 back as it was found; the first job powers it on again
+G3D_SLEEP_MS	arg	g3d_sleep_ms	GPU and display	k	hakios.mali.c	the screen-off grace (500..60000, default 3000)
 GAMUT	arg	gamut	Loader	l	loader.c	
 GL	arg	gl	User space	u	inject.c,inject_sb.c	not even with a GPU; gl=1: also without one, by Mesa's software driver (slow; for working on eagl.c in QEMU)
 GLBLIT	arg	glblit	GPU and display	u	eagl.c	the surface's memory, as before

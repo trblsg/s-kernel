@@ -194,6 +194,8 @@ fbtrace	k
 fbwidth	ku
 fp_s9	k
 fps_log	k
+g3d_sleep	k
+g3d_sleep_ms	k
 gamut	l
 gl	u
 glblit	u

@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 670 symbols in 20 groups; 54 are set, 45 of them drivers built in.
+# 672 symbols in 20 groups; 54 are set, 45 of them drivers built in.
 #
 
 #
@@ -442,7 +442,7 @@ CONFIG_UFS=2
 # CONFIG_VIRTIO_BLK_RW is not set
 
 #
-# Touch and buttons (18)
+# Touch and buttons (19)
 #
 
 # the touch screen, and the power and volume buttons
@@ -503,7 +503,7 @@ CONFIG_TOUCHSCREEN=y
 # CONFIG_VIRTIO_INPUT is not set
 
 #
-# GPU and display (110)
+# GPU and display (112)
 #
 
 # rendering on Adreno (an image built with GL=1; the GPU's firmware from your phone) [needs fw-gpu/ from the phone]
@@ -628,6 +628,12 @@ CONFIG_GPU=y
 
 # a line a second while frames come ("fps: ...", in the loader's log and the kernel's): swaps
 # CONFIG_FPS_LOG is not set
+
+# after `g3d_sleep_ms` with no GPU job and no frame, power the G3D domain off and put BUCK6 back as it was found; the ...
+# CONFIG_G3D_SLEEP is not set
+
+# the screen-off grace (500..60000, default 3000)
+# CONFIG_G3D_SLEEP_MS is not set
 
 # the surface's memory, as before
 # CONFIG_GLBLIT is not set
