@@ -372,6 +372,7 @@ static struct { bool active; uint32_t rsc; uint32_t len; } pep[NPEPS];
 static char *ring;
 static uint32_t ring_head, ring_tail, ring_dropped;
 static uint64_t n_resets, n_setups, n_stalls, n_in, n_out, n_events, last_phy_say;
+static bool host_first_said;            /* the first bulk OUT bytes have been logged */
 static int usb_speed_v;
 static char usb_state[24] = "off";
 
@@ -1075,6 +1076,22 @@ bulk_complete(int p)
 		pump_in();
 	} else if (p == PEP_OUT) {
 		n_out += done;
+		/*
+		 * The first bytes the host sends are logged in hex, once: a console that takes no command is then told apart
+		 * from a host that never writes (wrong COM port, flow control, another program holding it), and the line ending
+		 * shows whether the terminal sends CR or LF.
+		 */
+		if (done != 0 && !host_first_said) {
+			char hex[3 * 16 + 1];
+			uint32_t n = done < 16 ? done : 16, k = 0;
+
+			for (uint32_t i = 0; i < n; i++) {
+				k += (uint32_t)snprintf(hex + k, sizeof(hex) - k, "%02x ", dma[OUT_OFF + i]);
+			}
+			hex[k != 0 ? k - 1 : 0] = 0;
+			say("usb: the host's first %u bytes (of %u): %s\n", n, done, hex);
+			host_first_said = true;
+		}
 		for (uint32_t i = 0; i < done; i++) {
 			if (usbacm_line_feed(&cline, dma[OUT_OFF + i])) {
 				console(cline.line);
