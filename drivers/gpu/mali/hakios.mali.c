@@ -1093,6 +1093,23 @@ step_dtzpc(void)
 }
 
 /*
+ * The panfrost interface that Mesa's panfrost needs in order to draw. HakiosMali (IOKit) answers it, and this is the
+ * hardware half: parameters, GPU addresses, pages entered into and taken out of the tables, and jobs. Every client
+ * shares address space 0, and one job runs at a time. Overlapping jobs and per-client address spaces are not done.
+ *
+ * These are here, before the power-on below, because that power-on and step_serve() take them: the G3D's power must not
+ * change under a job or an MMU update.
+ */
+static LCK_GRP_DECLARE(mali_lock_group, "hakios-mali");
+static LCK_MTX_DECLARE(mali_lock, &mali_lock_group);
+/*
+ * Held while a job runs, and by anything that must not change the address space under one (an UPDATE when entries are
+ * taken out). Taken before mali_lock, never after. mali_lock is not held for the length of a job, because making a
+ * buffer used to wait for the running job to finish (2.5 ms a buffer).
+ */
+static LCK_MTX_DECLARE(mali_job_lock, &mali_lock_group);
+
+/*
  * g3d_sleep=1, the way back: step 2's supply/clock/power, the low-power PMU settings put back, step 3's DTZPC restore
  * and bus dividers, then the parts of steps 5 and 6 a power cycle clears (a reset, no coherency, the L2/shader/tiler
  * cores) and address space 0. Called with mali_job_lock held, so no job and no MMU update can be in flight. False: the
@@ -1319,20 +1336,6 @@ static const struct {
 	{ "HakiosMali", step_serve },
 };
 #define STEPS ((uint32_t)(sizeof(steps) / sizeof(steps[0])))
-
-/*
- * The panfrost interface that Mesa's panfrost needs in order to draw. HakiosMali (IOKit) answers it, and this is the
- * hardware half: parameters, GPU addresses, pages entered into and taken out of the tables, and jobs. Every client
- * shares address space 0, and one job runs at a time. Overlapping jobs and per-client address spaces are not done.
- */
-static LCK_GRP_DECLARE(mali_lock_group, "hakios-mali");
-static LCK_MTX_DECLARE(mali_lock, &mali_lock_group);
-/*
- * Held while a job runs, and by anything that must not change the address space under one (an UPDATE when entries are
- * taken out). Taken before mali_lock, never after. mali_lock is not held for the length of a job, because making a
- * buffer used to wait for the running job to finish (2.5 ms a buffer).
- */
-static LCK_MTX_DECLARE(mali_job_lock, &mali_lock_group);
 
 /*
  * Waits for a job without keeping a core busy: a short poll, then sleeps of mali_nap_us at a time. The wait used to
