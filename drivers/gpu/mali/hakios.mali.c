@@ -22,6 +22,8 @@
  *   g3d_sleep=1         after `g3d_sleep_ms` with no GPU job and no frame, power the G3D domain off and put BUCK6
  *                       back as it was found; the first job powers it on again. Needs mali_gov=1. Opt-in.
  *   g3d_sleep_ms=MS     the screen-off grace (500..60000, default 3000).
+ *                       Both can also be changed while the system runs: sysctl kern.hakios.g3d_sleep=0|1 and
+ *                       kern.hakios.g3d_sleep_ms=MS (the USB console), so one image is both halves of an A/B.
  *   mali_nap_us=US      poll interval for a job still running after its first 200 us, clamped to 10..1000 (default 50).
  *
  * The user client is opened by backboardd, which does not run as root. Nothing here or in hakios.mali.cpp needs root.
@@ -154,6 +156,7 @@ static bool g3d_awake;
 static uint64_t g3d_last_busy;          /* the end of the last job, by mach_absolute_time */
 static uint64_t g3d_off_at;
 static bool g3d_ensure_on(void);        /* (mali_job_lock held: the G3D back on after g3d_sleep) */
+static bool g3d_power_on(void);         /* (mali_job_lock held: the power-on steps, without the g3d_sleep test) */
 static void g3d_idle_gate(void);
 static void gov_rebase(void);
 static uint32_t pll_mhz(void);
@@ -1092,18 +1095,16 @@ step_dtzpc(void)
 /*
  * g3d_sleep=1, the way back: step 2's supply/clock/power, the low-power PMU settings put back, step 3's DTZPC restore
  * and bus dividers, then the parts of steps 5 and 6 a power cycle clears (a reset, no coherency, the L2/shader/tiler
- * cores) and address space 0. Called with mali_job_lock held by the job worker before a submission, so no job and no MMU
- * update can be in flight. False: the GPU is left as it came, and the next caller tries again.
+ * cores) and address space 0. Called with mali_job_lock held, so no job and no MMU update can be in flight. False: the
+ * GPU is left as it came, and the next caller tries again. This is the work alone: g3d_ensure_on() checks the flags, and
+ * kern.hakios.g3d_sleep=0 uses it to bring the domain back when no job may come to do it.
  */
 static bool
-g3d_ensure_on(void)
+g3d_power_on(void)
 {
 	const char *which = NULL;
 	uint64_t now;
 
-	if (g3d_awake || !g3d_sleep) {
-		return true;
-	}
 	say("mali: g3d_sleep: the first work after the power went: the G3D is coming back on\n");
 	if (!step_power()) {
 		g3d_lpm_restore();
@@ -1140,6 +1141,16 @@ g3d_ensure_on(void)
 		g3d_off_at = 0;
 	}
 	return true;
+}
+
+/* Called with mali_job_lock held by the job worker before a submission or by an MMU update. */
+static bool
+g3d_ensure_on(void)
+{
+	if (g3d_awake || !g3d_sleep) {
+		return true;
+	}
+	return g3d_power_on();
 }
 
 /* 4: which GPU, and what it has. */
@@ -1928,7 +1939,7 @@ g3d_idle_gate(void)
 		return;
 	}
 	lck_mtx_lock(&mali_job_lock);
-	if (!g3d_awake) {
+	if (!g3d_sleep || !g3d_awake) {
 		lck_mtx_unlock(&mali_job_lock);
 		return;
 	}
@@ -1945,6 +1956,77 @@ g3d_idle_gate(void)
 	}
 	lck_mtx_unlock(&mali_job_lock);
 }
+
+/*
+ * kern.hakios.g3d_sleep: g3d_sleep=, changed while the system runs (the USB console's
+ * "sysctl kern.hakios.g3d_sleep=1"), so one boot image can be both halves of the screen-off A/B. Turning it off while
+ * the G3D is off powers the domain back on here: no job may come to do it while the screen is off. If that power-on
+ * fails, the gate is left on and the next job tries again (clearing the gate with the domain off would submit to an off
+ * GPU). Turning it on wakes the job worker: at 260 MHz with no jobs it sleeps without a timeout, and that thread's idle
+ * tick is what runs the gate.
+ */
+static int
+g3d_sleep_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	int value = (int)g3d_sleep, error;
+
+	error = sysctl_io_number(req, value, sizeof(value), &value, NULL);
+	if (error != 0 || req->newptr == 0) {
+		return error;
+	}
+	if (value != 0 && value != 1) {
+		return EINVAL;
+	}
+	if (value != 0) {
+		if (!mali_gov || !gov_on) {
+			say("mali: g3d_sleep=1 needs mali_gov=1 and a working governor (mali_gov=%u, gov_on=%u): not changed\n",
+			    mali_gov, (uint32_t)(gov_on ? 1 : 0));
+			return ENODEV;
+		}
+		lck_mtx_lock(&mali_queue_lock);
+		g3d_sleep = 1;
+		wakeup((caddr_t)&mali_queue_count);
+		lck_mtx_unlock(&mali_queue_lock);
+		say("mali: g3d_sleep=1: the gate is on after %u ms with no job and no frame (kern.hakios.g3d_sleep)\n",
+		    g3d_sleep_ms);
+		return 0;
+	}
+	lck_mtx_lock(&mali_job_lock);
+	if (g3d_sleep && !g3d_awake && !g3d_power_on()) {
+		lck_mtx_unlock(&mali_job_lock);
+		say("mali: g3d_sleep=0: the G3D did not come back: the gate stays on\n");
+		return EIO;
+	}
+	g3d_sleep = 0;
+	lck_mtx_unlock(&mali_job_lock);
+	say("mali: g3d_sleep=0: the gate is off (kern.hakios.g3d_sleep)\n");
+	return 0;
+}
+SYSCTL_PROC(_kern_hakios, OID_AUTO, g3d_sleep, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
+    g3d_sleep_sysctl, "I", "the G3D and BUCK6 off after g3d_sleep_ms with no job and no frame (g3d_sleep=; 0 or 1)");
+
+/*
+ * kern.hakios.g3d_sleep_ms: g3d_sleep_ms=, the grace, changed while the system runs (the USB console's
+ * "sysctl kern.hakios.g3d_sleep_ms=10000"). The job worker reads it at every idle tick, so the next tick uses it.
+ */
+static int
+g3d_sleep_ms_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	int value = (int)g3d_sleep_ms, error;
+
+	error = sysctl_io_number(req, value, sizeof(value), &value, NULL);
+	if (error != 0 || req->newptr == 0) {
+		return error;
+	}
+	if (value < 500 || value > 60000) {
+		return EINVAL;
+	}
+	g3d_sleep_ms = (uint32_t)value;
+	say("mali: g3d_sleep_ms=%d: the gate waits that long with no job and no frame (kern.hakios.g3d_sleep_ms)\n", value);
+	return 0;
+}
+SYSCTL_PROC(_kern_hakios, OID_AUTO, g3d_sleep_ms, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
+    g3d_sleep_ms_sysctl, "I", "the screen-off grace for g3d_sleep=, ms (500..60000)");
 
 int hakios_mali_second(uint64_t *busy_ns, uint32_t *jobs, uint64_t *queued_ns, uint32_t *mhz, uint32_t *switches,
     int32_t *g3d_mc);
