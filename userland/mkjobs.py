@@ -227,6 +227,14 @@ DENY = ('watchdog', 'CommCenter', 'wifi', 'WiFi', 'bluetooth', 'BTServer', 'soft
         # waits for; it now runs through a session.)
         'homed', 'routined', 'duetexpertd', 'com.apple.dmd', 'syncdefaultsd', 'photoanalysisd', 'avconferenced')
 
+# vmd is the voicemail daemon. Something in the phone stack starts it on demand, and with
+# CommCenter denied (above) it spins asking for com.apple.commcenter.coretelephony.xpc: 102% of a
+# core and a launchd failed-lookup line each time, screen off included. VMD=0 in the environment
+# (the installer's boot arg vmd=0; see the s9-installer workflow) leaves it out of the image.
+# ALLOW=voicemail still lets it through, for an A/B against the same image without this line.
+if os.environ.get('VMD') == '0':
+    DENY += ('voicemail',)
+
 # ALLOW="word ..." in the environment lets jobs through that DENY would stop: for trying one out
 DENY = tuple(word for word in DENY if word not in os.environ.get('ALLOW', '').split())
 
