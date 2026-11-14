@@ -154,6 +154,7 @@
 
 extern void loader_log_line(const char *line);
 extern bool ml_cpu_idle_time(int cpu_id, uint64_t *idle);
+extern uint32_t hakios_cpu_exit_mask;  /* GenericARMPE.cpp: the cores sleep_cores= is taking off */
 extern int kernel_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
 /* the TMU driver's last reading of a zone (0 BIG, 1 LITTLE), millidegrees; -273000 before one or without the driver */
 extern int32_t hakios_exynos_tmu_zone_mc(unsigned zone);
@@ -777,6 +778,17 @@ measure(uint64_t span)
 		uint64_t idle = 0, busy;
 		struct cluster *c;
 
+		/*
+		 * A core sleep_cores= is taking off (GenericARMPE.cpp) stops its recount where it was: counting it as busy
+		 * would read 100% all the time it is off, and the cluster would be asked for its top rate with no core
+		 * running. Keep its last idle count, so the window it comes back in does not look busy either.
+		 */
+		if (i < 32 && (hakios_cpu_exit_mask & (1u << i)) != 0) {
+			if (ml_cpu_idle_time((int)i, &idle)) {
+				idle_before[i] = idle;
+			}
+			continue;
+		}
 		if (!ml_cpu_idle_time((int)i, &idle)) {
 			continue;
 		}

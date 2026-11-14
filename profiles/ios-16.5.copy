@@ -1,0 +1,8 @@
+# The files of this repository that the ios-16.5 kernel tree takes at build time (xnu/fork.sh, the profile's fork_copy):
+# "SOURCE TARGET", SOURCE from the repository root, TARGET in the tree.
+#
+# GenericARMPE.cpp: sleep_cores=1 on the S9. The fork's file asks the CPU topology for CLUSTER_TYPE_P, but the loader's
+# device tree does not name a cluster type: every core is CLUSTER_TYPE_SMP, so sleep_cores=1 chose none and the M3s
+# stayed online (the 13 November run: cpufreq_gov still said "big ... 4 online"). The copy also prints the display and
+# park/unpark lines with printf, which reaches the serial console; the fork's IOLog lines do not (disable_iolog_serial_output).
+xnu/files/GenericARMPE.cpp iokit/Kernel/GenericARMPE.cpp

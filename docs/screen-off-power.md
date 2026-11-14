@@ -1,6 +1,11 @@
 # Screen-off power on the Galaxy S9
 
-Status: **built, not yet run on a phone** (7 November). Everything here is behind boot-args that are off by default.
+Status: built; first run with the screen off on 13 November 2026 (kernel `gea3e2419`). It found `sleep_cores=1` a
+no-op on the S9: the loader's `/cpus` nodes have no `cluster-type`, so the fork's `sleepCoreWanted()` (which took only
+`CLUSTER_TYPE_P`) chose no core, and all four M3s stayed online. `xnu/files/GenericARMPE.cpp`, copied over the fork's
+file by `profiles/ios-16.5.copy`, now falls back to `small-core`/`l2_access_penalty`; the cpufreq governor skips a
+core whose bit is in `hakios_cpu_exit_mask`, so an off core is not counted as 100% busy. Everything here is behind
+boot-args that are off by default.
 
 ## What happens today when the screen goes off
 
@@ -23,7 +28,7 @@ Status: **built, not yet run on a phone** (7 November). Everything here is behin
 |---|---|---|
 | (none) | | every change of the display power request is logged: `GenericARMPE: the display off (iOS's power request)` |
 | `panel_sleep=1` | off | with `panel=1`: screen off sends display-off (28) and sleep-in (10) between the level-1 key, as Samsung's display-off and exit sequences do; screen on sends sleep-out (11), the last brightness again, display-on (29). The supplies stay on, so the panel keeps what the boot loader set it to (DSC, PPS, TE): whether it all survives a sleep-in is the first thing the phone run shows |
-| `sleep_cores=1` | off | `sleep_cores_after=` seconds (10) after the screen went off, the performance cores are taken off with `processor_exit()` (each ends in PSCI `CPU_OFF`; with all four off the firmware may power the cluster down); at screen-on they are started again with `processor_start()` (PSCI `CPU_ON`, the boot's path). `sleep_cores=2`: the efficiency cores too. Never the boot processor, never the loader's core (`core0=1`) |
+| `sleep_cores=1` | off | `sleep_cores_after=` seconds (10) after the screen went off, the performance cores are taken off with `processor_exit()` (each ends in PSCI `CPU_OFF`; with all four off the firmware may power the cluster down); at screen-on they are started again with `processor_start()` (PSCI `CPU_ON`, the boot's path). The performance cores are `CLUSTER_TYPE_P`, or, on a tree with no `cluster-type` (the S9's), the ones not marked `small-core` (`l2_access_penalty`). `sleep_cores=2`: every core but the boot processor and the loader's. Never the boot processor, never the loader's core (`core0=1`) |
 
 Kernel pieces of `sleep_cores=` (patch 1517 for Apple's `cpu_common.c` and `cpu.c`; our own files for the rest): `ml_cpu_can_exit()` (`osfmk/arm/cpu_common.c`) allows exactly the
 cores whose bit GenericARMPE has set in `hakios_cpu_exit_mask` (without `sleep_cores=` it stays 0 and `processor_exit()`
