@@ -6,3 +6,13 @@
 # stayed online (the 13 November run: cpufreq_gov still said "big ... 4 online"). The copy also logs the display and
 # park/unpark lines through hakios_say(), the loader's log: printf from this file does not reach the serial console.
 xnu/files/GenericARMPE.cpp iokit/Kernel/GenericARMPE.cpp
+
+# The ninth run (14 November): all four M3s answered CPU_ON with 0 and only cpu 3's "stage 1" ever appeared;
+# unpark() still said "started again" after 5.1 s, the exit mask was cleared, and the governor's measuring
+# thread bound to the dead core and stopped. The three copies below are the fork's files at the pinned commit
+# with the start's failure made to reach processor_startup() (which returns the processor to PROCESSOR_OFF_LINE
+# instead of leaving it in PROCESSOR_START) and the firmware's answers logged: AFFINITY_INFO before a restart,
+# the last stage and AFFINITY_INFO after the 5 s wait, and a CPU_OFF that returns.
+xnu/files/cpu.c osfmk/arm64/cpu.c
+xnu/files/processor.c osfmk/kern/processor.c
+xnu/files/psci_smp.c osfmk/arm64/psci_smp.c

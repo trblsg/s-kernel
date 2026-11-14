@@ -131,10 +131,22 @@ GenericARMCPU::park(void)
 	return processor_exit(machProcessor);
 }
 
+/*
+ * The core is started again only if it is running when processor_start() returns: with the fork's
+ * cpu_start(), the scheduler's PROCESSOR_START is not evidence, and a measuring thread bound to a
+ * core that never came would never run again (the ninth run: the governor stopped at the wake).
+ * On failure the caller (sleepCoresWork()) keeps gParked and hakios_cpu_exit_mask set, so nothing
+ * binds to it.
+ */
 kern_return_t
 GenericARMCPU::unpark(void)
 {
-	return processor_start(machProcessor);
+	kern_return_t kr = processor_start(machProcessor);
+
+	if (kr == KERN_SUCCESS && getCPUState() != kIOCPUStateRunning) {
+		return KERN_FAILURE;
+	}
+	return kr;
 }
 
 /* On the processor itself, with its interrupts off, when it joins (or rejoins) the scheduler. */
