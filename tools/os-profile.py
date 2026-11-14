@@ -40,6 +40,8 @@ def read(name):
     for line in open(path, encoding="utf-8"):
         if line.startswith("\t"):
             key, _, value = line.strip().partition(" ")
+            if key.startswith("#"):      # a comment indented like a key (the file's top comments need no tab)
+                continue
             if key not in KEYS | OPTIONAL:
                 sys.exit("os-profile: %s: unknown key %s" % (path, key))
             fields[key] = value.strip()
