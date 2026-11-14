@@ -212,6 +212,7 @@ extern "C" bool psci_smp_cpu_is_loaders(int cpu);
 extern "C" uint32_t hakios_cpu_exit_mask;       /* osfmk/arm/cpu_common.c: the cores ml_cpu_can_exit() lets go */
 extern "C" uint32_t gic_v3_spi_move(int from_cpu, int to_cpu);  /* osfmk/arm64/gic_v3_irq.c: its devices' interrupts */
 extern "C" void hakios_display_power(int on);
+extern "C" int hakios_say(const char * format, ...) __printflike(1, 2);  /* bsd/dev/hakios.platform.c: the loader's log */
 
 static GenericARMCPU ** gCPUList;               /* GenericARMPE::start()'s cpus[], by cpu number */
 static uint32_t gPanelSleep, gSleepCores, gSleepCoresAfter = 10;
@@ -278,7 +279,7 @@ sleepCoresWork(thread_call_param_t, thread_call_param_t)
 				__atomic_fetch_and(&hakios_cpu_exit_mask, ~(1u << number), __ATOMIC_RELAXED);
 			}
 			absolutetime_to_nanoseconds(mach_absolute_time() - t0, &t0);
-			printf("GenericARMPE: sleep_cores: cpu %u %s (%d) in %llu us, %u of its interrupts to cpu %d first; "
+			hakios_say("GenericARMPE: sleep_cores: cpu %u %s (%d) in %llu us, %u of its interrupts to cpu %d first; "
 			    "%u processors running\n", number, kr == KERN_SUCCESS ? "taken off" : "NOT taken off", kr, t0 / 1000, moved,
 			    master_cpu, processor_avail_count);
 		}
@@ -289,13 +290,17 @@ sleepCoresWork(thread_call_param_t, thread_call_param_t)
 				continue;
 			}
 			t0 = mach_absolute_time();
-			__atomic_fetch_and(&hakios_cpu_exit_mask, ~(1u << number), __ATOMIC_RELAXED);
 			kern_return_t kr = gCPUList[number]->unpark();
 			if (kr == KERN_SUCCESS) {
+				/*
+				 * Only now is the core the kernel's again: until the bit is cleared, the governor
+				 * (hakios.exynos_cpufreq.c) does not bind its measuring thread to it.
+				 */
 				gParked &= ~(1u << number);
+				__atomic_fetch_and(&hakios_cpu_exit_mask, ~(1u << number), __ATOMIC_RELAXED);
 			}
 			absolutetime_to_nanoseconds(mach_absolute_time() - t0, &t0);
-			printf("GenericARMPE: sleep_cores: cpu %u %s (%d) in %llu us; %u processors running\n", number,
+			hakios_say("GenericARMPE: sleep_cores: cpu %u %s (%d) in %llu us; %u processors running\n", number,
 			    kr == KERN_SUCCESS ? "started again" : "NOT started again", kr, t0 / 1000, processor_avail_count);
 		}
 	}
@@ -310,13 +315,13 @@ hakios_display_power(int on)
 		return;
 	}
 	gDisplayOn = on;
-	printf("GenericARMPE: the display %s (iOS's power request)%s%s\n", on ? "on" : "off",
+	hakios_say("GenericARMPE: the display %s (iOS's power request)%s%s\n", on ? "on" : "off",
 	    gPanelSleep ? "; panel_sleep=1" : "", gSleepCores ? "; sleep_cores=" : "");
 	if (gPanelSleep) {
 		int error = hakios_s6e3ha8_power(on);
 
 		if (error != 0) {
-			printf("GenericARMPE: panel_sleep: the panel says %d\n", error);
+			hakios_say("GenericARMPE: panel_sleep: the panel says %d\n", error);
 		}
 	}
 	if (gSleepCoresCall != NULL) {
@@ -341,7 +346,7 @@ screenPowerInit(void)
 	if (gSleepCores != 0 && ml_get_cpu_count() > 1) {
 		gSleepCoresCall = thread_call_allocate_with_options(sleepCoresWork, NULL, THREAD_CALL_PRIORITY_KERNEL,
 		    THREAD_CALL_OPTIONS_ONCE);
-		printf("GenericARMPE: sleep_cores=%u: %s taken off %u s after the screen goes off\n", gSleepCores,
+		hakios_say("GenericARMPE: sleep_cores=%u: %s taken off %u s after the screen goes off\n", gSleepCores,
 		    gSleepCores >= 2 ? "every core but the boot processor (and the loader's)" : "the performance cores",
 		    gSleepCoresAfter);
 	}

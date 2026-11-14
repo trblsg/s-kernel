@@ -721,7 +721,8 @@ set_rate(struct cluster *c, uint32_t khz, uint32_t max)
 
 /*
  * The rate a core of the cluster really runs at, in MHz: this thread moved to the first of its cores the scheduler has
- * (one that has been idle: a core not yet the kernel's has not), and a chain of 32 dependent additions run SPIN_LOOPS
+ * and sleep_cores= has not taken off (one that has been idle: a core not yet the kernel's has not), and a chain of 32
+ * dependent additions run SPIN_LOOPS
  * times with interrupts off -- one addition a cycle on both the A55 and the M3, the loop's own subtraction and branch
  * beside them -- timed with mach_absolute_time. 0 when there is no such core. Back on any core afterwards.
  */
@@ -736,6 +737,14 @@ measure_mhz(const struct cluster *c)
 	int cpu = -1;
 
 	for (unsigned int i = 0; i < topology->num_cpus && i < MAX_CPUS; i++) {
+		/*
+		 * A core sleep_cores= has taken off (GenericARMPE.cpp) must not be measured: this thread would bind to it
+		 * and never be run again, so the governor itself would stop. With every core of the cluster off there is
+		 * nothing to measure, and 0 says so (the caller keeps the rate it has).
+		 */
+		if (i < 32 && (hakios_cpu_exit_mask & (1u << i)) != 0) {
+			continue;
+		}
 		if (((topology->cpus[i].phys_id >> 8) & 0xff) == c->affinity && ever_idle_cpu(i)) {
 			cpu = (int)topology->cpus[i].cpu_id;
 			break;
