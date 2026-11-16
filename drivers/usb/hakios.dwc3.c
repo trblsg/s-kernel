@@ -311,7 +311,15 @@ SYSCTL_DECL(_kern_hakios);
 #define IN_OFF                  0x4000u
 #define IN_CHUNK                16384u
 
-#define RING_SIZE               (1024u * 1024u)        /* the log on its way out; a power of two */
+/*
+ * The log on its way out: what the host has not read yet, including everything written while the cable
+ * is out. A power of two. Four megabytes, not one: the screen-off runs unplug the cable for 40-60
+ * minutes, and the ring is the only record (pstore keeps 16 KB). The measured volume is 21 KB a
+ * minute with fps_log=1 and 7 KB a minute with console_quiet=1, which drops launchd's log and the
+ * daemons' stderr (bsd/dev/arm/km.c); a 1 MB ring wrapped inside the hour and the drop counter threw
+ * away the newest bytes, which is the end of the run (e603ac85 lost 169 KB that way, 38c18fa9 1.9 MB).
+ */
+#define RING_SIZE               (4u * 1024u * 1024u)    /* the log on its way out; a power of two */
 
 struct trb {
 	uint32_t bpl, bph, size, ctrl;
