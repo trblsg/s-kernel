@@ -1,0 +1,11 @@
+# Single-word patches of the iOS 27.0.1 (24A446, iPhone12,1) shared cache that the S9 build needs, for cache-pipeline.sh step 5
+# (tools/ios27/s9/prepare-root-inputs.sh copies this to $IOS27_PRIVATE/patches.txt after checking every EXPECT word against YOUR
+# stock cache). One line each: unslid address, the word expected there, the new word, a note. cachepatch.py refuses a word that
+# is not the expected one, so a cache of another build is never patched blindly. These are numbers read from the builder's own
+# restore image (as userland/src/sbca.c's are); no Apple code is in this file. Why each exists: docs/ios27/SPEED.md (Settings),
+# docs/ios27/NIGHT.md (kbd, QuartzCore), docs/ios27/TEXT-DATA.md (Core Image), docs/ios27/INSTALL-S9.md.
+0x1ab5bc514 d503237f d65f03c0 SystemConfiguration: the wait-for-IOKit-to-quiesce block returns at once (Settings hung in it)
+0x1aa75d000 d503237f d65f03c0 SafariCore: WBSSetUpAccessToAppDataContainerWithIdentifier returns at once (kbd crashed on first use)
+0x18441a8bc 360002b4 14000015 QuartzCore: render_for_time never takes the 0.1 s (10 Hz) update clamp
+0x1c5a7f0fc 52800044 52800024 PosterFoundation: the poster viability dictionary asks for one resource value, not two (PosterBoard)
+0x1a5c2ef9c 94916b69 1400000e CoreImage: a default CIContext without Metal is the software context, not nil (Settings symbol icons)

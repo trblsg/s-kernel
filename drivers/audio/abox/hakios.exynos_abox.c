@@ -55,6 +55,8 @@
  *   abox_vol=V         RDMA0's VOL_FACTOR [23:0] (none: 0x800000 if it reads 0, else left)
  *   abox_bclk_on=1     ABOX never gates UAIF1's BCLK (QCHANNEL_DISABLE bit 3), as Samsung does for UAIF0 while it plays
  *   abox_gain=N        eighths of a dB of gain before the speakers' guard, 0 to 96 (0)
+ *   abox_hpf=N         the guard's high-pass corner: 200 (the default), 150 or 120 Hz; lower lets more of the bass through
+ *   abox_bass=N        a low shelf at 250 Hz, +N dB (0 to 6; 0): the speakers' weakest range lifted, inside the guard's limits
  *   abox_dvfs=KHZ      ACPM's AUD DVFS domain (index 9) set to this before step 3 (none: left as found, only read)
  *   abox_sbank=BYTES   RDMA0's sample bank in SPUS (step 6), a multiple of 16 up to 16368 (512, set only when it reads 0;
  *                      given, it is set whatever it reads; 0: left as read)
@@ -357,7 +359,8 @@ static bool area_kept;                  /* RDMA0 did not say it stopped: the mem
 
 static const struct hakios_abox_amp *volatile amp_hook;
 static const struct hakios_abox_amp *amp_running;      /* the one started, which is the one stopped */
-static bool amp_given_up, amp_none_said;
+static unsigned amp_failures;           /* starts that failed this run (amps_start) */
+static bool amp_given_up, amp_none_said, amp_waited;
 
 void
 hakios_abox_set_amp(const struct hakios_abox_amp *amp)
@@ -375,6 +378,18 @@ amps_start(void)
 	if (amp_running != NULL || amp_given_up) {
 		return;
 	}
+	if ((amp == NULL || amp->start == NULL) && !amp_waited) {
+		/*
+		 * The amplifiers' driver may register a moment after the first sound: it is waited for, up to a second, once in
+		 * a run. Not at every sound: on a machine or a configuration where no such driver ever registers, each start
+		 * would otherwise hold the stream's thread for that second (this is called again at the next sound).
+		 */
+		amp_waited = true;
+		for (int wait = 0; wait < 100 && (amp_hook == NULL || amp_hook->start == NULL); wait++) {
+			delay_for_interval(10, NSEC_PER_MSEC);
+		}
+		amp = amp_hook;
+	}
 	if (amp == NULL || amp->start == NULL) {
 		/* (looked for again the next time: a driver may register later) */
 		if (!amp_none_said) {
@@ -387,8 +402,11 @@ amps_start(void)
 	    HAKIOS_ABOX_SLOT_BITS, HAKIOS_ABOX_CHANNELS);
 	error = amp->start(HAKIOS_ABOX_RATE, HAKIOS_ABOX_SLOT_BITS, HAKIOS_ABOX_CHANNELS);
 	if (error != 0) {
-		say("abox: %u: %s did not start (%d): not asked again in this run\n", step, amp->name, error);
-		amp_given_up = true;
+		/* (an amplifier that did not come on may the next time: three tries in a run, then no more) */
+		amp_failures++;
+		amp_given_up = amp_failures >= 3;
+		say("abox: %u: %s did not start (%d): %s\n", step, amp->name, error,
+		    amp_given_up ? "the third time: not asked again in this run" : "asked again at the next sound");
 		return;
 	}
 	amp_running = amp;
@@ -1118,6 +1136,7 @@ static void follow_headphones(void);
 static volatile bool hp_on;                     /* iOS's sound goes to UAIF0 (the codec, the headphones), not to UAIF1 */
 static uint32_t mic_for_ios;                    /* abox_mic: /dev/hakios-mic, fed through WDMA1 while iOS listens */
 static uint32_t boot_tone;                      /* abox_tone: with abox=8, step 7's tone at boot too */
+static uint32_t hpf_hz = 200, bass_db;         /* abox_hpf, abox_bass: the guard's tone (hakios_guard_tone) */
 
 static bool
 stream_start(void)
@@ -1128,6 +1147,9 @@ stream_start(void)
 		return false;
 	}
 	hakios_guard_configure(true, gain);
+	hakios_guard_tone(hpf_hz, bass_db);
+	say("abox: the guard: high-pass at %u Hz (abox_hpf), bass shelf +%u dB at 250 Hz (abox_bass), %u.%03u dB of gain (abox_gain)\n",
+	    hakios_guard_hpf_hz(), bass_db > 6 ? 6 : bass_db, gain / 8, gain % 8 * 125);
 	hakios_guard_attenuation(0);            /* the amplifiers taken at Android's loudest: the most careful */
 	hakios_guard_monitor(0);
 	for (uint32_t p = 0; p < PERIODS; p++) {
@@ -1995,6 +2017,8 @@ hakios_exynos_abox_init(void)
 	PE_parse_boot_argn("abox_vol", &vol, sizeof(vol));
 	PE_parse_boot_argn("abox_bclk_on", &bclk_on, sizeof(bclk_on));
 	PE_parse_boot_argn("abox_gain", &gain, sizeof(gain));
+	PE_parse_boot_argn("abox_hpf", &hpf_hz, sizeof(hpf_hz));
+	PE_parse_boot_argn("abox_bass", &bass_db, sizeof(bass_db));
 	PE_parse_boot_argn("abox_dvfs", &dvfs_khz, sizeof(dvfs_khz));
 	gain = gain > HAKIOS_GUARD_MAX_GAIN ? HAKIOS_GUARD_MAX_GAIN : gain;
 	sbank_given = PE_parse_boot_argn("abox_sbank", &sbank_bytes, sizeof(sbank_bytes));

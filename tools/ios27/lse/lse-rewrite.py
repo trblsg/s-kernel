@@ -36,8 +36,12 @@ Modes:
   lse-rewrite.py verify CACHE_MAIN --log FILE   re-decode every logged site, thunk and body against the expected words
   lse-rewrite.py restore CACHE_MAIN --log FILE  put every original word back (the stubs stay as unused bytes)
 Files are modified in place (copy them first).
+
+TEXTDATA_SKIP=skip.npy (textdata-guard.py map; docs/ios27/TEXT-DATA.md): the words of the skip map are data, not
+instructions. A candidate among them is left as it is (no thunk, no body), counted as data_left and logged as
+"SITE WORD D".
 """
-import argparse, glob, struct, sys
+import argparse, glob, os, struct, sys
 import numpy as np
 
 # ---------------------------------------------------------------------------------------------------
@@ -535,11 +539,37 @@ class Bodies:
         return a, words
 
 
-def rewrite_section(words, addr, pool, write_at, stats, log, dry, bodies=None, far=False):
-    """words: uint32 view of a section at addr. Rewrites LSE sites."""
+_TD = None
+
+
+def textdata_idx(addr, n):
+    """TEXTDATA_SKIP=skip.npy (sorted uint64 addresses, made by textdata-guard.py map): the indexes of the words of the
+    n-word section at addr that are data and must be left alone; None when the variable is not set"""
+    global _TD
+    if _TD is None:
+        p = os.environ.get('TEXTDATA_SKIP')
+        _TD = np.load(p) if p else False
+    if _TD is False:
+        return None
+    lo, hi = np.searchsorted(_TD, np.uint64(addr)), np.searchsorted(_TD, np.uint64(addr + 4 * n))
+    return ((_TD[lo:hi] - np.uint64(addr)) // np.uint64(4)).astype(np.int64)
+
+
+def rewrite_section(words, addr, pool, write_at, stats, log, dry, bodies=None, far=False, keep=None):
+    """words: uint32 view of a section at addr. Rewrites LSE sites. keep: indexes of words that are data (textdata_idx):
+    candidates among them stay as they are, are counted in stats['data_left'] and logged as "SITE WORD D"."""
     w = words
     m = ((w & M_CAS[0]) == M_CAS[1]) | (((w & M_CASP[0]) == M_CASP[1]) & (((w >> 10) & 31) == 31)) | \
         (((w & M_ATOM[0]) == M_ATOM[1]) & ((((w >> 15) & 1) == 0) | (((w >> 12) & 7) == 0)))
+    if keep is not None and len(keep):
+        for i in keep[m[keep]]:
+            word = int(w[i])
+            if stub_words(word) is None and stub_words(word, redzone=0, sp_extra=THUNK_SP, ret=True, dual=DUAL) is None:
+                continue                  # no encoding the pass can rewrite (counted as left_* below): stays as it is either way
+            m[i] = False
+            stats['data_left'] = stats.get('data_left', 0) + 1
+            if log:
+                log.write(f'{addr + 4 * int(i):#x} {word:08x} D\n')
     for i in np.flatnonzero(m):
         word = int(w[i])
         site = addr + 4 * int(i)
@@ -637,6 +667,8 @@ def main():
             if line.startswith('#'):
                 continue
             f = line.split()
+            if len(f) == 3 and f[2] == 'D':             # data word left alone: nothing to verify or restore
+                continue
             site, word, typ, at = int(f[0], 16), int(f[1], 16), f[2], int(f[3], 16)
             cur = rd(site, 1)[0]
             if a.mode == 'restore':
@@ -702,7 +734,7 @@ def main():
                 if v is None:
                     continue
                 w = v.view(np.uint32) if not a.dry_run else np.array(v).view(np.uint32)
-                rewrite_section(w, addr, pool, write_at, stats, log, a.dry_run, bodies, far=prio(path) < len(HOT))
+                rewrite_section(w, addr, pool, write_at, stats, log, a.dry_run, bodies, keep=textdata_idx(addr, len(w)), far=prio(path) < len(HOT))
             nimg += 1
             if log:
                 miss = stats.get('no_room', 0) - before.get('no_room', 0)
@@ -711,6 +743,8 @@ def main():
             for mm in c.files.values():
                 mm.flush()
         print(f'{nimg} images', stats, f'pool left {pool.left()}')
+        if os.environ.get('TEXTDATA_SKIP'):
+            print(f'textdata: {stats.get("data_left", 0)} words left alone')
         return
 
     # macho (thin arm64/arm64e, test binaries): stubs into the zero-filled pool symbol

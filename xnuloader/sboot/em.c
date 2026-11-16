@@ -20,7 +20,7 @@
 #include "hw.h"
 #include "ui.h"
 #include "fbtext.h"
-#include "../fdt.h"
+#include "fdt.h"
 #include "mmu.h"
 #include "ufs.h"
 #include "store.h"

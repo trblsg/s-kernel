@@ -23,7 +23,7 @@ jobs:
       - name: Shell scripts parse
         run: |
           git ls-files '*.sh' xl | xargs -r -n1 bash -n
-      - name: Scripts that start with #! are executable in git (a Windows commit with a pathspec records 644)
+      - name: "Scripts that start with #! are executable in git (a Windows commit with a pathspec records 644)"
         run: |
           bad=$(git ls-files -s | awk '$1=="100644"{print $4}' | while read -r f; do
             case "$f" in *.sh|*.py|xl) head -c2 "$f" | grep -q '^#!' && echo "$f";; esac; done)
@@ -38,7 +38,7 @@ jobs:
           # (This replaces two lines of the form `! git ls-files | grep ...`: bash -e does not stop on
           # a negated pipeline, so the first of them could never fail, and a committed screenshot passed.)
           python3 tools/provenance-check.py
-      - name: The provenance check itself: what it lets through and what it stops
+      - name: "The provenance check itself: what it lets through and what it stops"
         run: python3 tools/provenance-test.py
       - name: A run sends only the soc_* values that differ from the kernel's defaults
         run: bash tools/soc-only-changes-test.sh

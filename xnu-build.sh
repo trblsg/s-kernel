@@ -1,6 +1,7 @@
 #!/bin/bash
 # Build XNU for redwood on Linux. Extra make args are passed through.
 source "$(dirname "${BASH_SOURCE[0]}")/xnu-env.sh"
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$XNU_SRC" || exit 1
 # The Wi-Fi driver's object is linked into the kernel when it is there; make does not see it
 # change, so the linked kernel is thrown away when it has. Which object is the radio driver's:
@@ -8,11 +9,32 @@ cd "$XNU_SRC" || exit 1
 # (tools/mk-brcmfmac.sh) for the Galaxy S9's BCM4361 (CONFIG_HAKIOS_BRCMFMAC); none for a kernel
 # with neither. The object's calls are answered by hakios.lx.c.
 LX=$XNUDEPS/build/ath11k/out/ath11k.o
+LX_BUILD=$ROOT/tools/mk-ath11k.sh
 if [ -f config/MASTER.hakios ] && ! grep -q '^#  HAKIOS_DRIVERS = \[.* hakios_wifi ' config/MASTER.hakios; then
 	LX=/nonexistent
+	LX_BUILD=
 	if grep -q '^#  HAKIOS_DRIVERS = \[.* hakios_brcmfmac ' config/MASTER.hakios; then
 		LX=$XNUDEPS/build/brcmfmac/out/brcmfmac.o
+		LX_BUILD=$ROOT/tools/mk-brcmfmac.sh
 	fi
+fi
+if [ -n "$LX_BUILD" ] && [ ! -f "$LX" ]; then
+	echo "xnu-build: building required external Wi-Fi object: $LX"
+	"$LX_BUILD" || exit 1
+fi
+if [ -n "$LX_BUILD" ] && [ ! -f "$LX" ]; then
+	echo "xnu-build: required Wi-Fi object was not produced: $LX" >&2
+	exit 1
+fi
+# The Galaxy S9+'s camera driver (bsd/dev/hakios.exynos_camera_star2.c) includes two headers that are made, not kept in
+# the repository: the sensors' register tables with their RAM patches, from Samsung's GPL headers (tools/mk-star2-setfiles.sh
+# says where they come from and why). A star2lte kernel with the camera driver gets them here, beside the driver.
+if grep -q '^#define HAKIOS_DEVICE_IS_STAR2LTE' bsd/dev/hakios.drivers.h 2>/dev/null &&
+    grep -q '^#define HAKIOS_DRIVERS_LIST .*[" ]exynos_camera[" ]' bsd/dev/hakios.drivers.h; then
+	"$ROOT/tools/mk-star2-setfiles.sh" || exit 1
+	for h in hakios.s5k2l3_setfiles.h hakios.s5k3m3_setfiles.h; do
+		cmp -s "$XNUDEPS/build/star2-camera/$h" "bsd/dev/$h" || cp "$XNUDEPS/build/star2-camera/$h" "bsd/dev/$h"
+	done
 fi
 STAMP=BUILD/obj/hakios-objects
 # (macOS: its own stat, not tools/macos-bin/stat, which is GNU stat for the scripts written for it and may be absent)
@@ -32,6 +54,9 @@ if [ -d BUILD/obj ] && [ "$(cat $STAMP 2>/dev/null)" != "$now" ]; then
 	rm -f BUILD/obj/*/mach.*.unstripped
 	echo "$now" > $STAMP
 fi
+# The kernel's makefiles pass -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang: clang 15 and older need
+# it, clang 16 and later (Xcode's today) refuse it. The compiler is asked once; xnu-deps/host/bin/xnu-clang keeps or drops it.
+export XNU_CLANG_TAVI_FLAG=$(/usr/bin/clang -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang -fsyntax-only -x c /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
 exec make HAKIOS_OBJECTS="$LX" SDKROOT=iphoneos ARCH_CONFIGS=ARM64 MACHINE_CONFIGS=${MACHINE:-$(_scion_profile machine BCM2837)} KERNEL_CONFIGS=DEVELOPMENT \
   ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=${XNU_ARCH_STRING:-arm64} BUILD_WERROR=0 BUILD_LTO=0 DO_CTFMERGE=0 \
   HOST_CC="$HOSTCC" HOST_FLEX=flex HOST_BISON=bison HOST_GM4=m4 CC=xnu-clang CXX=xnu-clang++ LOGCOLORS=n $XNU_MAKE_ARGS "$@"

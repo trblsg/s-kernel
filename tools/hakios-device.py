@@ -319,7 +319,18 @@ def cmd_new(a):
     if a.soc != "none" and not os.path.isfile(soc_fragment):
         soc_fragment = os.path.join(socs[a.soc], "configs", a.soc + ".config")   # or the one in socs/, which all share
     soc_has = hc.parse(soc_fragment)[0] if a.soc != "none" else {}
-    left_out = [d.symbol for d in hc.DRIVERS if not d.name.startswith("VIRTIO_") and soc_has.get(d.symbol) != "y"]
+    kept = {d.name for d in hc.DRIVERS if d.name.startswith("VIRTIO_") or soc_has.get(d.symbol) == "y"}
+    # ... and what a kept driver cannot be built without stays too (QEMU's network device is seen through the station layer:
+    # VIRTIO_NET requires WIFI_STA), or the new device's own defconfig would not pass `check`
+    by_name = {d.name: d for d in hc.DRIVERS}
+    wanted = list(kept)
+    while wanted:
+        for required in by_name[wanted.pop()].requires:
+            required = required.partition("=")[0]
+            if required in by_name and required not in kept:
+                kept.add(required)
+                wanted.append(required)
+    left_out = [d.symbol for d in hc.DRIVERS if d.name not in kept]
     os.makedirs(os.path.join(top, "configs"), exist_ok=True)
     with open(os.path.join(top, "device.conf"), "w", encoding="utf-8") as f:
         f.write("# devices/%s/device.conf: what this device repository is (docs/porting/repositories.md has every word).\n\n"

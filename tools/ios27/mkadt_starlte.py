@@ -285,6 +285,11 @@ if __name__ == '__main__':
     parser.add_argument('--artwork-subtype', type=int,
                         help='with --ipad7: /product artwork-device-subtype (iPhone 8 Plus: 2208)')
     args = parser.parse_args()
+    # The base tree takes its /product node from a donor ADT. Without the iPhone X one mkadt.py names (not in git: Apple's),
+    # the donor given here serves: its /product replaces the base's anyway (ipad7/iphone11/iphone7_identity).
+    donor = args.iphone11 or args.ipad7 or args.iphone7
+    if donor and not os.path.exists(mkadt.D22AP_ADT):
+        mkadt.D22AP_ADT = str(donor)
     canvas_override = tuple(int(v) for v in args.canvas.lower().split('x')) if args.canvas else None
     dram = (BANK2_BASE, min(args.bank2_mb << 20, BANK2_SIZE)) if args.bank2 else (DRAM_BASE, DRAM_SIZE)
     assert dram[0] + dram[1] <= PRAM_BASE or dram[0] >= PRAM_BASE + PRAM_SIZE, 'XNU RAM overlaps /pram'

@@ -11,7 +11,7 @@
  * (kernel slot); the initrd is only a fallback.
  */
 #include <stdint.h>
-#include "../fdt.h"
+#include "fdt.h"
 #include "fbtext.h"
 #include "menu.h"
 #include "hw.h"

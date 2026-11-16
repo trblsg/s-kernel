@@ -1,0 +1,27 @@
+# wallpaper-picker.ui : Settings -> Wallpaper -> Add New Wallpaper -> first suggestion -> Add -> Set as Wallpaper Pair, with pictures.
+# Coordinates are thousandths of the screen and are GUESSES for iOS 27's layout on the 828x1792 canvas: run it once, look at the
+# pictures, correct the taps. Start from a booted phone (lock screen or home).
+home; wait 1.5; home; wait 2
+shot 01-home
+# Settings: spotlight is the layout-independent way in: pull down, type is not possible (no keyboard verb), so tap the icon instead.
+# Phone 2's r3 root had Settings on the home page at about (333, 475); the bp root's home differs: fix after the first picture.
+tap 333 475; wait 4
+shot 02-settings
+swipe 500 800 500 250 400; wait 1.5
+shot 03-settings-scrolled
+# "Wallpaper" row (guess): tap it, then look
+tap 300 560; wait 3
+shot 04-wallpaper
+# "+ Add New Wallpaper" (guess: the blue button under the previews)
+tap 500 640; wait 4
+shot 05-picker
+tap 250 330; wait 4
+shot 06-chosen
+# "Add" at the top right
+tap 900 70; wait 3
+shot 07-add
+# "Set as Wallpaper Pair"
+tap 500 880; wait 4
+shot 08-set
+home; wait 2
+shot 09-home-after

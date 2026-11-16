@@ -1,9 +1,11 @@
 ABL_FDT	arg	abl_fdt	Storage and APFS	k	hakios.ufshc.lga.h	
 ABOX	arg	abox	Audio and battery	k	hakios.exynos_abox.c	the first N of ABOX's eight steps (1 only looks, 7 plays a tone, 8 serves iOS); 0 or none: left alone
+ABOX_BASS	arg	abox_bass	Audio and battery	k	hakios.exynos_abox.c	a low shelf at 250 Hz, +N dB (0 to 6; 0): the speakers' weakest range lifted, inside the guard's limits
 ABOX_BCLK_ON	arg	abox_bclk_on	Audio and battery	k	hakios.exynos_abox.c	ABOX never gates UAIF1's BCLK (QCHANNEL_DISABLE bit 3), as Samsung does for UAIF0 while it plays
 ABOX_BURST	arg	abox_burst	Audio and battery	k	hakios.exynos_abox.c	RDMA0's CTRL0 BURST_LEN [22:19], 1 to 15 (8, set only when it reads 0; given, set anyway; 0: left)
 ABOX_DVFS	arg	abox_dvfs	Audio and battery	k	hakios.exynos_abox.c	ACPM's AUD DVFS domain (index 9) set to this before step 3 (none: left as found, only read)
 ABOX_GAIN	arg	abox_gain	Audio and battery	k	hakios.exynos_abox.c	eighths of a dB of gain before the speakers' guard, 0 to 96 (0)
+ABOX_HPF	arg	abox_hpf	Audio and battery	k	hakios.exynos_abox.c	the guard's high-pass corner: 200 (the default), 150 or 120 Hz; lower lets more of the bass through
 ABOX_MIC	arg	abox_mic	Audio and battery	k	hakios.exynos_abox.c	with abox=8: /dev/hakios-mic, the codec's main microphone for iOS, recorded through UAIF0 and WDMA1
 ABOX_MMU_OFF	arg	abox_mmu_off	Audio and battery	k	hakios.exynos_abox.c	refuse a translating SysMMU instead of switching it off (1: CTRL 0, as found needed on the S9)
 ABOX_RDMA_CTRL0	arg	abox_rdma_ctrl0	Audio and battery	k	hakios.exynos_abox.c	bits of RDMA0's CTRL0 besides ENABLE, to try a format there (none: as it reads after reset)
@@ -51,6 +53,7 @@ APFS_PAR	arg	apfs_par	Storage and APFS	k	apfs_vfsops.c	at most N threads on one 
 APFS_ROOT_C	arg	apfs_root_c	Storage and APFS	k	apfs_vfsops.c	
 APFS_ROOT_V	arg	apfs_root_v	Storage and APFS	k	apfs_vfsops.c	
 APFS_ROUND	arg	apfs_round	Storage and APFS	k	apfs_vfsops.c	
+APFS_SHARED_SPACE	arg	apfs_shared_space	CPU, memory and boot	k	(patch)	
 APFS_SKIP	arg	apfs_skip	Storage and APFS	k	hakios.apfs_check.c	directories not to go into, as paths inside the volume, comma separated
 APFS_SPARSE	arg	apfs_sparse	Storage and APFS	k	hakios.sparse.c	
 APFS_STORE_LEN	arg	apfs_store_len	Storage and APFS	k	hakios.apfs_check.c	how many bytes of payload (default 40000)
@@ -93,12 +96,28 @@ BT_TTY	arg	bt_tty	User space	k	hakios.bcm4361_bt.c
 BT_UART_MHZ	arg	bt_uart_mhz	User space	k	hakios.bcm4361_bt.c	UART_BT's clock in MHz, if bt=1 shows the divider or mux not as Android leaves them (default 200)
 BT_VENDOR	arg	bt_vendor	User space	k	hakios.bcm4361_bt.c	never read the patch from the phone's VENDOR partition (default: read it there with ufs=2)
 BT_VENDOR_PART	arg	bt_vendor_part	User space	k	hakios.bcm4361_bt.c	the partition the patch is read from (default VENDOR)
+BUS_LOG	arg	bus_log	User space	k	hakios.exynos_acpm.c	do not log the APM's tables at boot (default: one line per domain, read only)
+BUS_MASK	arg	bus_mask	User space	k	hakios.exynos_acpm.c	
+BUS_MAX	arg	bus_max	User space	k	hakios.exynos_acpm.c	MIF, INT and DISP to their top at boot, kept there (re-asked every 10 s, cheap)
+BUS_MIF_DELAY	arg	bus_mif_delay	User space	k	hakios.exynos_acpm.c	
 BUTTONS	arg	buttons	Touch and buttons	k	hakios.buttons.c	
 BUTTONS_STEPS	arg	buttons_steps	Touch and buttons	k	hakios.buttons.c	
 CA_METALLIB	arg	ca_metallib	User space	u	inject.c	
 CA_PROF	arg	ca_prof	User space	u	HakiosMetalCA.m	
 CA_VBL	arg	ca_vbl	User space	u	inject.c	CoreAnimation's frame clock from the display driver's refresh notifications
 CAENV	arg	caenv	User space	u	inject.c,inject_sb.c	CoreAnimation's switches here as in the window server (inject.c), set before QuartzCore reads them
+CAM_AF	arg	cam_af	User space	k	hakios.ak737x.c	
+CAM_AF_COARSE	arg	cam_af_coarse	User space	k	hakios.ak737x.c	
+CAM_AF_DROP	arg	cam_af_drop	User space	k	hakios.ak737x.c	the sharpness, in per cent of what the search found, below which it is made again (60)
+CAM_AF_FINE	arg	cam_af_fine	User space	k	hakios.ak737x.c	
+CAM_AF_HI	arg	cam_af_hi	User space	k	hakios.ak737x.c	
+CAM_AF_LO	arg	cam_af_lo	User space	k	hakios.ak737x.c	
+CAM_AF_POS	arg	cam_af_pos	User space	k	hakios.ak737x.c	stage 2's position, and where the lens is put first at 3 and 4 (0-511; 120 unless said)
+CAM_AF_SETTLE	arg	cam_af_settle	User space	k	hakios.ak737x.c	frames let go by after a move before the measurement (1-6, 2 unless said)
+CAM_AF_WALK	arg	cam_af_walk	User space	k	hakios.ak737x.c	stage 2: the table once, by itself
+CAM_AF_WIN	arg	cam_af_win	User space	k	hakios.ak737x.c	the window's side in pixels (64-512, 384 unless said)
+CAM_AF_X	arg	cam_af_x	User space	k	hakios.ak737x.c	
+CAM_AF_Y	arg	cam_af_y	User space	k	hakios.ak737x.c	
 CAM_AFTER	arg	cam_after	Cameras	k	hakios.camera.c	
 CAM_FAKE	arg	cam_fake	Cameras	k	hakios.camera.c	
 CAM_FAKE_FPS	arg	cam_fake_fps	Cameras	k	hakios.camera.c	
@@ -107,22 +126,42 @@ CAM_GAIN	arg	cam_gain	Cameras	k	hakios.camera.c
 CAM_KEEP_MB	arg	cam_keep_mb	Cameras	k	hakios.camera.c	
 CAM_MODE	arg	cam_mode	Cameras	k	hakios.camera.c	
 CAM_PATTERN	arg	cam_pattern	Cameras	k	hakios.camera.c	
-CAM_S9	arg	cam_s9	Cameras	k	hakios.exynos_camera.c,hakios.exynos_iris.c,hakios.s2mpb02_torch.c	the front camera's first N steps: 1 a look, 2 the sensor's ID, 3 the ISPPRE domain and CSIS1
-CAM_S9_ADDR	hex	cam_s9_addr	Cameras	k	hakios.exynos_camera.c	the sensor's 7-bit I2C address, if not 0x35 (the device tree's) and not found by the scan
-CAM_S9_AE	arg	cam_s9_ae	Cameras	k	hakios.exynos_camera.c	no auto-exposure: the frames as cam_s9_exp and cam_s9_gain have them (default 1: on)
-CAM_S9_AE_FRAMES	arg	cam_s9_ae_frames	Cameras	k	hakios.exynos_camera.c	
-CAM_S9_ALWAYS	arg	cam_s9_always	Cameras	k	hakios.exynos_camera.c	with 7: the stream from the boot to the run's end, wanted or not (the old behaviour, for debugging)
-CAM_S9_BAYER	arg	cam_s9_bayer	Cameras	k	hakios.exynos_camera.c	camshot's Bayer order: 0 RGGB, 1 GRBG (the default, the sensor's), 2 GBRG, 3 BGGR
-CAM_S9_DGAIN	arg	cam_s9_dgain	Cameras	k	hakios.exynos_camera.c	the most digital gain the auto-exposure may use, 0x100 being 1x (default 0x400, at most 0x1000)
-CAM_S9_EXP	arg	cam_s9_exp	Cameras	k	hakios.exynos_camera.c	the first exposure of step 5's frame in lines of 26.3 us (default 1000, at most 1262)
-CAM_S9_GAIN	arg	cam_s9_gain	Cameras	k	hakios.exynos_camera.c	the first analog gain of step 5's frame, 0x20 being 1x (default 0x40, at most 0x200)
-CAM_S9_IPCLK	arg	cam_s9_ipclk	Cameras	k	hakios.exynos_camera.c	
-CAM_S9_ISPDIV	arg	cam_s9_ispdiv	Cameras	k	hakios.exynos_camera.c	CLKCMU_ISPPRE_BUS (CSIS1's and its WDMA's clock) = SHARED1_DIV4, 466 MHz, / (D + 1); default
-CAM_S9_MMU_PROBE	arg	cam_s9_mmu_probe	Cameras	k	hakios.exynos_camera.c	
-CAM_S9_PACK12	arg	cam_s9_pack12	Cameras	k	hakios.exynos_camera.c	the WDMA's PACK12 layout rather than RAW10 as it comes (the BSP sets PACK12 for its V4L2 SBGGR10 buffers)
-CAM_S9_PROBE	arg	cam_s9_probe	Cameras	k	hakios.exynos_camera.c	the risky reads too, for the log: CMU_ISPPRE's whole Q-channel sweep with each DBG_NFO (+0x4000)
-CAM_S9_SAT	arg	cam_s9_sat	Cameras	k	hakios.exynos_camera.c	camshot's colour saturation in per cent (default 140; 100: none; at most 300)
-CAM_S9_STRIDE	arg	cam_s9_stride	Cameras	k	hakios.exynos_camera.c	camshot's bytes a line of the frame (default 3264: the WDMA's RAW10 is a pixel in 16 bits)
+CAM_REAR	arg	cam_rear	User space	k	hakios.exynos_camera_rear.c	the camera of this run (cam_s9=N's steps, camshot, the stream) is the rear one
+CAM_REAR_ADDR	hex	cam_rear_addr	User space	k	hakios.exynos_camera_rear.c	the sensor's 7-bit I2C address, if not 0x10 (the device tree's)
+CAM_REAR_AP	arg	cam_rear_ap	User space	k	hakios.exynos_camera_rear.c	the iris: 1 a look, 15 or 24 put at F1.5 or F2.4 at each power-up (0 or none: left where it rests)
+CAM_REAR_OIS	arg	cam_rear_ois	User space	k	hakios.exynos_camera_rear.c	
+CAM_REAR_OIS_MODE	arg	cam_rear_ois_mode	User space	k	hakios.exynos_camera_rear.c	with 2: 0 still (the default), 1 video, 5 centring
+CAM_S9	arg	cam_s9	Cameras	k	hakios.exynos_camera.c,hakios.exynos_camera_star2.c,hakios.exynos_iris.c,hakios.s2mpb02_torch.c	the front camera's first N steps: 1 a look, 2 the sensor's ID, 3 the ISPPRE domain and CSIS1
+CAM_S9_ADDR	hex	cam_s9_addr	Cameras	k	hakios.exynos_camera.c,hakios.exynos_camera_star2.c	the sensor's 7-bit I2C address, if not 0x35 (the device tree's) and not found by the scan
+CAM_S9_AE	arg	cam_s9_ae	Cameras	k	hakios.exynos_camera.c,hakios.exynos_camera_star2.c	no auto-exposure: the frames as cam_s9_exp and cam_s9_gain have them (default 1: on)
+CAM_S9_AE_FRAMES	arg	cam_s9_ae_frames	Cameras	k	hakios.exynos_camera.c,hakios.exynos_camera_star2.c	
+CAM_S9_AF	arg	cam_s9_af	User space	k	hakios.exynos_camera_star2.c	no focus (the lens left where its spring holds it)
+CAM_S9_ALWAYS	arg	cam_s9_always	Cameras	k	hakios.exynos_camera.c,hakios.exynos_camera_star2.c	with 7: the stream from the boot to the run's end, wanted or not (the old behaviour, for debugging)
+CAM_S9_BAYER	arg	cam_s9_bayer	Cameras	k	hakios.exynos_camera.c,hakios.exynos_camera_star2.c	camshot's Bayer order: 0 RGGB, 1 GRBG (the default, the sensor's), 2 GBRG, 3 BGGR
+CAM_S9_CACHED	arg	cam_s9_cached	Cameras	k	hakios.exynos_camera.c	read() copies the frame through a second, cached mapping of the ring (see cam_cached below)
+CAM_S9_DGAIN	arg	cam_s9_dgain	Cameras	k	hakios.exynos_camera.c,hakios.exynos_camera_star2.c	the most digital gain the auto-exposure may use, 0x100 being 1x (default 0x400, at most 0x1000)
+CAM_S9_EXP	arg	cam_s9_exp	Cameras	k	hakios.exynos_camera.c,hakios.exynos_camera_star2.c	the first exposure of step 5's frame in lines of 26.3 us (default 1000, at most 1262)
+CAM_S9_GAIN	arg	cam_s9_gain	Cameras	k	hakios.exynos_camera.c,hakios.exynos_camera_star2.c	the first analog gain of step 5's frame, 0x20 being 1x (default 0x40, at most 0x200)
+CAM_S9_IPCLK	arg	cam_s9_ipclk	Cameras	k	hakios.exynos_camera.c,hakios.exynos_camera_star2.c	
+CAM_S9_ISPDIV	arg	cam_s9_ispdiv	Cameras	k	hakios.exynos_camera.c,hakios.exynos_camera_star2.c	CLKCMU_ISPPRE_BUS (CSIS1's and its WDMA's clock) = SHARED1_DIV4, 466 MHz, / (D + 1); default
+CAM_S9_MMU_PROBE	arg	cam_s9_mmu_probe	Cameras	k	hakios.exynos_camera.c,hakios.exynos_camera_star2.c	
+CAM_S9_PACK12	arg	cam_s9_pack12	Cameras	k	hakios.exynos_camera.c,hakios.exynos_camera_star2.c	the WDMA's PACK12 layout rather than RAW10 as it comes (the BSP sets PACK12 for its V4L2 SBGGR10 buffers)
+CAM_S9_PROBE	arg	cam_s9_probe	Cameras	k	hakios.exynos_camera.c,hakios.exynos_camera_star2.c	the risky reads too, for the log: CMU_ISPPRE's whole Q-channel sweep with each DBG_NFO (+0x4000)
+CAM_S9_REAR_BAYER	arg	cam_s9_rear_bayer	User space	k	hakios.exynos_camera_star2.c	the rear frames' Bayer order (default 1, GRBG: fimc-is-cis-2l3.c's GR_BG with 0x0101 = 3)
+CAM_S9_REAR_EXP	arg	cam_s9_rear_exp	User space	k	hakios.exynos_camera_star2.c	the rear stream's first exposure in lines of 815 ns (default 30000, about 24 ms; its gain starts at 4x)
+CAM_S9_REAR_ISPDIV	arg	cam_s9_rear_ispdiv	User space	k	hakios.exynos_camera_star2.c	the ISPPRE bus clock for the rear stream, 466 MHz / (D + 1); default 0, Android's rate
+CAM_S9_REAR_TP	arg	cam_s9_rear_tp	User space	k	hakios.exynos_camera_star2.c	the rear sensor's MIPI CCS test pattern (0x0600: 1 solid colour, 2 colour bars) for its picture
+CAM_S9_REAR_TURN	arg	cam_s9_rear_turn	User space	k	hakios.exynos_camera_star2.c	the rear frames turned half round for user space (default 0: the sensor flips itself)
+CAM_S9_SAT	arg	cam_s9_sat	Cameras	k	hakios.exynos_camera.c,hakios.exynos_camera_star2.c	camshot's colour saturation in per cent (default 140; 100: none; at most 300)
+CAM_S9_SELFREAD	arg	cam_s9_selfread	Cameras	k	hakios.exynos_camera.c	
+CAM_S9_SELFREAD_FOCUS	arg	cam_s9_selfread_focus	Cameras	k	hakios.exynos_camera.c	the reader also writes HAKIOS_CAMERA_FOCUS, as a capture device would (cam_af=4): after its
+CAM_S9_SELFREAD_X	arg	cam_s9_selfread_x	Cameras	k	hakios.exynos_camera.c	
+CAM_S9_SELFREAD_Y	arg	cam_s9_selfread_y	Cameras	k	hakios.exynos_camera.c	
+CAM_S9_STRIDE	arg	cam_s9_stride	Cameras	k	hakios.exynos_camera.c,hakios.exynos_camera_star2.c	camshot's bytes a line of the frame (default 3264: the WDMA's RAW10 is a pixel in 16 bits)
+CAM_S9_TELE_BAYER	arg	cam_s9_tele_bayer	User space	k	hakios.exynos_camera_star2.c	the tele frames' Bayer order (default 1, GRBG: fimc-is-cis-3m3.c's GR_BG)
+CAM_S9_TELE_EXP	arg	cam_s9_tele_exp	User space	k	hakios.exynos_camera_star2.c	the tele stream's first exposure in lines of 20.3 us (default 1000; its gain starts at 4x)
+CAM_S9_TELE_TP	arg	cam_s9_tele_tp	User space	k	hakios.exynos_camera_star2.c	the tele sensor's MIPI CCS test pattern (0x0600: 1 solid colour, 2 colour bars) for its picture
+CAM_S9_TELE_TURN	arg	cam_s9_tele_turn	User space	k	hakios.exynos_camera_star2.c	the tele frames turned half round for user space (default 0, as Apollo streams it: no flip)
 CAM_SENSOR	arg	cam_sensor	Cameras	k	hakios.camera.c	
 CAM_SETTLE	arg	cam_settle	Cameras	k	hakios.camera.c	
 CAM_SHUTTER	arg	cam_shutter	Cameras	k	hakios.camera.c	
@@ -135,12 +174,18 @@ CONSOLE_QUIET	arg	console_quiet	User space	k	1003-avf-console-quiet.patch
 CORE0	arg	core0	Loader	kl	loader.c,psci_smp.c	the kernel's box for this core (above), if it has one, and only with a kernel on another core to watch
 CORE1	arg	core1	Loader	l	loader.c	core 1, which S-Boot uses for its own display work, listed for the kernel all the same
 CPUFREQ_GOV	arg	cpufreq_gov	User space	k	hakios.exynos_cpufreq.c	run it (0, or none: the fixed rates of cpufreq_lit= and cpufreq_big=)
+CPUFREQ_GOV_BIG_DUAL	arg	cpufreq_gov_big_dual	User space	k	hakios.exynos_cpufreq.c	
 CPUFREQ_GOV_BIG_MAX	arg	cpufreq_gov_big_max	User space	k	hakios.exynos_cpufreq.c	
 CPUFREQ_GOV_BIG_MIN	arg	cpufreq_gov_big_min	User space	k	hakios.exynos_cpufreq.c	
+CPUFREQ_GOV_BIG_OC	arg	cpufreq_gov_big_oc	User space	k	hakios.exynos_cpufreq.c	
+CPUFREQ_GOV_BIG_QUAD	arg	cpufreq_gov_big_quad	User space	k	hakios.exynos_cpufreq.c	
+CPUFREQ_GOV_BIG_SINGLE	arg	cpufreq_gov_big_single	User space	k	hakios.exynos_cpufreq.c	
 CPUFREQ_GOV_LIT_MAX	arg	cpufreq_gov_lit_max	User space	k	hakios.exynos_cpufreq.c	
 CPUFREQ_GOV_LIT_MIN	arg	cpufreq_gov_lit_min	User space	k	hakios.exynos_cpufreq.c	
 CPUFREQ_GOV_LOG	arg	cpufreq_gov_log	User space	k	hakios.exynos_cpufreq.c	a summary line this often (0: none; 1)
 CPUFREQ_GOV_MS	arg	cpufreq_gov_ms	User space	k	hakios.exynos_cpufreq.c	the load window (20 to 200; 40)
+CPUFREQ_OCP	arg	cpufreq_ocp	User space	k	hakios.exynos_cpufreq.c	the PMIC's CPU over-current warning on, and with it Samsung's star2lte limits for the M3s: 1924000 with three or four online, 2314000 with one or two
+CPUFREQ_OCP_REGS	arg	cpufreq_ocp_regs	User space	k	hakios.exynos_cpufreq.c	
 CPULOAD	arg	cpuload	CPU, memory and boot	k	hakios.cpufreq.c	every MS milliseconds, how busy each of our cores was meanwhile, in percent, to the loader's log (tools/frames.py shows it per gesture)
 CPUMASK	arg	cpumask	Loader	l	loader.c	
 CS47L93	arg	cs47l93	Audio and battery	k	hakios.cs47l93.c	the first N steps (1 looks, 2 powers the codec and reads its ID, 6 makes the microphone ready)
@@ -256,6 +301,7 @@ IRIS_S9_ISPDIV	arg	iris_s9_ispdiv	User space	k	hakios.exynos_iris.c	CLKCMU_ISPPR
 IRIS_S9_MS	arg	iris_s9_ms	User space	k	hakios.exynos_iris.c	longest a capture may stream (default 600, range 100 to 2000)
 IRIS_S9_SMC	arg	iris_s9_smc	User space	k	hakios.exynos_iris.c	secure monitor calls around the run: 0 none, 1 PREPARE, 2 also holds ISPPRE, 3 also SYSREG_PROT
 ISA_FLOOR	arg	isa_floor	User space	k	hakios_commpage.h	
+JTAG	arg	jtag	User space	k	cpu.c	
 KEYSTORE_ENTCHECK	arg	keystore_entcheck	User space	k	MiniAppleKeyStore.cpp	
 KEYSTORE_KDF_KIB	arg	keystore_kdf_kib	User space	k	MiniAppleKeyStore.cpp	
 KEYSTORE_REAL	arg	keystore_real	User space	k	MiniAppleKeyStore.cpp	
@@ -272,11 +318,15 @@ M3_PREP	arg	m3_prep	User space	k	hakios.exynos_m3.c,hakios_arm_init.h,hakios_com
 MACHINE_NAME	arg	machine_name	CPU, memory and boot	k	GenericARMPE.cpp	
 MALI	arg	mali	GPU and display	k	hakios.mali.c	run the first N steps (9: all, then serve)
 MALI_ACPM	arg	mali_acpm	GPU and display	k	hakios.mali.c	do not raise the rail. The GPU is then touched at the boot's voltage, which hung the S9+ (test only).
+MALI_DVS	arg	mali_dvs	GPU and display	k	hakios.mali.c	the voltage up before the clock goes up (a failed raise: no switch)
+MALI_DVS_FLOOR	arg	mali_dvs_floor	GPU and display	k	hakios.mali.c	
+MALI_DVS_MARGIN	arg	mali_dvs_margin	GPU and display	k	hakios.mali.c	
 MALI_FASTMAP	arg	mali_fastmap	GPU and display	k	hakios.mali.c	walk the page tables through the GPU's caches; each buffer entered is then an MMU update of AS 0
 MALI_FLUSH	arg	mali_flush	GPU and display	k	hakios.mali.cpp	
 MALI_GOV	arg	mali_gov	GPU and display	k	hakios.mali.c	the clock follows the load (see gov_window())
 MALI_GOV_FRAME	arg	mali_gov_frame	GPU and display	k	hakios.mali.c	clock floor while frames are shown (default 572; 0: none)
-MALI_MHZ	arg	mali_mhz	GPU and display	k	hakios.mali.c	GPU clock: 260 (default), 455 or 572
+MALI_MAX	arg	mali_max	GPU and display	k	hakios.mali.c	
+MALI_MHZ	arg	mali_mhz	GPU and display	k	hakios.mali.c	GPU clock: 260 (default), 455 or 572 (or mali_max's level)
 MALI_NAP_US	arg	mali_nap_us	GPU and display	k	hakios.mali.c	poll interval for a job still running after its first 200 us, clamped to 10..1000 (default 50)
 MALI_PLL	arg	mali_pll	GPU and display	k	hakios.mali.c	leave PLL_G3D as the boot set it; the step stops if it is not running
 MALI_TRACE	arg	mali_trace	GPU and display	k	hakios.mali.c	one line per job: "tl: j SEQ f|v q QUEUED b BEGAN e ENDED", in microseconds
@@ -364,6 +414,7 @@ PANEL_BRIGHTNESS	arg	panel_brightness	GPU and display	k	hakios.s6e3ha8.c	a brigh
 PANEL_GAMMA	arg	panel_gamma	GPU and display	k	hakios.s6e3ha8.c	gamma and AOR sent (the default)
 PANEL_GAMMA_LOG	arg	panel_gamma_log	GPU and display	k	hakios.s6e3ha8.c	all 74 rows in the log, as Android's kernel prints them at start ("gamma[nits] : ...") to set beside Android's log of the same phone
 PANEL_SLEEP	arg	panel_sleep	GPU and display	k	GenericARMPE.cpp,hakios.s6e3ha8.c	
+PANEL_WRITE	arg	panel_write	GPU and display	k	hakios.s6e3ha8.c	read and calculate, but send no brightness packets (diagnostic override; writes default on)
 PASSCODE_DEBUG	arg	passcode_debug	User space	u	passcoded.m	
 PASSCODE_RESET	arg	passcode_reset	User space	k	MiniAppleKeyStore.cpp	
 PASSCODE_SELFTEST	arg	passcode_selftest	User space	k	MiniAppleKeyStore.cpp	
@@ -412,14 +463,20 @@ SCSND_SIZE	arg	scsnd.size	User space	k	hakios.scsnd.c
 SECURITY	arg	security	Security stand-ins	k	kern_minimac.c	
 SERIAL	arg	serial	Loader	l	loader.c	
 SHUB	arg	shub	Sensors	k	hakios.ssp.c	
+SHUB_ACC_CAL	arg	shub_acc_cal	Sensors	k	hakios.ssp.c	the accelerometer's factory offsets, sent to the hub before the sensors go on, as Samsung does
+SHUB_ACC_POS	arg	shub_acc_pos	Sensors	k	hakios.ssp.c	the accelerometer's (and gyroscope's) position in the formation of step 5
 SHUB_CHUB_ON	arg	shub_chub_on	Sensors	k	hakios.ssp.c	at step 2, power the CHUB domain on if step 1 found it off, using the PMU's chub_on sequence
 SHUB_DIV	arg	shub_div	Sensors	k	hakios.ssp.c	
+SHUB_GYRO_CAL	arg	shub_gyro_cal	Sensors	k	hakios.ssp.c	the same for the gyroscope (gyro_lsm6dsl.c set_gyro_cal(): SSP 0xCD, s32 x, y, z), the three
 SHUB_HELLO	arg	shub_hello	Sensors	k	hakios.ssp.c	wait for MCU_RESP before every exchange, as Samsung's driver does
 SHUB_KEEP	arg	shub_keep	Sensors	k	hakios.ssp.c	power the hub off again (NSTDBY low) when the steps end or one fails
 SHUB_LOG	arg	shub_log	Sensors	k	hakios.ssp.c	log the first bytes of every SPI frame (very loud)
 SHUB_MS	arg	shub_ms	Sensors	k	hakios.ssp.c	sample period in ms (default 20; light, proximity and pressure use 200)
+SHUB_PEEK	arg	shub_peek	Sensors	k	hakios.ssp.c	a memory reader added to the hub's firmware as it is sent, for the GNSS bring-up (docs/gnss.md), which
 SHUB_REQ_LEN	arg	shub_req_len	Sensors	k	hakios.ssp.c	
 SHUB_REQ_RPC	arg	shub_req_rpc	Sensors	k	hakios.ssp.c	RPC that carries SSP to the hub
+SHUB_SAY	arg	shub_say	Sensors	k	hakios.ssp.c	with step 6: every n seconds two lines, the accelerometer's and the gyroscope's: the mean over
+SHUB_SELFREAD	arg	shub_selfread	Sensors	k	hakios.ssp.c	with step 6: thirty seconds after the boot, /dev/hakios-sensors opened and read for n seconds
 SHUB_SENSORS	arg	shub_sensors	Sensors	k	hakios.ssp.c	
 SLEEP_CORES	arg	sleep_cores	CPU, memory and boot	k	GenericARMPE.cpp	sleep_cores_after= seconds (default 10) after the screen went off, the cores of the performance
 SLEEP_CORES_AFTER	arg	sleep_cores_after	CPU, memory and boot	k	GenericARMPE.cpp	
@@ -467,6 +524,7 @@ TMU_POLL	arg	tmu_poll	Chip, thermal and PMIC	k	hakios.exynos_tmu.c	how often to 
 TMU_STOP	arg	tmu_stop	Chip, thermal and PMIC	k	hakios.exynos_tmu.c	step 3's limit for the SoC's zones (40 to 115; 110)
 TMU_UNGATE	arg	tmu_ungate	Chip, thermal and PMIC	k	hakios.exynos_tmu.c	open the TMU's PCLK gate if the boot left it forced shut
 TORCH	arg	torch	Haptics and torch	kl	hakios.exynos_iris.c,hakios.s2mpb02_torch.c,hakios.sccam_torch.c,hakios.torch.c,loader.c	a look, reading only: the bus as found, the chip's ID, the flash block's registers, the two pins
+TORCH_CODE_MAX	arg	torch_code_max	Haptics and torch	k	hakios.s2mpb02_torch.c	the torch current code iOS's full level maps to (1-9, default 3: the S9's 60 mA)
 TORCH_MAX_S	arg	torch_max_s	Haptics and torch	k	hakios.s2mpb02_torch.c,hakios.torch.c	
 TORCH_SECS	arg	torch_secs	Haptics and torch	k	hakios.s2mpb02_torch.c,hakios.torch.c	
 TOUCH_COALESCE	arg	touch_coalesce	Touch and buttons	k	hakios.input.c	a reader that falls behind gets the newest pending MOVE of a finger, never a lost DOWN/UP. Off by default
@@ -535,6 +593,8 @@ VIRTIO_SOUND	arg	virtio_sound	Audio and battery	k	hakios.virtio_sound.c
 WALLPAPER_CACHE	arg	wallpaper_cache	User space	u	inject_sb.c	the window that shows the wallpaper rasterized by the window server (CALayer's shouldRasterize), drawn from one texture instead of composed again
 WALLPAPER_FREEZE	arg	wallpaper_freeze	User space	u	inject_sb.c	the wallpaper as one still picture
 WDT	arg	wdt	User space	l	wdt_exynos.c	the Galaxy S9's hardware watchdog is not armed (a restart still goes to recovery: INFORM3 is written)
+WFE_MODE	arg	wfe_mode	User space	k	cpu.c	
+WFI	arg	wfi	User space	k	cpu.c	
 WIFI_AGAIN	arg	wifi_again	Wi-Fi	k	hakios.wifi.c	start the DSP although the one before it was shut down without having acknowledged a stop: THAT HAS RESET THE PHONE, twice of two
 WIFI_ASK	arg	wifi_ask	Wi-Fi	k	hakios.wifi.c	step 14 also asks that service a question (its capabilities) and writes down the beginning of an answer
 WIFI_BA	arg	wifi_ba	Wi-Fi	k	lx_80211.c	
@@ -568,6 +628,7 @@ WIFI_QUIET	arg	wifi_quiet	Wi-Fi	k	lx_bus.c
 WIFI_RADIO_READ	arg	wifi_radio_read	Wi-Fi	k	hakios.wifi.c	step 16 does read (2: whatever mode the firmware is in)
 WIFI_READY	arg	wifi_ready	Wi-Fi	k	hakios.wlfw.c	
 WIFI_RETURN	arg	wifi_return	Wi-Fi	k	hakios.wifi.c	when all is over, go back to the loader instead of starting the system
+WIFI_RSSI_PROBE	arg	wifi_rssi_probe	Wi-Fi	k	hakios.apple80211.c	
 WIFI_SCAN	arg	wifi_scan	Wi-Fi	k	lx_bus.c	
 WIFI_SMMU	arg	wifi_smmu	Wi-Fi	k	hakios.wifi.c	before any step: read what the boot chain has set up in the SMMU for the radio's stream (smmu_look() below; nothing is written)
 WIFI_SSID	arg	wifi_ssid	Wi-Fi	k	hakios.brcmfmac.c	brcmfmac=8 without fw/network: the network's name, a byte as %XX (a space is %20)

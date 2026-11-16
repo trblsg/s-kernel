@@ -711,6 +711,17 @@ drmSyncobjQuery2(int fd, uint32_t *handles, uint64_t *points, uint32_t count, ui
 	(void)fd;
 	(void)handles;
 	(void)flags;
+	/*
+	 * "Every point is reached" has to be true when it is said. With asynchronous submits it is once the GPU is
+	 * done with everything submitted so far, so wait for that first (the kernel's queue: a snapshot of the
+	 * last chain queued now, not of chains queued later). Without the wait a caller that reads a queue's timeline
+	 * value right after another thread's submit takes chains that have not run yet for finished and reuses their
+	 * memory under the GPU (seen as an MMU fault at address 0 and a GPU reset once the kernel really queued chains).
+	 */
+	if (async_on) {
+		int64_t rel = INT64_MAX;
+		(void)call(SBM_WAIT_IDLE, &rel, sizeof(rel));
+	}
 	/* every point is reached: report the furthest any timeline could be */
 	for (uint32_t i = 0; i < count; i++) {
 		points[i] = UINT64_MAX >> 1;

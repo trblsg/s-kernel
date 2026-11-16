@@ -17,7 +17,7 @@
 #include "catalog.h"
 #include "fbtext.h"
 #include "hw.h"
-#include "../fdt.h"
+#include "fdt.h"
 
 #define LOG_PAGE  0x91fff000UL
 #define DL_MAX    (STAR_RAM_DL_END - STAR_RAM_DL - 0x10000UL)

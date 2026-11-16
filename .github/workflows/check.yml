@@ -1,0 +1,98 @@
+name: check
+on:
+  push:
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The SoC, device and UEFI repositories devices/manifest.conf names
+        # every one of them is public: a plain sync gets them all. The secret HAKIOS_SYNC_TOKEN, when there is one, is used
+        # for it (GitHub's rate limits); a private repository named later would need it
+        env:
+          TOKEN: ${{ secrets.HAKIOS_SYNC_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+          fi
+          python3 tools/hakios-device.py sync
+      - name: Python compiles
+        run: |
+          git ls-files '*.py' | xargs -r python3 -m py_compile
+      - name: Shell scripts parse
+        run: |
+          git ls-files '*.sh' xl | xargs -r -n1 bash -n
+      - name: "Scripts that start with #! are executable in git (a Windows commit with a pathspec records 644)"
+        run: |
+          bad=$(git ls-files -s | awk '$1=="100644"{print $4}' | while read -r f; do
+            case "$f" in *.sh|*.py|xl) head -c2 "$f" | grep -q '^#!' && echo "$f";; esac; done)
+          if [ -n "$bad" ]; then echo "not executable in git (git update-index --chmod=+x):"; echo "$bad"; exit 1; fi
+      - name: Makefile help
+        run: make help
+      - name: Provenance - every binary and blob explained, nothing proprietary, nothing writes to the phone
+        run: |
+          # The rule of the repository: nothing of Darwin, no pictures of it, no vendor firmware, and a
+          # promise that the project boots from RAM and does not write to the phone's storage. Every
+          # binary must have a line in tools/provenance.allow saying where it came from.
+          # (This replaces two lines of the form `! git ls-files | grep ...`: bash -e does not stop on
+          # a negated pipeline, so the first of them could never fail, and a committed screenshot passed.)
+          python3 tools/provenance-check.py
+      - name: "The provenance check itself: what it lets through and what it stops"
+        run: python3 tools/provenance-test.py
+      - name: A run sends only the soc_* values that differ from the kernel's defaults
+        run: bash tools/soc-only-changes-test.sh
+      - name: Configurations - defconfigs, fragments, the arguments made from them
+        run: python3 tools/hakios-config-test.py
+      - name: The EFI system partition tree is laid out as the loader looks for it
+        run: python3 tools/mkesp-test.py
+      - name: The kernel's version string is made as it should be
+        run: python3 tools/kernel-version-test.py
+      - name: The iOS firehose library for the ios-27 kernel is the macOS one with three fields of its LC_BUILD_VERSION changed, and nothing else
+        run: python3 tools/ios27/firehose-ios-test.py
+      - name: The backup tool only reads, copies exactly, and proves every copy
+        run: python3 tools/backup-partitions-test.py
+      - name: Saved var archives use the newest intact slot
+        run: |
+          python3 tools/var-store-read.py selftest
+          python3 tools/var-store-read-test.py
+      - name: The boot-argument catalogue is read from the source, and is current
+        run: |
+          python3 tools/boot-args-test.py
+          python3 tools/boot-args.py --check
+      - name: The drivers are kept by subsystem, every one is in drivers/map, and drivers/*/conf builds each exactly once
+        run: python3 tools/drivers-check.py
+      - name: The device and SoC repositories hold together, and a device's own drivers reach the kernel
+        run: |
+          python3 tools/hakios-device.py check
+          python3 tools/hakios-device-test.py
+      - name: Each SoC's table, fragment and matrix row agree; a block without its numbers is off
+        run: python3 tools/soc-check.py
+      - name: The web clips (manifest, icons, plists, the room they take in etc/var.skel) are made the same way every time
+        run: python3 tools/webclips-test.py
+      - name: The documentation pages made from the source are current
+        run: |
+          [ ! -d devices/redwood ] || python3 tools/docs-gen.py --check
+          python3 tools/docs-check.py
+      - name: The Metal plug-in's reading of a .metallib refuses every file cut short or bent (sanitizers)
+        run: sh tools/metallib-test.sh
+      - name: The Galaxy S9 panel's gamma, worked out from made-up MTPs, holds together (sanitizers)
+        run: sh tools/s6e3ha8-gamma-test.sh
+      - name: The Galaxy S9's Bluetooth H4 framing, HCI events, .hcd reading and UART divisor hold together (sanitizers)
+        run: sh tools/bcm-hci-test.sh
+      - name: The Galaxy S9's sensor hub's SPI frames, packets, CRC-8, RPCs, firmware records and SSP hold together (sanitizers)
+        run: sh tools/bcm-shub-test.sh
+      - name: The commits of the fork of XNU that the profiles pin can be fetched
+        run: |
+          for p in ios-16.5 ios-26 ios-27; do python3 tools/xnu-tree.py path "$p"; done
+      - name: APFS tools self-test
+        run: |
+          [ -x tools/apfs/run-tests.sh ] && tools/apfs/run-tests.sh || echo "no self-test on this runner"
+      - name: SoC args generator reproduces the POCO X5 Pro values
+        run: |
+          sh tools/soc-args-test.sh
+          # ... and finds the AOSS mailbox however a phone's own device tree describes it
+          python3 tools/soc-args-test-aoss.py
+          python3 tools/soc-args-test-reg.py
+          # ... and tools/new-device.py makes a port's directory from a phone's tree, and refuses what it should
+          python3 tools/new-device-test.py

@@ -2,13 +2,13 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **615 arguments**: 524 read by the kernel, 23 by the loader, 85 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **681 arguments**: 590 read by the kernel, 23 by the loader, 85 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
 Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl kern.bootargs`).
 
-## GPU and display (113)
+## GPU and display (118)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -99,10 +99,14 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `hakios_kver` | K | `MiniIOMobileFramebuffer.cpp`, `hakios.version.c` |  | the loader (from the payload's kernel.ver) |
 | `mali` | K | `hakios.mali.c` | `CONFIG_MALI` |  |
 | `mali_acpm` | K | `hakios.mali.c` | `CONFIG_MALI_ACPM` |  |
+| `mali_dvs` | K | `hakios.mali.c` | `CONFIG_MALI_DVS` |  |
+| `mali_dvs_floor` | K | `hakios.mali.c` | `CONFIG_MALI_DVS_FLOOR` |  |
+| `mali_dvs_margin` | K | `hakios.mali.c` | `CONFIG_MALI_DVS_MARGIN` |  |
 | `mali_fastmap` | K | `hakios.mali.c` | `CONFIG_MALI_FASTMAP` |  |
 | `mali_flush` | K | `hakios.mali.cpp` | `CONFIG_MALI_FLUSH` |  |
 | `mali_gov` | K | `hakios.mali.c` | `CONFIG_MALI_GOV` |  |
 | `mali_gov_frame` | K | `hakios.mali.c` | `CONFIG_MALI_GOV_FRAME` |  |
+| `mali_max` | K | `hakios.mali.c` | `CONFIG_MALI_MAX` |  |
 | `mali_mhz` | K | `hakios.mali.c` | `CONFIG_MALI_MHZ` |  |
 | `mali_nap_us` | K | `hakios.mali.c` | `CONFIG_MALI_NAP_US` |  |
 | `mali_pll` | K | `hakios.mali.c` | `CONFIG_MALI_PLL` |  |
@@ -113,6 +117,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `panel_gamma` | K | `hakios.s6e3ha8.c` | `CONFIG_PANEL_GAMMA` |  |
 | `panel_gamma_log` | K | `hakios.s6e3ha8.c` | `CONFIG_PANEL_GAMMA_LOG` |  |
 | `panel_sleep` | K | `GenericARMPE.cpp`, `hakios.s6e3ha8.c` | `CONFIG_PANEL_SLEEP` |  |
+| `panel_write` | K | `hakios.s6e3ha8.c` | `CONFIG_PANEL_WRITE` |  |
 | `rec_mb` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_REC_MB` |  |
 | `rec_ring` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_REC_RING` |  |
 | `rec_secs` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_REC_SECS` |  |
@@ -133,7 +138,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `privs` | K | `kern_minimac.c` | `CONFIG_PRIVS` |  |
 | `security` | K | `kern_minimac.c` | `CONFIG_SECURITY` |  |
 
-## Wi-Fi (49)
+## Wi-Fi (50)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -176,6 +181,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `wifi_radio_read` | K | `hakios.wifi.c` | `CONFIG_WIFI_RADIO_READ` |  |
 | `wifi_ready` | K | `hakios.wlfw.c` | `CONFIG_WIFI_READY` |  |
 | `wifi_return` | K | `hakios.wifi.c` | `CONFIG_WIFI_RETURN` |  |
+| `wifi_rssi_probe` | K | `hakios.apple80211.c` | `CONFIG_WIFI_RSSI_PROBE` |  |
 | `wifi_scan` | K | `lx_bus.c` | `CONFIG_WIFI_SCAN` |  |
 | `wifi_smmu` | K | `hakios.wifi.c` | `CONFIG_WIFI_SMMU` | implied by wifi=1 (as 2) |
 | `wifi_ssid` | K | `hakios.brcmfmac.c` | `CONFIG_WIFI_SSID` |  |
@@ -245,15 +251,17 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `soc_pas_mpss` | K | `hakios.mpss.c` | `CONFIG_SOC_PAS_MPSS` |  |
 | `soc_smem` | K | `hakios.mpss.c`, `hakios.socinfo.c` | `CONFIG_SOC_SMEM` |  |
 
-## Audio and battery (65)
+## Audio and battery (67)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
 | `abox` | K | `hakios.exynos_abox.c` | `CONFIG_ABOX` |  |
+| `abox_bass` | K | `hakios.exynos_abox.c` | `CONFIG_ABOX_BASS` |  |
 | `abox_bclk_on` | K | `hakios.exynos_abox.c` | `CONFIG_ABOX_BCLK_ON` |  |
 | `abox_burst` | K | `hakios.exynos_abox.c` | `CONFIG_ABOX_BURST` |  |
 | `abox_dvfs` | K | `hakios.exynos_abox.c` | `CONFIG_ABOX_DVFS` |  |
 | `abox_gain` | K | `hakios.exynos_abox.c` | `CONFIG_ABOX_GAIN` |  |
+| `abox_hpf` | K | `hakios.exynos_abox.c` | `CONFIG_ABOX_HPF` |  |
 | `abox_mic` | K | `hakios.exynos_abox.c` | `CONFIG_ABOX_MIC` |  |
 | `abox_mmu_off` | K | `hakios.exynos_abox.c` | `CONFIG_ABOX_MMU_OFF` |  |
 | `abox_rdma_ctrl0` | K | `hakios.exynos_abox.c` | `CONFIG_ABOX_RDMA_CTRL0` |  |
@@ -315,7 +323,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `speaker_probe` | K | `hakios.speaker.c` | `CONFIG_SPEAKER_PROBE` |  |
 | `virtio_sound` | K | `hakios.virtio_sound.c` | `CONFIG_VIRTIO_SOUND` |  |
 
-## Cameras (34)
+## Cameras (39)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -328,22 +336,27 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `cam_keep_mb` | K | `hakios.camera.c` | `CONFIG_CAM_KEEP_MB` |  |
 | `cam_mode` | K | `hakios.camera.c` | `CONFIG_CAM_MODE` |  |
 | `cam_pattern` | K | `hakios.camera.c` | `CONFIG_CAM_PATTERN` |  |
-| `cam_s9` | K | `hakios.exynos_camera.c`, `hakios.exynos_iris.c`, `hakios.s2mpb02_torch.c` | `CONFIG_CAM_S9` |  |
-| `cam_s9_addr` | K | `hakios.exynos_camera.c` | `CONFIG_CAM_S9_ADDR` |  |
-| `cam_s9_ae` | K | `hakios.exynos_camera.c` | `CONFIG_CAM_S9_AE` |  |
-| `cam_s9_ae_frames` | K | `hakios.exynos_camera.c` | `CONFIG_CAM_S9_AE_FRAMES` |  |
-| `cam_s9_always` | K | `hakios.exynos_camera.c` | `CONFIG_CAM_S9_ALWAYS` |  |
-| `cam_s9_bayer` | K | `hakios.exynos_camera.c` | `CONFIG_CAM_S9_BAYER` |  |
-| `cam_s9_dgain` | K | `hakios.exynos_camera.c` | `CONFIG_CAM_S9_DGAIN` |  |
-| `cam_s9_exp` | K | `hakios.exynos_camera.c` | `CONFIG_CAM_S9_EXP` |  |
-| `cam_s9_gain` | K | `hakios.exynos_camera.c` | `CONFIG_CAM_S9_GAIN` |  |
-| `cam_s9_ipclk` | K | `hakios.exynos_camera.c` | `CONFIG_CAM_S9_IPCLK` |  |
-| `cam_s9_ispdiv` | K | `hakios.exynos_camera.c` | `CONFIG_CAM_S9_ISPDIV` |  |
-| `cam_s9_mmu_probe` | K | `hakios.exynos_camera.c` | `CONFIG_CAM_S9_MMU_PROBE` |  |
-| `cam_s9_pack12` | K | `hakios.exynos_camera.c` | `CONFIG_CAM_S9_PACK12` |  |
-| `cam_s9_probe` | K | `hakios.exynos_camera.c` | `CONFIG_CAM_S9_PROBE` |  |
-| `cam_s9_sat` | K | `hakios.exynos_camera.c` | `CONFIG_CAM_S9_SAT` |  |
-| `cam_s9_stride` | K | `hakios.exynos_camera.c` | `CONFIG_CAM_S9_STRIDE` |  |
+| `cam_s9` | K | `hakios.exynos_camera.c`, `hakios.exynos_camera_star2.c`, `hakios.exynos_iris.c`, `hakios.s2mpb02_torch.c` | `CONFIG_CAM_S9` |  |
+| `cam_s9_addr` | K | `hakios.exynos_camera.c`, `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_ADDR` |  |
+| `cam_s9_ae` | K | `hakios.exynos_camera.c`, `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_AE` |  |
+| `cam_s9_ae_frames` | K | `hakios.exynos_camera.c`, `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_AE_FRAMES` |  |
+| `cam_s9_always` | K | `hakios.exynos_camera.c`, `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_ALWAYS` |  |
+| `cam_s9_bayer` | K | `hakios.exynos_camera.c`, `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_BAYER` |  |
+| `cam_s9_cached` | K | `hakios.exynos_camera.c` | `CONFIG_CAM_S9_CACHED` |  |
+| `cam_s9_dgain` | K | `hakios.exynos_camera.c`, `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_DGAIN` |  |
+| `cam_s9_exp` | K | `hakios.exynos_camera.c`, `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_EXP` |  |
+| `cam_s9_gain` | K | `hakios.exynos_camera.c`, `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_GAIN` |  |
+| `cam_s9_ipclk` | K | `hakios.exynos_camera.c`, `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_IPCLK` |  |
+| `cam_s9_ispdiv` | K | `hakios.exynos_camera.c`, `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_ISPDIV` |  |
+| `cam_s9_mmu_probe` | K | `hakios.exynos_camera.c`, `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_MMU_PROBE` |  |
+| `cam_s9_pack12` | K | `hakios.exynos_camera.c`, `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_PACK12` |  |
+| `cam_s9_probe` | K | `hakios.exynos_camera.c`, `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_PROBE` |  |
+| `cam_s9_sat` | K | `hakios.exynos_camera.c`, `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_SAT` |  |
+| `cam_s9_selfread` | K | `hakios.exynos_camera.c` | `CONFIG_CAM_S9_SELFREAD` |  |
+| `cam_s9_selfread_focus` | K | `hakios.exynos_camera.c` | `CONFIG_CAM_S9_SELFREAD_FOCUS` |  |
+| `cam_s9_selfread_x` | K | `hakios.exynos_camera.c` | `CONFIG_CAM_S9_SELFREAD_X` |  |
+| `cam_s9_selfread_y` | K | `hakios.exynos_camera.c` | `CONFIG_CAM_S9_SELFREAD_Y` |  |
+| `cam_s9_stride` | K | `hakios.exynos_camera.c`, `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_STRIDE` |  |
 | `cam_sensor` | K | `hakios.camera.c` | `CONFIG_CAM_SENSOR` |  |
 | `cam_settle` | K | `hakios.camera.c` | `CONFIG_CAM_SETTLE` |  |
 | `cam_shutter` | K | `hakios.camera.c` | `CONFIG_CAM_SHUTTER` |  |
@@ -354,19 +367,25 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `sccam.turn` | K | `hakios.camera.c` | `CONFIG_SCCAM_TURN` |  |
 | `sccam.w` | K | `hakios.camera.c` | `CONFIG_SCCAM_W` |  |
 
-## Sensors (10)
+## Sensors (16)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
 | `shub` | K | `hakios.ssp.c` | `CONFIG_SHUB` |  |
+| `shub_acc_cal` | K | `hakios.ssp.c` | `CONFIG_SHUB_ACC_CAL` |  |
+| `shub_acc_pos` | K | `hakios.ssp.c` | `CONFIG_SHUB_ACC_POS` |  |
 | `shub_chub_on` | K | `hakios.ssp.c` | `CONFIG_SHUB_CHUB_ON` |  |
 | `shub_div` | K | `hakios.ssp.c` | `CONFIG_SHUB_DIV` |  |
+| `shub_gyro_cal` | K | `hakios.ssp.c` | `CONFIG_SHUB_GYRO_CAL` |  |
 | `shub_hello` | K | `hakios.ssp.c` | `CONFIG_SHUB_HELLO` |  |
 | `shub_keep` | K | `hakios.ssp.c` | `CONFIG_SHUB_KEEP` |  |
 | `shub_log` | K | `hakios.ssp.c` | `CONFIG_SHUB_LOG` |  |
 | `shub_ms` | K | `hakios.ssp.c` | `CONFIG_SHUB_MS` |  |
+| `shub_peek` | K | `hakios.ssp.c` | `CONFIG_SHUB_PEEK` |  |
 | `shub_req_len` | K | `hakios.ssp.c` | `CONFIG_SHUB_REQ_LEN` |  |
 | `shub_req_rpc` | K | `hakios.ssp.c` | `CONFIG_SHUB_REQ_RPC` |  |
+| `shub_say` | K | `hakios.ssp.c` | `CONFIG_SHUB_SAY` |  |
+| `shub_selfread` | K | `hakios.ssp.c` | `CONFIG_SHUB_SELFREAD` |  |
 | `shub_sensors` | K | `hakios.ssp.c` | `CONFIG_SHUB_SENSORS` |  |
 
 ## Touch and buttons (19)
@@ -479,13 +498,15 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `usb_gadget_soc` | K | `hakios.dwc3.c` | `CONFIG_USB_GADGET_SOC` |  |
 | `usb_gadget_susphy` | K | `hakios.dwc3.c` | `CONFIG_USB_GADGET_SUSPHY` |  |
 
-## Haptics and torch (5)
+## Haptics and torch (7)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
 | `haptic` | K | `hakios.haptic.c` | `CONFIG_HAPTIC` |  |
 | `haptic_effect` | K | `hakios.haptic.c` | `CONFIG_HAPTIC_EFFECT` |  |
 | `torch` | KL | `hakios.exynos_iris.c`, `hakios.s2mpb02_torch.c`, `hakios.sccam_torch.c`, `hakios.torch.c`, `loader.c` | `CONFIG_TORCH` |  |
+| `torch_code_max` | K | `hakios.s2mpb02_torch.c` | `CONFIG_TORCH_CODE_MAX` |  |
+| `torch_flash_ms` | K | `hakios.s2mpb02_torch.c` | `CONFIG_TORCH_FLASH_MS` |  |
 | `torch_max_s` | K | `hakios.s2mpb02_torch.c`, `hakios.torch.c` | `CONFIG_TORCH_MAX_S` |  |
 | `torch_secs` | K | `hakios.s2mpb02_torch.c`, `hakios.torch.c` | `CONFIG_TORCH_SECS` |  |
 
@@ -513,10 +534,11 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `tmu_stop` | K | `hakios.exynos_tmu.c` | `CONFIG_TMU_STOP` |  |
 | `tmu_ungate` | K | `hakios.exynos_tmu.c` | `CONFIG_TMU_UNGATE` |  |
 
-## CPU, memory and boot (24)
+## CPU, memory and boot (25)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
+| `apfs_shared_space` | K | `(patch)` | `CONFIG_APFS_SHARED_SPACE` |  |
 | `avf_exit` | K | `loader_return.c` | `CONFIG_AVF_EXIT` |  |
 | `bootcpu` | KL | `loader.c`, `loader_return.c` | `CONFIG_BOOTCPU` |  |
 | `cpufreq` | K | `hakios.cpufreq.c` | `CONFIG_CPUFREQ` |  |
@@ -574,7 +596,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 | `ufs_write_guid` | L | `loader.c` | `CONFIG_UFS_WRITE_GUID` |  |
 
-## User space (129)
+## User space (173)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -596,22 +618,63 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `bt_uart_mhz` | K | `hakios.bcm4361_bt.c` | `CONFIG_BT_UART_MHZ` |  |
 | `bt_vendor` | K | `hakios.bcm4361_bt.c` | `CONFIG_BT_VENDOR` |  |
 | `bt_vendor_part` | K | `hakios.bcm4361_bt.c` | `CONFIG_BT_VENDOR_PART` |  |
+| `bus_log` | K | `hakios.exynos_acpm.c` | `CONFIG_BUS_LOG` |  |
+| `bus_mask` | K | `hakios.exynos_acpm.c` | `CONFIG_BUS_MASK` |  |
+| `bus_max` | K | `hakios.exynos_acpm.c` | `CONFIG_BUS_MAX` |  |
+| `bus_mif_delay` | K | `hakios.exynos_acpm.c` | `CONFIG_BUS_MIF_DELAY` |  |
 | `ca_metallib` | U | `inject.c` | `CONFIG_CA_METALLIB` |  |
 | `ca_prof` | U | `HakiosMetalCA.m` | `CONFIG_CA_PROF` |  |
 | `ca_vbl` | U | `inject.c` | `CONFIG_CA_VBL` |  |
 | `caenv` | U | `inject.c`, `inject_sb.c` | `CONFIG_CAENV` |  |
+| `cam_af` | K | `hakios.ak737x.c` | `CONFIG_CAM_AF` |  |
+| `cam_af_coarse` | K | `hakios.ak737x.c` | `CONFIG_CAM_AF_COARSE` |  |
+| `cam_af_drop` | K | `hakios.ak737x.c` | `CONFIG_CAM_AF_DROP` |  |
+| `cam_af_fine` | K | `hakios.ak737x.c` | `CONFIG_CAM_AF_FINE` |  |
+| `cam_af_hi` | K | `hakios.ak737x.c` | `CONFIG_CAM_AF_HI` |  |
+| `cam_af_lo` | K | `hakios.ak737x.c` | `CONFIG_CAM_AF_LO` |  |
+| `cam_af_pos` | K | `hakios.ak737x.c` | `CONFIG_CAM_AF_POS` |  |
+| `cam_af_settle` | K | `hakios.ak737x.c` | `CONFIG_CAM_AF_SETTLE` |  |
+| `cam_af_walk` | K | `hakios.ak737x.c` | `CONFIG_CAM_AF_WALK` |  |
+| `cam_af_win` | K | `hakios.ak737x.c` | `CONFIG_CAM_AF_WIN` |  |
+| `cam_af_x` | K | `hakios.ak737x.c` | `CONFIG_CAM_AF_X` |  |
+| `cam_af_y` | K | `hakios.ak737x.c` | `CONFIG_CAM_AF_Y` |  |
+| `cam_rear` | K | `hakios.exynos_camera_rear.c` | `CONFIG_CAM_REAR` |  |
+| `cam_rear_addr` | K | `hakios.exynos_camera_rear.c` | `CONFIG_CAM_REAR_ADDR` |  |
+| `cam_rear_ap` | K | `hakios.exynos_camera_rear.c` | `CONFIG_CAM_REAR_AP` |  |
+| `cam_rear_ois` | K | `hakios.exynos_camera_rear.c` | `CONFIG_CAM_REAR_OIS` |  |
+| `cam_rear_ois_mode` | K | `hakios.exynos_camera_rear.c` | `CONFIG_CAM_REAR_OIS_MODE` |  |
+| `cam_s9_af` | K | `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_AF` |  |
+| `cam_s9_rear` | K | `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_REAR` |  |
+| `cam_s9_rear_bayer` | K | `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_REAR_BAYER` |  |
+| `cam_s9_rear_exp` | K | `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_REAR_EXP` |  |
+| `cam_s9_rear_ispdiv` | K | `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_REAR_ISPDIV` |  |
+| `cam_s9_rear_probe` | K | `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_REAR_PROBE` |  |
+| `cam_s9_rear_tp` | K | `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_REAR_TP` |  |
+| `cam_s9_rear_turn` | K | `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_REAR_TURN` |  |
+| `cam_s9_tele` | K | `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_TELE` |  |
+| `cam_s9_tele_bayer` | K | `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_TELE_BAYER` |  |
+| `cam_s9_tele_exp` | K | `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_TELE_EXP` |  |
+| `cam_s9_tele_probe` | K | `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_TELE_PROBE` |  |
+| `cam_s9_tele_tp` | K | `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_TELE_TP` |  |
+| `cam_s9_tele_turn` | K | `hakios.exynos_camera_star2.c` | `CONFIG_CAM_S9_TELE_TURN` |  |
 | `camtl` | U | `inject.c` | `CONFIG_CAMTL` |  |
 | `cc_fade` | U | `inject_sb.c` | `CONFIG_CC_FADE` |  |
 | `cohtest` | K | `hakios.exynos_m3.c` | `CONFIG_COHTEST` |  |
 | `cohtest_delay` | K | `hakios.exynos_m3.c` | `CONFIG_COHTEST_DELAY` |  |
 | `console_quiet` | K | `1003-avf-console-quiet.patch` | `CONFIG_CONSOLE_QUIET` |  |
 | `cpufreq_gov` | K | `hakios.exynos_cpufreq.c` | `CONFIG_CPUFREQ_GOV` |  |
+| `cpufreq_gov_big_dual` | K | `hakios.exynos_cpufreq.c` | `CONFIG_CPUFREQ_GOV_BIG_DUAL` |  |
 | `cpufreq_gov_big_max` | K | `hakios.exynos_cpufreq.c` | `CONFIG_CPUFREQ_GOV_BIG_MAX` |  |
 | `cpufreq_gov_big_min` | K | `hakios.exynos_cpufreq.c` | `CONFIG_CPUFREQ_GOV_BIG_MIN` |  |
+| `cpufreq_gov_big_oc` | K | `hakios.exynos_cpufreq.c` | `CONFIG_CPUFREQ_GOV_BIG_OC` |  |
+| `cpufreq_gov_big_quad` | K | `hakios.exynos_cpufreq.c` | `CONFIG_CPUFREQ_GOV_BIG_QUAD` |  |
+| `cpufreq_gov_big_single` | K | `hakios.exynos_cpufreq.c` | `CONFIG_CPUFREQ_GOV_BIG_SINGLE` |  |
 | `cpufreq_gov_lit_max` | K | `hakios.exynos_cpufreq.c` | `CONFIG_CPUFREQ_GOV_LIT_MAX` |  |
 | `cpufreq_gov_lit_min` | K | `hakios.exynos_cpufreq.c` | `CONFIG_CPUFREQ_GOV_LIT_MIN` |  |
 | `cpufreq_gov_log` | K | `hakios.exynos_cpufreq.c` | `CONFIG_CPUFREQ_GOV_LOG` |  |
 | `cpufreq_gov_ms` | K | `hakios.exynos_cpufreq.c` | `CONFIG_CPUFREQ_GOV_MS` |  |
+| `cpufreq_ocp` | K | `hakios.exynos_cpufreq.c` | `CONFIG_CPUFREQ_OCP` |  |
+| `cpufreq_ocp_regs` | K | `hakios.exynos_cpufreq.c` | `CONFIG_CPUFREQ_OCP_REGS` |  |
 | `cs_relax_platform_task_ports` | K | `1002-avf-security-level.patch` | `CONFIG_CS_RELAX_PLATFORM_TASK_PORTS` |  |
 | `fb_psr` | K | `hakios.exynos_dpu.c` | `CONFIG_FB_PSR` |  |
 | `fp_s9` | K | `hakios.exynos_iris.c` | `CONFIG_FP_S9` |  |
@@ -640,6 +703,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `iris_s9_ms` | K | `hakios.exynos_iris.c` | `CONFIG_IRIS_S9_MS` |  |
 | `iris_s9_smc` | K | `hakios.exynos_iris.c` | `CONFIG_IRIS_S9_SMC` |  |
 | `isa_floor` | K | `hakios_commpage.h` | `CONFIG_ISA_FLOOR` |  |
+| `jtag` | K | `cpu.c` | `CONFIG_JTAG` |  |
 | `keystore_entcheck` | K | `MiniAppleKeyStore.cpp` | `CONFIG_KEYSTORE_ENTCHECK` |  |
 | `keystore_kdf_kib` | K | `MiniAppleKeyStore.cpp` | `CONFIG_KEYSTORE_KDF_KIB` |  |
 | `keystore_real` | K | `MiniAppleKeyStore.cpp` | `CONFIG_KEYSTORE_REAL` |  |
@@ -706,4 +770,6 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `wallpaper_cache` | U | `inject_sb.c` | `CONFIG_WALLPAPER_CACHE` |  |
 | `wallpaper_freeze` | U | `inject_sb.c` | `CONFIG_WALLPAPER_FREEZE` |  |
 | `wdt` | L | `wdt_exynos.c` | `CONFIG_WDT` |  |
+| `wfe_mode` | K | `cpu.c` | `CONFIG_WFE_MODE` |  |
+| `wfi` | K | `cpu.c` | `CONFIG_WFI` |  |
 | `xpcproxy_idversion` | K | `hakios.exec.c` | `CONFIG_XPCPROXY_IDVERSION` |  |

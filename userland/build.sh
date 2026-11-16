@@ -33,7 +33,8 @@
 #                                   (default: src/inject.c in backboardd, src/inject_sb.c in SpringBoard,
 #                                   src/inject_media.c in mediaserverd);
 #                                   init hands the list to the kernel (etc/inject.conf -> sysctl kern.exec_inject)
-#                      BT=1         Bluetooth on the Galaxy S9 (kernel bt=7, drivers/bluetooth/bcm4361/hakios.bcm4361_bt.c):
+#                      BT=0         without Bluetooth, which is in by default (BT=1, the same as leaving it unset):
+#                                   Bluetooth on the Galaxy S9 and S9+ (kernel bt=7, drivers/bluetooth/bcm4361/hakios.bcm4361_bt.c):
 #                                   the jobs com.apple.bluetoothd (its transport BT_HCI_TRANSPORT=H4:POSIX:
 #                                   com.apple.uart.bluetooth,4000000 -- the kernel's control at the chip's rate; give
 #                                   BT_HCI_TRANSPORT= for another) and com.apple.BlueTool; BlueTool started with
@@ -115,7 +116,8 @@
 #                      MODEM=1      stage checked local MPSS firmware from ../fw-modem in system.apfs /fw.
 #                      DEVICE=NAME  with the firmware of a device's own repository, devices/NAME/firmware/
 #                                   (every file but its READMEs and SHA256SUMS), in fw/: DEVICE=starlte for the Galaxy S9's
-#                                   audio, Wi-Fi, Bluetooth, sensor hub and MFC (ABOX's calliope images, DSM ...). The vendor's
+#                                   audio, Wi-Fi, Bluetooth, sensor hub and MFC (ABOX's calliope images, DSM ...), DEVICE=star2lte
+#                                   for the S9+'s (the same files but its own speaker tuning and ABOX ext images). The vendor's
 #                                   files are not in the repository, only their sums: devices/NAME/tools/fetch-firmware.sh
 #                                   makes them complete first (FIRMWARE_FROM=DIR: from a directory of your own, else the
 #                                   public sources it pins; devices/starlte/firmware/audio/README.md).
@@ -193,7 +195,11 @@ DARWIN_JOBS=${JOBS-"
 # (Count a QEMU run log with its duplicate lines removed: run-darwin.sh prints launchd's log twice.)
 # WIFID=0 leaves it out.
 [ "${WIFID-1}" != 0 ] && DARWIN_JOBS="$DARWIN_JOBS com.apple.wifid"
-# Bluetooth (BT=1): bluetoothd at load, BlueTool when bluetoothd asks it (mkjobs.py gives bluetoothd BT_HCI_TRANSPORT)
+# Bluetooth: bluetoothd at load, BlueTool when bluetoothd asks it (mkjobs.py gives bluetoothd BT_HCI_TRANSPORT).
+# In by default, as wifid is: the S9's and the S9+'s kernels start the chip (bt=7 is a default of both, configs/), and
+# their images were being built without it, so Settings had no Bluetooth there. Where the kernel has no chip (QEMU, the
+# Note9) bluetoothd finds no "bluetooth" registry entry with an address, exits, and launchd paces it. BT=0 leaves it out.
+[ "${BT-1}" != 0 ] && BT=1 || BT=
 if [ -n "$BT" ]; then
 	DARWIN_JOBS="$DARWIN_JOBS com.apple.bluetoothd com.apple.BlueTool"
 	export BT_HCI_TRANSPORT=${BT_HCI_TRANSPORT-H4:POSIX:com.apple.uart.bluetooth,4000000}
@@ -349,6 +355,10 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -framework IOKit -o obj/mali_test src/mali_test.c
 		# which processes take the processors, every few seconds (src/cputop.c; rc.jobs.cputop)
 		$DYN -o obj/cputop src/cputop.c
+		# the kept data volume to the flash every few seconds: the phone is reset, never shut down (src/var_sync.c)
+		$DYN -o obj/var_sync src/var_sync.c
+		# the device's name as the computer name, which lockdownd would write: bluetoothd's name, Bonjour's (src/devname.c)
+		$DYN -framework CoreFoundation -framework SystemConfiguration -lMobileGestalt -o obj/devname src/devname.c
 		# the wallpaper's second chance on a phone too slow for launchd's 5 s check-in (src/poster_retry.c; rc.jobs)
 		$DYN -o obj/poster_retry src/poster_retry.c
 		$DYN -framework CoreFoundation -framework IOSurface -o obj/cow_test src/cow_test.c
@@ -434,6 +444,16 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -framework CoreFoundation -framework Security -o obj/wifipw_test src/wifipw_test.c &&
 			{ ${LDID:-ldid} -Ssrc/wifipw_test.entitlements obj/wifipw_test 2>/dev/null ||
 			  echo "build.sh: no ldid: wifipw_test is unsigned, and the keychain will refuse it (-34018)"; }
+		# Location Services from the command line: the switch, an application's authorization, a fix (its accuracy,
+		# never where), a simulated position (src/loctool.m). locationd answers it only for its entitlements: by
+		# ldid, or by ../tools/machosign.py where there is no ldid
+		$DYN -fobjc-arc -framework Foundation -framework CoreLocation -o obj/loctool src/loctool.m &&
+			{ ${LDID:-ldid} -Ssrc/loctool.entitlements obj/loctool 2>/dev/null ||
+			  python3 ../tools/machosign.py obj/loctool src/loctool.entitlements com.hakios.loctool ||
+			  echo "build.sh: no ldid: loctool is unsigned, and locationd will refuse it"; }
+		# the GNSS bring-up's raw RPCs, SSP transactions and hub memory reads through /dev/hakios-gnss
+		# (src/gnsstool.c, docs/gnss.md)
+		$DYN -o obj/gnsstool src/gnsstool.c
 		# our library for inside stock Darwin programs (the jobs in INJECT are started with it)
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.dylib -framework CoreFoundation -framework IOKit -lobjc \
 			-o obj/libhakios.dylib src/inject.c
@@ -599,6 +619,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/jb_seed ] && cp obj/jb_seed root/bin/
 	[ -f obj/passcoded ] && cp obj/passcoded root/bin/
 	[ -f obj/cputop ] && cp obj/cputop root/bin/
+	[ -f obj/var_sync ] && cp obj/var_sync root/bin/
+	[ -f obj/devname ] && cp obj/devname root/bin/
 	[ -f obj/poster_retry ] && cp obj/poster_retry root/bin/
 	[ -f obj/cow_test ] && cp obj/cow_test root/bin/
 	[ -f obj/cg_test ] && cp obj/cg_test root/bin/
@@ -618,6 +640,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/battery_test ] && cp obj/battery_test root/bin/
 	[ -f obj/keychain_test ] && cp obj/keychain_test root/bin/
 	[ -f obj/wifipw_test ] && cp obj/wifipw_test root/bin/
+	[ -f obj/loctool ] && cp obj/loctool root/bin/
+	[ -f obj/gnsstool ] && cp obj/gnsstool root/bin/
 	[ -f obj/aes_test ] && cp obj/aes_test root/bin/
 	[ -f obj/sound_test ] && cp obj/sound_test root/bin/
 	[ -f obj/torch_test ] && cp obj/torch_test root/bin/
@@ -760,6 +784,9 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		VARSRC=obj/varplus
 	fi
 	cp -r $VARSRC root/var
+	# locationd's own directory, before the list of its clients that goes in it (var/root/Library/Caches/locationd)
+	printf 'd	700	0	0	/private/var/root/Library/Caches/locationd
+' >> root/etc/var.skel
 	(cd $VARSRC && find . -type f | sed 's|^\./||' | sort) | while read -r f; do
 		case $f in mobile/*) owner=501 ;; *) owner=0 ;; esac
 		printf 'f\t644\t%s\t%s\t/private/var/%s\t/var/%s\n' $owner $owner "$f" "$f"
@@ -807,6 +834,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	# fairplayd among them).
 	cp com.hakios.demo.plist com.hakios.wifi.plist com.hakios.thermald.plist com.hakios.passcoded.plist root/LaunchDaemons/
 	[ ! -f root/bin/jb_seed ] || cp com.hakios.jbseed.plist root/LaunchDaemons/
+	# sshd from the prefix, when there is a key of ours to let in (com.hakios.sshd.plist; SHARE=1: never)
+	if [ -z "$SHARE" ] && [ -f ../ssh/authorized_keys ]; then cp com.hakios.sshd.plist root/LaunchDaemons/; else rm -f root/LaunchDaemons/com.hakios.sshd.plist; fi
 	[ ! -f root/bin/selftest ] || cp com.hakios.selftest.plist root/LaunchDaemons/
 	[ -z "$JB_KEPT_ONLY" ] || : > root/etc/jb.kept-only     # init: no graft on a memory filesystem (src/init.c)
 	VOLUME=""
@@ -1108,6 +1137,8 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	if [ -d ../jb/root/var/jb ]; then
 		rm -rf sysroot/jb
 		cp -a ../jb/root/var/jb sysroot/jb
+		# which bootstrap this is: jb_seed seeds a kept /private/var again when the copy's stamp differs
+		[ -f ../jb/.stamp ] && cp ../jb/.stamp sysroot/jb/.scion-stamp
 		# the applications of the prefix are system applications here: LaunchServices builds its
 		# database afresh at every boot by walking /Applications, which is how their icons appear
 		# (JB_KEPT_ONLY=1, the installer's: not those. The image is shared by phones that may have no kept
@@ -1146,9 +1177,12 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	#
 	# cp -aL and not cp -a: a bundle made of symbolic links is refused ("Unable to register"),
 	# so whatever a link points at is copied as the file itself.
+	# Their names go to /Applications/.extra-apps: jb_seed registers each with uicache once the prefix is there.
+	rm -f sysroot/Applications/.extra-apps
 	for app in ../apps/*.app; do
 		[ -d "$app" ] || continue
 		cp -aL "$app" sysroot/Applications/
+		echo "${app##*/}" >> sysroot/Applications/.extra-apps
 		echo "  ${app##*/} in /Applications ($(du -sm "$app" | cut -f1) MB from ../apps)"
 	done
 	# our audio device, where the audio server looks for such plug-ins (and for no others: Apple's are left out)

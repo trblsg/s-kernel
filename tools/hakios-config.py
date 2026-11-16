@@ -67,6 +67,11 @@ SYMBOLS = [
     ("WIFI", "bool", "wifi", "Wi-Fi: the radio, its driver, a connection (also fw-wifi/mac and fw-wifi/network)", "fw-wifi", None),
     ("HAPTIC", "int", "haptic", "the vibration motor (5 is what the README's phone line uses)", "fw-haptic", None),
     ("CAM", "int", "cam", "the cameras (5 is what the README uses)", "fw-camera", None),
+    ("CAM_S9_REAR_PROBE", "int", "cam_s9_rear_probe", "Star2's primary rear camera (S5K2L3): 2 powers it up at boot as its stream would, reads its ID and revision, powers it down (telephoto untouched)", None, None),
+    ("CAM_S9_REAR", "bool", "cam_s9_rear", "Star2's primary rear camera (S5K2L3 on CSIS0) as the iOS back camera, 2016x1512 at 30; the front camera stays usable if it fails", None, "CAM_S9=7"),
+    ("CAM_S9_TELE_PROBE", "int", "cam_s9_tele_probe", "Star2's telephoto camera (S5K3M3): 1 powers it up at boot as its stream would, reads its ID and revision, powers it down; one that does not answer is not offered", None, None),
+    ("CAM_S9_TELE", "bool", "cam_s9_tele", "Star2's telephoto camera (S5K3M3 on CSIS2) as the iOS back telephoto, 2016x1512 at 30; hidden again if it fails", None, "CAM_S9=7"),
+    ("TORCH_FLASH_MS", "int", "torch_flash_ms", "test the Galaxy S9 rear camera flash at boot for this many milliseconds (1 to 500)", None, None),
     ("MODEM", "bool", "modem", "the modem beside the system: its firmware, file systems, IPA, SIM, NAS", "fw-modem", "UFS=2"),
     ("MODEM_AGAIN", "bool", "modem_again", "start the modem although a kernel before this one left it shut down", None, "MODEM"),
     ("MODEM_BUFFER", "hex", "modem_buffer", "the modem's RMTFS buffer, an address below 4 GB (0xa8000000 on the reference phone)", None, "MODEM"),
@@ -1047,7 +1052,10 @@ def drivers_header(built, sources, device="", soc="", builtin_args=()):
     return ("/* The drivers this kernel is built with: made by tools/hakios-config.py kernel from %s. Not part of the patch. */\n"
             "#define HAKIOS_DRIVERS_LIST     \"%s\"\n#define HAKIOS_DRIVERS_COUNT    %d\n#define HAKIOS_DRIVERS_CONFIG   \"%s\"\n"
             "#define HAKIOS_DEVICE           \"%s\"\n#define HAKIOS_BUILTIN_ARGS     \"%s\"\n" %
-            (sources, " ".join(on), len(on), sources, device, " ".join(builtin_args))) + soc
+            (sources, " ".join(on), len(on), sources, device, " ".join(builtin_args)) +
+            # the device again as a name the preprocessor can test (#ifdef HAKIOS_DEVICE_IS_STAR2LTE): for the files that are
+            # one phone's whole driver (drivers/camera/exynos: the S9's and the S9+'s camera drivers, one of them in a kernel)
+            ("#define HAKIOS_DEVICE_IS_%s 1\n" % re.sub(r"[^A-Za-z0-9]", "_", device).upper() if device else "")) + soc
 
 
 def write_if_changed(path, text):

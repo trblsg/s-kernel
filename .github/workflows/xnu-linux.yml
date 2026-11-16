@@ -11,6 +11,8 @@ on:
   workflow_dispatch:
   push:
     branches: [main, "avf/**"]
+  # every pull request gets the same kernel build before it is merged
+  pull_request:
 
 concurrency:
   group: xnu-${{ github.ref }}

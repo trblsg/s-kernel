@@ -98,7 +98,8 @@ the device's own `device.conf` at the revision `devices/manifest.conf` pins.
 
 The same SoC and, by Samsung's device trees, the same board as the S9's for everything the drivers touch, so they share the
 S9's drivers and the loader's S9 platform under their own names (`loader_platform=`, written by their image scripts).
-**Nobody has run any of it on either phone.** There is no UEFI of their own (Silicium has no target for them): their images
+**Until 12 November 2026 nobody had run any of it on either phone.** Since then the S9+ has been run and worked on by
+Anan Jaser on his own phone (see [Contributors](#contributors)); the Note9 is still untried. There is no UEFI of their own (Silicium has no target for them): their images
 borrow the S9's, only when asked (`mkimage.sh -U`). Their device repositories,
 [scion-star2lte](https://github.com/Scion-Project/scion-star2lte) and [scion-crownlte](https://github.com/Scion-Project/scion-crownlte),
 say what differs from the S9, where each fact comes from, and what to try first; scion-installer's `universal/` installer
@@ -189,6 +190,19 @@ make qemu-open      # the open kernel + a placeholder loader + a tiny raw-syscal
 No IPSW, no Darwin user space, no firmware. Booting the stock Darwin user space (`make qemu`,
 `make phone`) is an optional path that needs the IPSW and the phone's firmware, which you supply
 from your own device.
+
+## Contributors
+
+- **Anan Jaser** ([@ananjaser1211](https://github.com/ananjaser1211)), the author of the Apollo kernel for the Exynos 9810.
+  The Galaxy S9+ on real hardware: its extra RAM in the loader, its own panel tables, its sensor hub's mounting and
+  calibration, its firmware set in the build. For both phones: the APM's DVFS tables read out and used for the processor,
+  the Mali and the buses, the speakers' tone, Location Services and its tools, the GNSS bring-up of the BCM4775
+  (`docs/gnss.md`, `/dev/hakios-gnss`, `gnsstool`), a kept data volume that survives a reset, and a long list of fixes to
+  the build and the user space. His commits are in the history under his name. Thank you, Anan.
+- **Nils** ([@dwaris](https://github.com/dwaris)), a Galaxy S9+ owner and one of the installer's testers. Two fixes for the
+  speakers found on his own phone: the first sound no longer lost when the stream starts before the amplifiers' driver has
+  registered, and the MAX98512's enable given a moment before it is read back, with a pause between a bus transfer's
+  retries. His commits are in the history under his name. Thank you, Nils.
 
 ## Licenses and the legal side
 

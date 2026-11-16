@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>GroupName</key>
+	<string>mobile</string>
+	<key>JetsamProperties</key>
+	<dict>
+		<key>JetsamMemoryLimit</key>
+		<integer>512</integer>
+	</dict>
+	<key>Label</key>
+	<string>com.scion.dptest.mobile</string>
+	<key>LaunchOnlyOnce</key>
+	<true/>
+	<key>POSIXSpawnType</key>
+	<string>Interactive</string>
+	<key>Program</key>
+	<string>/usr/local/bin/dptest</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/dptest</string>
+		<string>mobile</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/private/var/tmp/dptest-mobile.out</string>
+	<key>StandardOutPath</key>
+	<string>/private/var/tmp/dptest-mobile.out</string>
+	<key>UserName</key>
+	<string>mobile</string>
+</dict>
+</plist>

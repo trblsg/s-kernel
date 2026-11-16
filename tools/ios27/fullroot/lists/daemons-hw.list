@@ -1,0 +1,8 @@
+# Removed from launchd.plist (kept in launchd-disabled.plist): hardware the S9 port has no driver for / services that only assert here.
+# Same set the owner builds carry (herolte tune: CommCenter; starlte-tune: bluetoothd fairplayd replicatord cryptexd gamed).
+CommCenter
+bluetoothd
+fairplayd
+replicatord
+security.cryptexd
+com.apple.gamed

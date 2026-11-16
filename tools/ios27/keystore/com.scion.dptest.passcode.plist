@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>JetsamProperties</key>
+	<dict>
+		<key>JetsamMemoryLimit</key>
+		<integer>512</integer>
+	</dict>
+	<key>Label</key>
+	<string>com.scion.dptest.passcode</string>
+	<key>LaunchOnlyOnce</key>
+	<true/>
+	<key>POSIXSpawnType</key>
+	<string>Interactive</string>
+	<key>Program</key>
+	<string>/usr/local/bin/dptest</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/dptest</string>
+		<string>passcode</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/private/var/tmp/dptest-passcode.out</string>
+	<key>StandardOutPath</key>
+	<string>/private/var/tmp/dptest-passcode.out</string>
+	<key>UserName</key>
+	<string>root</string>
+</dict>
+</plist>

@@ -41,6 +41,7 @@ on the Adreno 642L, at 100 to 104 frames a second in page swipes on a 120 Hz pan
 | [Development notes](ru/notes.md) | the old README, whole: the history of the work, in Russian |
 | [Devices](devices/index.md) | how far each part works, device by device: [redwood](devices/redwood.md), [QEMU](devices/qemu.md) |
 | [Cellular](cellular.md) | the modem's bring-up ([in Russian](ru/cellular.md)) |
+| [GNSS](gnss.md) | the S9's BCM4775 GNSS: what its firmware holds (an on-chip position engine), the tools, the next steps |
 | [Driver reviews](driver-review/README.md) | each driver read for what it does and what was and was not verified |
 | [Network review](net-review.md) | the network stack, read the same way |
 
@@ -79,6 +80,7 @@ on the Adreno 642L, at 100 to 104 frames a second in page swipes on a 120 Hz pan
 - [A modular kernel](modular-kernel.md): how this tree maps onto UniXNU's layers, what is ours in XNU, OS profiles.
 - [Two XNU bases](two-bases.md): xnu-8796 (iOS 16.5) and xnu-12377 (iOS 26) in one tree; the profile, series and device layout; what may be taken from ios-on-pixel-10.
 - [Apps without an App Store account](apps.md): web apps on the home screen from the first boot (`WEBCLIPS=1`), what open-source iOS apps can be built from source and run on a phone at iOS 16.5, and the plan for push.
+- [iOS 27 on a Galaxy S9: build it and install it yourself](ios27/INSTALL-S9.md): what you need, the commands from your own restore image to the home screen, what works, what does not, how to get back. It erases the phone.
 - [iOS 27 on the Galaxy S9](ios27-starlte.md): why it does not boot yet (kernel, CPUs, the builder's inputs), what iOS 27 asks of the kernel, and Darwin 27's system calls on xnu-12377.
 - [The real key store](keystore.md): `keystore_real=1`, off by default: the keychain's keys under the passcode, what that does and does not protect from, and what it costs.
 - [Screen-off power](screen-off-power.md): what the Galaxy S9 does with its screen off, and `panel_sleep=1`, `sleep_cores=1` (off by default).

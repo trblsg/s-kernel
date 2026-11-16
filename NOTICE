@@ -114,3 +114,13 @@ Fetched at build time, never committed:
 - ios-sweet (dipa-studio, MIT, Copyright (c) 2026 dipa-studio) and ios-a5xelte (orhunnx and A5XELTE contributors, MIT, Copyright (c) 2026
   orhunnx and A5XELTE contributors): the layers under it, patches 0003-0128; their notices are LICENSES/MIT-ios-sweet.txt and MIT-ios-a5xelte.txt.
 - blacktop/darwin-xnu-build (MIT, Copyright (c) 2023-2025 blacktop): xnu/stage/00_setup_coreentitlements.sh (LICENSES/MIT-blacktop.txt), the edits among the commits of the fork's scion/xnu-12377-starlte, and tools/ios27/dxb-ios.patch.
+- Anan Jaser (github.com/ananjaser1211): his commits to this repository, from 12 November 2026, under the licence of the files they
+  change or, for new files, as their headers say. drivers/display/panel/hakios.s6e3ha8_star2.h is data (the Galaxy S9+ panel's
+  dimming tables) made by tools/extract-star2-panel.py from the tables of Samsung's GPL-2.0 kernel as carried in his Apollo tree;
+  no code of that kernel is in it.
+  drivers/camera/exynos/hakios.exynos_camera_star2.c (his Galaxy S9+ camera driver) includes two headers that are not in this
+  repository: tools/mk-star2-setfiles.sh makes them at build time, with his tools/extract-2l3-setfile.py and
+  tools/extract-3m3-setfile.py, from three headers of Samsung's GPL-2.0 kernel (the S5K2L3's and S5K3M3's register tables and
+  RAM patches) fetched from github.com/ananjaser1211/Apollo at a pinned commit.
+- Nils (github.com/dwaris): his commits to this repository, from 12 November 2026 (drivers/audio/abox/hakios.exynos_abox.c,
+  drivers/audio/codec/hakios.max98512.c), under the licence of the files they change.

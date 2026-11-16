@@ -4,7 +4,7 @@
  * Based on ios-a5xelte shim/herolte/probe.c (wardevsa, herolte branch).
  */
 #include <stdint.h>
-#include "../fdt.h"
+#include "fdt.h"
 #include "fbtext.h"
 
 #define DOWNLOAD_DELAY_S 45U

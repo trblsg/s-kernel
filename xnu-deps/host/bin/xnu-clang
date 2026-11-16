@@ -8,8 +8,12 @@ case "$(basename "$0")" in *++) drv=clang++; extra=(-fno-use-cxa-atexit);; *) dr
 args=()
 for a in "$@"; do
   case "$a" in
-    -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang) ;;
     -fapple-kext-vtable-verify|-Wno-vla-cxx-extension) ;;
+    -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang)
+      # clang 15 and older want this beside -ftrivial-auto-var-init=zero; clang 16 and later refuse it ("unknown argument").
+      # xnu-build.sh asks the host's clang once (XNU_CLANG_TAVI_FLAG=1 or 0); asked here when the wrapper is run without it.
+      [ -n "${XNU_CLANG_TAVI_FLAG:-}" ] || XNU_CLANG_TAVI_FLAG=$(/usr/bin/clang "$a" -fsyntax-only -x c /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
+      if [ "$XNU_CLANG_TAVI_FLAG" = 1 ]; then args+=("$a"); fi ;;
     -Werror|-Werror=*|-Weverything|-pedantic-errors) ;;
     *) args+=("$a");;
   esac

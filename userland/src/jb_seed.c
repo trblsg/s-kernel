@@ -15,6 +15,8 @@
  * the middle costs that copy and no more: the next boot starts it over. Failing costs a line on the console.
  */
 #include <dirent.h>
+#include <stdbool.h>
+#include <time.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -32,6 +34,8 @@
 #define MARK   "/.seeded"                       /* the last thing written into the copy */
 #define ROOM   (512ull * 1024 * 1024)           /* what the volume must have free: twice the prefix and more */
 #define LATE   30                               /* seconds: SpringBoard first; a first boot has enough to do */
+
+#define STAMP  "/.scion-stamp"                 /* which bootstrap the image carries (tools/mk-jb.sh's jb/.stamp) */
 
 static char buffer[256 * 1024];
 static int files;
@@ -248,6 +252,82 @@ run(char *const argv[])
 	}
 }
 
+/*
+ * The applications from ../apps (userland/build.sh lists them in /Applications/.extra-apps, one name a line). They
+ * are plain directories in /Applications like the port's own, but LaunchServices keeps its database on the kept
+ * /private/var and does not walk /Applications again on a later image, so each is registered with the prefix's
+ * uicache -- here and not in rc.jobs, which runs before this job has put uicache there on a fresh phone.
+ */
+static void
+register_apps(void)
+{
+	FILE *list = fopen("/Applications/.extra-apps", "r");
+	char name[256], path[320];
+	struct stat st;
+
+	if (list == NULL || stat("/var/jb/usr/bin/uicache", &st) != 0) {
+		if (list != NULL) {
+			fclose(list);
+		}
+		return;
+	}
+	while (fgets(name, sizeof(name), list) != NULL) {
+		name[strcspn(name, "\r\n")] = '\0';
+		if (name[0] == '\0' || strchr(name, '/') != NULL) {
+			continue;
+		}
+		snprintf(path, sizeof(path), "/Applications/%s", name);
+		if (stat(path, &st) == 0) {
+			char *const argv[] = { "/var/jb/usr/bin/uicache", "-p", path, NULL };
+			run(argv);
+		}
+	}
+	fclose(list);
+}
+
+/*
+ * A new prefix in the image (its stamp differs from the copy's, or the copy has none): the copy is moved aside,
+ * whole, to /private/var/jb.old-SECONDS, and the image's is seeded in its place -- so that what a later bootstrap
+ * adds (OpenSSH, ElleKit) reaches a phone seeded before it. Nothing is deleted; a failed seed puts the old one back.
+ */
+static bool
+reseed_if_changed(const char *from)
+{
+	char want[160] = "", have[160] = "", path[256], aside[64];
+	struct stat st;
+	int fd;
+	ssize_t n;
+
+	snprintf(path, sizeof(path), "%s%s", from, STAMP);
+	if ((fd = open(path, O_RDONLY)) < 0) {
+		return true;                    /* an image without a stamp: the copy stays as it is */
+	}
+	n = read(fd, want, sizeof(want) - 1);
+	close(fd);
+	want[n > 0 ? n : 0] = 0;
+	if ((fd = open(PREFIX STAMP, O_RDONLY)) >= 0) {
+		n = read(fd, have, sizeof(have) - 1);
+		close(fd);
+		have[n > 0 ? n : 0] = 0;
+	}
+	if (stat(PREFIX MARK, &st) != 0 || strcmp(want, have) == 0) {
+		return true;
+	}
+	snprintf(aside, sizeof(aside), "/private/var/jb.old-%ld", (long)time(NULL));
+	printf("jb_seed: the image's prefix is another one (%.20s, the copy's %.20s): the copy to %s, the image's seeded\n",
+	    want, have[0] ? have : "none", aside);
+	if (rename(PREFIX, aside) != 0) {
+		printf("jb_seed: %s: %s: the copy stays\n", aside, strerror(errno));
+		return true;
+	}
+	if (!seed(from)) {
+		rename(aside, PREFIX);
+		printf("jb_seed: the new prefix not seeded: the old one back\n");
+		return false;
+	}
+	return true;
+}
+
 int
 main(void)
 {
@@ -263,6 +343,7 @@ main(void)
 	}
 	setpriority(PRIO_PROCESS, 0, 10);
 	if (strcmp(fs.f_fstypename, "hfs") == 0) {
+		(void)reseed_if_changed(from);
 		if (stat(PREFIX MARK, &st) != 0 && !seed(from)) {
 			printf("jb_seed: no prefix this boot; iOS goes on without it, and the next boot tries again\n");
 			return 0;
@@ -278,5 +359,6 @@ main(void)
 	if (stat("/var/jb/prep.sh", &st) == 0) {
 		run(prep);
 	}
+	register_apps();
 	return 0;
 }

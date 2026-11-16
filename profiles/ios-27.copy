@@ -4,7 +4,15 @@
 # and the ones the series carried copies of (hakios.dwc3.c, hakios.exynos_tmu.h, hakios.scion_gov.c; docs/xnu-fork.md).
 # hakios.s6e3ha8.c is not here: the fork's branch changes it for this tree (patch 0428), so the branch keeps its copy.
 drivers/soc/exynos/hakios.exynos_hsi2c.c bsd/dev/hakios.exynos_hsi2c.c
+drivers/camera/exynos/hakios.exynos_camera.c bsd/dev/hakios.exynos_camera.c
+drivers/camera/exynos/hakios.ak737x.c bsd/dev/hakios.ak737x.c
+drivers/camera/exynos/hakios.exynos_camera_rear.c bsd/dev/hakios.exynos_camera_rear.c
+drivers/soc/exynos/hakios.exynos_spi.c bsd/dev/hakios.exynos_spi.c
+drivers/input/ssp/hakios.ssp.c bsd/dev/hakios.ssp.c
+drivers/input/ssp/hakios.bcm_shub.h bsd/dev/hakios.bcm_shub.h
+drivers/core/hakios.physmap.cpp iokit/Kernel/hakios.physmap.cpp
 drivers/display/panel/hakios.s6e3ha8_gamma.h bsd/dev/hakios.s6e3ha8_gamma.h
+drivers/display/panel/hakios.s6e3ha8_star2.h bsd/dev/hakios.s6e3ha8_star2.h
 drivers/usb/hakios.exynos_usb.c bsd/dev/hakios.exynos_usb.c
 drivers/usb/hakios.usb_acm.h bsd/dev/hakios.usb_acm.h
 drivers/usb/hakios.usb_glue.h bsd/dev/hakios.usb_glue.h
@@ -12,3 +20,10 @@ socs/exynos9810/include/hakios.exynos9810_soc.h bsd/sys/hakios.exynos9810_soc.h
 drivers/usb/hakios.dwc3.c bsd/dev/hakios.dwc3.c
 drivers/power/exynos/hakios.exynos_tmu.h bsd/sys/hakios.exynos_tmu.h
 drivers/power/exynos/hakios.scion_gov.c bsd/dev/hakios.scion_gov.c
+drivers/wifi/brcmfmac/hakios.exynos_pcie.c bsd/dev/hakios.exynos_pcie.c
+drivers/wifi/brcmfmac/hakios.brcmfmac.c bsd/dev/hakios.brcmfmac.c
+drivers/wifi/lx/hakios.lx.c bsd/dev/hakios.lx.c
+drivers/wifi/hakios.sta.c bsd/dev/hakios.sta.c
+drivers/wifi/hakios.apple80211.c bsd/dev/hakios.apple80211.c
+drivers/wifi/hakios.wlan.cpp iokit/Kernel/hakios.wlan.cpp
+drivers/net/hakios.net.c bsd/dev/hakios.net.c

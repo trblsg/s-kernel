@@ -5,7 +5,7 @@ xnu-12377 asks the boot loader for 4 * SHA-512 = 256 seed bytes and panics
 ("Expected 256 seed bytes from bootloader") with fewer; mkadt.py made 64.
   tools/ios27/adt-reseed.py out/starlte-ipad7-phone.adt [N]   (rewrites the file)"""
 import os, sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'ref', 'ios-herolte', 'tools'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'herolte'))
 import adt  # noqa: E402
 
 path = sys.argv[1]

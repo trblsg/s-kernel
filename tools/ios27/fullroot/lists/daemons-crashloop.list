@@ -1,0 +1,12 @@
+# Disabled ONLY because they crash-loop / hang (evidence: owner-build boot logs). Everything else of iOS 27 stays on. Labels, one per line.
+com.apple.imagent              # launches MessagesBlastDoorService: SIGTRAP loop every ~10 s (ios27-perf2/night)
+com.apple.terminusd            # SIGTRAP x3 at boot
+com.apple.rapportd             # spins at 137% CPU, never settles (ios27-night)
+com.apple.nearbyd              # SIGSEGV loop (UWB hardware absent)
+com.apple.familycircled        # SIGABRT loop (no account)
+com.apple.appplaceholdersyncd  # crash loop (26 in 200 s on iOS 26)
+com.apple.dasd                 # SIGABRT loop (14 in 420 s)
+com.apple.audiomxd             # SIGTRAP loop in caulk audio_allocator (until ios27-audio-bt lands a proven replacement)
+com.apple.wifip2pd             # exit loop every 10 s (no Wi-Fi yet)
+com.apple.fileindexerd         # SIGTRAP crash loop (ios27-phone-gpu g2)
+com.apple.passd                # Wallet crash-loops (boot71)

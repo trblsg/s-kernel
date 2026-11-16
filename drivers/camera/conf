@@ -19,6 +19,9 @@ driver S2MPB02_TORCH
 
 driver EXYNOS_CAMERA
 	file    bsd/dev/hakios.exynos_camera.c
+	file    bsd/dev/hakios.ak737x.c
+	file    bsd/dev/hakios.exynos_camera_rear.c
+	file    bsd/dev/hakios.exynos_camera_star2.c
 	requires EXYNOS_HSI2C
 	default n
 	help    the Galaxy S9's front camera, stages 1 to 3 (cam_s9=N): the S5K3H1's supplies on the S2MPB02, its reset and
@@ -28,6 +31,14 @@ driver EXYNOS_CAMERA
 	help    and sent as a picture, tools/usb-shot.py --cam; 7 the sensor streaming into a ring of four frames while
 	help    something reads /dev/hakios-camera (or a camshot is asked for); devices/starlte/CAMERA.md has the plan). Its
 	help    memory is 32 MB of physical memory at 0xD8000000, below 4 GB and outside XNU's RAM, mapped through IOKit
+	help    (hakios.exynos_camera.c). Its lens, only with cam_af=N: the AK737x motor driver on hsi2c@10900000 and the
+	help    module's EEPROM (1 a look, 2 the lens held at a position, 3 autofocus by contrast, 4 that and iOS's
+	help    HAKIOS_CAMERA_FOCUS; hakios.ak737x.c). The rear camera instead, only with cam_rear=1: the S5K2L3 on CSIS0, its
+	help    supplies on the S2MPB03 and the S2MPB02, 2016 x 1512 RAW10 at 30 frames a second through the same steps;
+	help    its lens (the same cam_af), its stabiliser (cam_rear_ois=N) and its two-stop iris (cam_rear_ap=N);
+	help    hakios.exynos_camera_rear.c
+	help    For the Galaxy S9+ (star2lte) the same symbol builds Anan Jaser's driver instead, hakios.exynos_camera_star2.c:
+	help    its front, rear (cam_s9_rear) and telephoto (cam_s9_tele) cameras; the files above compile to nothing there
 
 driver EXYNOS_IRIS
 	file    bsd/dev/hakios.exynos_iris.c

@@ -39,6 +39,6 @@
 ## CI
 
 `ci/github-check.yml` is a GitHub Actions workflow (Python compiles, scripts parse, no Apple
-files or pictures in the tree, the kernel patch applies to Apple's tag). Enable it by copying it
-to `.github/workflows/check.yml`; a push that adds it needs a token with the `workflow` scope,
-or do it in the web editor.
+files or pictures in the tree, the kernel patch applies to Apple's tag). It runs from
+`.github/workflows/check.yml` (a copy of it: change both) on every push and pull request, and
+`.github/workflows/xnu-linux.yml` builds the kernel on every pull request.

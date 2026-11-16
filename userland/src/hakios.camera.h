@@ -38,13 +38,15 @@ struct hakios_camera_frame {
 	uint32_t        frame_lines_min; /* the mode's own length: the shortest frame */
 	uint32_t        frame_lines_max; /* the longest frame it may be given */
 	uint32_t        margin;         /* exposure_lines is at most frame_lines - margin */
-	uint32_t        sensor;         /* which: 0 the macro, 1 the wide, 2 the front, 3 the ultra-wide camera */
+	uint32_t        sensor;         /* which: 0 the macro, 1 the wide, 2 the front, 3 the ultra-wide, 4 the telephoto camera
+	                                 * (HAKIOS_CAMERA_SENSOR_TELE: Star2's S5K3M3) */
 	uint32_t        focus;          /* the lens's position as last set, 0 (the furthest) to 1023: HAKIOS_CAMERA_NO_FOCUS where it
 	                                 * has no motor (or it does not answer) */
 	uint32_t        reserved[5];
 };
 
 #define HAKIOS_CAMERA_NO_FOCUS 0xffffffffu
+#define HAKIOS_CAMERA_SENSOR_TELE 4u    /* the telephoto camera's number in `sensor' and HAKIOS_CAMERA_SENSOR */
 
 enum {
 	HAKIOS_CAMERA_EXPOSURE = 1,    /* a: lines, b: gain, c: frame lines (0: the shortest that holds the exposure) */
@@ -52,7 +54,11 @@ enum {
 	                                 * 3 BGRA); bytes follow */
 	HAKIOS_CAMERA_SENSOR = 3,      /* another sensor: a which (as in the frames' header), b its mode (~0: the usual one);
 	                                 * the frames stop, everything goes down, and the next read starts the other one */
-	HAKIOS_CAMERA_FOCUS = 4,       /* the lens to a: 0 (the furthest) to 1023, from the next frame or so */
+	HAKIOS_CAMERA_FOCUS = 4,       /* the lens to a: 0 (the furthest) to 1023, from the next frame or so. The Galaxy S9's
+	                                 * front camera (boot-arg cam_af=4, hakios.ak737x.c) also takes a =
+	                                 * HAKIOS_CAMERA_NO_FOCUS: the kernel's own search by contrast, at once, on a window:
+	                                 * with b not 0 its middle is c across and d down, in 1024ths of the picture as read
+	                                 * (a tap); with b 0, the picture's middle */
 };
 
 struct hakios_camera_command {

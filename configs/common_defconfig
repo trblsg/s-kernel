@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 672 symbols in 20 groups; 54 are set, 45 of them drivers built in.
+# 738 symbols in 20 groups; 54 are set, 45 of them drivers built in.
 #
 
 #
@@ -61,7 +61,7 @@ CONFIG_HAKIOS_TORCH=y
 # the Galaxy S9's flashlight: the S2MPB02's flash block on PERIC1's HSI2C, lit by a pin (torch=N there, the same steps ... [hakios.s2mpb02_torch.c; requires CONFIG_HAKIOS_EXYNOS_HSI2C]
 CONFIG_HAKIOS_S2MPB02_TORCH=y
 
-# the Galaxy S9's front camera, stages 1 to 3 (cam_s9=N): the S5K3H1's supplies on the S2MPB02, its reset and MCLK, ... [hakios.exynos_camera.c; requires CONFIG_HAKIOS_EXYNOS_HSI2C]
+# the Galaxy S9's front camera, stages 1 to 3 (cam_s9=N): the S5K3H1's supplies on the S2MPB02, its reset and MCLK, ... [hakios.exynos_camera.c, hakios.ak737x.c, hakios.exynos_camera_rear.c, hakios.exynos_camera_star2.c; requires CONFIG_HAKIOS_EXYNOS_HSI2C]
 # CONFIG_HAKIOS_EXYNOS_CAMERA is not set
 
 # the Galaxy S9's iris camera (iris_s9=N): the S5K5F1 infrared sensor on CSIS3, its supplies (the S2MPS18's LDO39-41 ... [hakios.exynos_iris.c; requires CONFIG_HAKIOS_EXYNOS_HSI2C, CONFIG_HAKIOS_EXYNOS_ACPM]
@@ -197,7 +197,7 @@ CONFIG_HAKIOS_EXYNOS_PCIE=y
 CONFIG_HAKIOS_BRCMFMAC=y
 
 #
-# CPU, memory and boot (22)
+# CPU, memory and boot (23)
 #
 
 # CPU cores the kernel uses, 1 to 8; one if not set
@@ -208,6 +208,9 @@ CONFIG_HAKIOS_BRCMFMAC=y
 
 # set the boot core to its top speed
 # CONFIG_CPUFREQ is not set
+
+# read by the patch to Apple's files (kernel)
+# CONFIG_APFS_SHARED_SPACE is not set
 
 # read by loader_return.c (kernel)
 # CONFIG_AVF_EXIT is not set
@@ -503,7 +506,7 @@ CONFIG_TOUCHSCREEN=y
 # CONFIG_VIRTIO_INPUT is not set
 
 #
-# GPU and display (112)
+# GPU and display (117)
 #
 
 # rendering on Adreno (an image built with GL=1; the GPU's firmware from your phone) [needs fw-gpu/ from the phone]
@@ -764,6 +767,15 @@ CONFIG_GPU=y
 # do not raise the rail. The GPU is then touched at the boot's voltage, which hung the S9+ (test only).
 # CONFIG_MALI_ACPM is not set
 
+# the voltage up before the clock goes up (a failed raise: no switch)
+# CONFIG_MALI_DVS is not set
+
+# read by hakios.mali.c (kernel)
+# CONFIG_MALI_DVS_FLOOR is not set
+
+# read by hakios.mali.c (kernel)
+# CONFIG_MALI_DVS_MARGIN is not set
+
 # walk the page tables through the GPU's caches; each buffer entered is then an MMU update of AS 0
 # CONFIG_MALI_FASTMAP is not set
 
@@ -776,7 +788,10 @@ CONFIG_GPU=y
 # clock floor while frames are shown (default 572; 0: none)
 # CONFIG_MALI_GOV_FRAME is not set
 
-# GPU clock: 260 (default), 455 or 572
+# read by hakios.mali.c (kernel)
+# CONFIG_MALI_MAX is not set
+
+# GPU clock: 260 (default), 455 or 572 (or mali_max's level)
 # CONFIG_MALI_MHZ is not set
 
 # poll interval for a job still running after its first 200 us, clamped to 10..1000 (default 50)
@@ -805,6 +820,9 @@ CONFIG_GPU=y
 
 # read by GenericARMPE.cpp, hakios.s6e3ha8.c (kernel)
 # CONFIG_PANEL_SLEEP is not set
+
+# read and calculate, but send no brightness packets (diagnostic override; writes default on)
+# CONFIG_PANEL_WRITE is not set
 
 # read by MiniIOMobileFramebuffer.cpp (kernel)
 # CONFIG_REC_MB is not set
@@ -843,7 +861,7 @@ CONFIG_GPU=y
 # CONFIG_VBLUR is not set
 
 #
-# Audio and battery (64)
+# Audio and battery (66)
 #
 
 # the audio DSP; the battery level in the UI and charging state come through it [needs fw-audio/ from the phone]
@@ -864,6 +882,9 @@ CONFIG_SOUND=4
 # the first N of ABOX's eight steps (1 only looks, 7 plays a tone, 8 serves iOS); 0 or none: left alone
 # CONFIG_ABOX is not set
 
+# a low shelf at 250 Hz, +N dB (0 to 6; 0): the speakers' weakest range lifted, inside the guard's limits
+# CONFIG_ABOX_BASS is not set
+
 # ABOX never gates UAIF1's BCLK (QCHANNEL_DISABLE bit 3), as Samsung does for UAIF0 while it plays
 # CONFIG_ABOX_BCLK_ON is not set
 
@@ -875,6 +896,9 @@ CONFIG_SOUND=4
 
 # eighths of a dB of gain before the speakers' guard, 0 to 96 (0)
 # CONFIG_ABOX_GAIN is not set
+
+# the guard's high-pass corner: 200 (the default), 150 or 120 Hz; lower lets more of the bass through
+# CONFIG_ABOX_HPF is not set
 
 # with abox=8: /dev/hakios-mic, the codec's main microphone for iOS, recorded through UAIF0 and WDMA1
 # CONFIG_ABOX_MIC is not set
@@ -1039,7 +1063,7 @@ CONFIG_SOUND=4
 # CONFIG_VIRTIO_SOUND is not set
 
 #
-# Wi-Fi (49)
+# Wi-Fi (50)
 #
 
 # Wi-Fi: the radio, its driver, a connection (also fw-wifi/mac and fw-wifi/network) [needs fw-wifi/ from the phone]
@@ -1158,6 +1182,9 @@ CONFIG_WIFI=y
 
 # when all is over, go back to the loader instead of starting the system
 # CONFIG_WIFI_RETURN is not set
+
+# read by hakios.apple80211.c (kernel)
+# CONFIG_WIFI_RSSI_PROBE is not set
 
 # read by lx_bus.c (kernel)
 # CONFIG_WIFI_SCAN is not set
@@ -1353,7 +1380,7 @@ CONFIG_MODEM_AGAIN=y
 # CONFIG_SOC_SMEM is not set
 
 #
-# Cameras (34)
+# Cameras (39)
 #
 
 # the cameras (5 is what the README uses) [needs fw-camera/ from the phone]
@@ -1392,7 +1419,7 @@ CONFIG_MODEM_AGAIN=y
 # no auto-exposure: the frames as cam_s9_exp and cam_s9_gain have them (default 1: on)
 # CONFIG_CAM_S9_AE is not set
 
-# read by hakios.exynos_camera.c (kernel)
+# read by hakios.exynos_camera.c, hakios.exynos_camera_star2.c (kernel)
 # CONFIG_CAM_S9_AE_FRAMES is not set
 
 # with 7: the stream from the boot to the run's end, wanted or not (the old behaviour, for debugging)
@@ -1400,6 +1427,9 @@ CONFIG_MODEM_AGAIN=y
 
 # camshot's Bayer order: 0 RGGB, 1 GRBG (the default, the sensor's), 2 GBRG, 3 BGGR
 # CONFIG_CAM_S9_BAYER is not set
+
+# read() copies the frame through a second, cached mapping of the ring (see cam_cached below)
+# CONFIG_CAM_S9_CACHED is not set
 
 # the most digital gain the auto-exposure may use, 0x100 being 1x (default 0x400, at most 0x1000)
 # CONFIG_CAM_S9_DGAIN is not set
@@ -1410,13 +1440,13 @@ CONFIG_MODEM_AGAIN=y
 # the first analog gain of step 5's frame, 0x20 being 1x (default 0x40, at most 0x200)
 # CONFIG_CAM_S9_GAIN is not set
 
-# read by hakios.exynos_camera.c (kernel)
+# read by hakios.exynos_camera.c, hakios.exynos_camera_star2.c (kernel)
 # CONFIG_CAM_S9_IPCLK is not set
 
 # CLKCMU_ISPPRE_BUS (CSIS1's and its WDMA's clock) = SHARED1_DIV4, 466 MHz, / (D + 1); default
 # CONFIG_CAM_S9_ISPDIV is not set
 
-# read by hakios.exynos_camera.c (kernel)
+# read by hakios.exynos_camera.c, hakios.exynos_camera_star2.c (kernel)
 # CONFIG_CAM_S9_MMU_PROBE is not set
 
 # the WDMA's PACK12 layout rather than RAW10 as it comes (the BSP sets PACK12 for its V4L2 SBGGR10 buffers)
@@ -1427,6 +1457,18 @@ CONFIG_MODEM_AGAIN=y
 
 # camshot's colour saturation in per cent (default 140; 100: none; at most 300)
 # CONFIG_CAM_S9_SAT is not set
+
+# read by hakios.exynos_camera.c (kernel)
+# CONFIG_CAM_S9_SELFREAD is not set
+
+# the reader also writes HAKIOS_CAMERA_FOCUS, as a capture device would (cam_af=4): after its
+# CONFIG_CAM_S9_SELFREAD_FOCUS is not set
+
+# read by hakios.exynos_camera.c (kernel)
+# CONFIG_CAM_S9_SELFREAD_X is not set
+
+# read by hakios.exynos_camera.c (kernel)
+# CONFIG_CAM_S9_SELFREAD_Y is not set
 
 # camshot's bytes a line of the frame (default 3264: the WDMA's RAW10 is a pixel in 16 bits)
 # CONFIG_CAM_S9_STRIDE is not set
@@ -1459,7 +1501,7 @@ CONFIG_MODEM_AGAIN=y
 # CONFIG_SCCAM_W is not set
 
 #
-# Haptics and torch (5)
+# Haptics and torch (6)
 #
 
 # the vibration motor (5 is what the README's phone line uses) [needs fw-haptic/ from the phone]
@@ -1470,6 +1512,9 @@ CONFIG_MODEM_AGAIN=y
 
 # a look, reading only: the bus as found, the chip's ID, the flash block's registers, the two pins
 # CONFIG_TORCH is not set
+
+# the torch current code iOS's full level maps to (1-9, default 3: the S9's 60 mA)
+# CONFIG_TORCH_CODE_MAX is not set
 
 # read by hakios.s2mpb02_torch.c, hakios.torch.c (kernel)
 # CONFIG_TORCH_MAX_S is not set
@@ -1639,8 +1684,23 @@ CONFIG_MODEM_AGAIN=y
 # CONFIG_UFS_WRITE_GUID is not set
 
 #
-# User space (128)
+# User space (173)
 #
+
+# Star2's primary rear camera (S5K2L3): 2 powers it up at boot as its stream would, reads its ID and revision, powers ...
+# CONFIG_CAM_S9_REAR_PROBE is not set
+
+# Star2's primary rear camera (S5K2L3 on CSIS0) as the iOS back camera, 2016x1512 at 30; the front camera stays usable ... [requires CONFIG_CAM_S9=7]
+# CONFIG_CAM_S9_REAR is not set
+
+# Star2's telephoto camera (S5K3M3): 1 powers it up at boot as its stream would, reads its ID and revision, powers it ...
+# CONFIG_CAM_S9_TELE_PROBE is not set
+
+# Star2's telephoto camera (S5K3M3 on CSIS2) as the iOS back telephoto, 2016x1512 at 30; hidden again if it fails [requires CONFIG_CAM_S9=7]
+# CONFIG_CAM_S9_TELE is not set
+
+# test the Galaxy S9 rear camera flash at boot for this many milliseconds (1 to 500)
+# CONFIG_TORCH_FLASH_MS is not set
 
 # arguments only the kernel reads built into the kernel (HAKIOS_BUILTIN_ARGS); given on the line, an argument goes ...
 # CONFIG_BUILTIN_ARGS is not set
@@ -1699,6 +1759,18 @@ CONFIG_MODEM_AGAIN=y
 # the partition the patch is read from (default VENDOR)
 # CONFIG_BT_VENDOR_PART is not set
 
+# do not log the APM's tables at boot (default: one line per domain, read only)
+# CONFIG_BUS_LOG is not set
+
+# read by hakios.exynos_acpm.c (kernel)
+# CONFIG_BUS_MASK is not set
+
+# MIF, INT and DISP to their top at boot, kept there (re-asked every 10 s, cheap)
+# CONFIG_BUS_MAX is not set
+
+# read by hakios.exynos_acpm.c (kernel)
+# CONFIG_BUS_MIF_DELAY is not set
+
 # read by inject.c (user space)
 # CONFIG_CA_METALLIB is not set
 
@@ -1710,6 +1782,87 @@ CONFIG_MODEM_AGAIN=y
 
 # CoreAnimation's switches here as in the window server (inject.c), set before QuartzCore reads them
 # CONFIG_CAENV is not set
+
+# read by hakios.ak737x.c (kernel)
+# CONFIG_CAM_AF is not set
+
+# read by hakios.ak737x.c (kernel)
+# CONFIG_CAM_AF_COARSE is not set
+
+# the sharpness, in per cent of what the search found, below which it is made again (60)
+# CONFIG_CAM_AF_DROP is not set
+
+# read by hakios.ak737x.c (kernel)
+# CONFIG_CAM_AF_FINE is not set
+
+# read by hakios.ak737x.c (kernel)
+# CONFIG_CAM_AF_HI is not set
+
+# read by hakios.ak737x.c (kernel)
+# CONFIG_CAM_AF_LO is not set
+
+# stage 2's position, and where the lens is put first at 3 and 4 (0-511; 120 unless said)
+# CONFIG_CAM_AF_POS is not set
+
+# frames let go by after a move before the measurement (1-6, 2 unless said)
+# CONFIG_CAM_AF_SETTLE is not set
+
+# stage 2: the table once, by itself
+# CONFIG_CAM_AF_WALK is not set
+
+# the window's side in pixels (64-512, 384 unless said)
+# CONFIG_CAM_AF_WIN is not set
+
+# read by hakios.ak737x.c (kernel)
+# CONFIG_CAM_AF_X is not set
+
+# read by hakios.ak737x.c (kernel)
+# CONFIG_CAM_AF_Y is not set
+
+# the camera of this run (cam_s9=N's steps, camshot, the stream) is the rear one
+# CONFIG_CAM_REAR is not set
+
+# the sensor's 7-bit I2C address, if not 0x10 (the device tree's)
+# CONFIG_CAM_REAR_ADDR is not set
+
+# the iris: 1 a look, 15 or 24 put at F1.5 or F2.4 at each power-up (0 or none: left where it rests)
+# CONFIG_CAM_REAR_AP is not set
+
+# read by hakios.exynos_camera_rear.c (kernel)
+# CONFIG_CAM_REAR_OIS is not set
+
+# with 2: 0 still (the default), 1 video, 5 centring
+# CONFIG_CAM_REAR_OIS_MODE is not set
+
+# no focus (the lens left where its spring holds it)
+# CONFIG_CAM_S9_AF is not set
+
+# the rear frames' Bayer order (default 1, GRBG: fimc-is-cis-2l3.c's GR_BG with 0x0101 = 3)
+# CONFIG_CAM_S9_REAR_BAYER is not set
+
+# the rear stream's first exposure in lines of 815 ns (default 30000, about 24 ms; its gain starts at 4x)
+# CONFIG_CAM_S9_REAR_EXP is not set
+
+# the ISPPRE bus clock for the rear stream, 466 MHz / (D + 1); default 0, Android's rate
+# CONFIG_CAM_S9_REAR_ISPDIV is not set
+
+# the rear sensor's MIPI CCS test pattern (0x0600: 1 solid colour, 2 colour bars) for its picture
+# CONFIG_CAM_S9_REAR_TP is not set
+
+# the rear frames turned half round for user space (default 0: the sensor flips itself)
+# CONFIG_CAM_S9_REAR_TURN is not set
+
+# the tele frames' Bayer order (default 1, GRBG: fimc-is-cis-3m3.c's GR_BG)
+# CONFIG_CAM_S9_TELE_BAYER is not set
+
+# the tele stream's first exposure in lines of 20.3 us (default 1000; its gain starts at 4x)
+# CONFIG_CAM_S9_TELE_EXP is not set
+
+# the tele sensor's MIPI CCS test pattern (0x0600: 1 solid colour, 2 colour bars) for its picture
+# CONFIG_CAM_S9_TELE_TP is not set
+
+# the tele frames turned half round for user space (default 0, as Apollo streams it: no flip)
+# CONFIG_CAM_S9_TELE_TURN is not set
 
 # read by inject.c (user space)
 # CONFIG_CAMTL is not set
@@ -1730,10 +1883,22 @@ CONFIG_MODEM_AGAIN=y
 # CONFIG_CPUFREQ_GOV is not set
 
 # read by hakios.exynos_cpufreq.c (kernel)
+# CONFIG_CPUFREQ_GOV_BIG_DUAL is not set
+
+# read by hakios.exynos_cpufreq.c (kernel)
 # CONFIG_CPUFREQ_GOV_BIG_MAX is not set
 
 # read by hakios.exynos_cpufreq.c (kernel)
 # CONFIG_CPUFREQ_GOV_BIG_MIN is not set
+
+# read by hakios.exynos_cpufreq.c (kernel)
+# CONFIG_CPUFREQ_GOV_BIG_OC is not set
+
+# read by hakios.exynos_cpufreq.c (kernel)
+# CONFIG_CPUFREQ_GOV_BIG_QUAD is not set
+
+# read by hakios.exynos_cpufreq.c (kernel)
+# CONFIG_CPUFREQ_GOV_BIG_SINGLE is not set
 
 # read by hakios.exynos_cpufreq.c (kernel)
 # CONFIG_CPUFREQ_GOV_LIT_MAX is not set
@@ -1746,6 +1911,12 @@ CONFIG_MODEM_AGAIN=y
 
 # the load window (20 to 200; 40)
 # CONFIG_CPUFREQ_GOV_MS is not set
+
+# the PMIC's CPU over-current warning on, and with it Samsung's star2lte limits for the M3s: 1924000 with three or ...
+# CONFIG_CPUFREQ_OCP is not set
+
+# read by hakios.exynos_cpufreq.c (kernel)
+# CONFIG_CPUFREQ_OCP_REGS is not set
 
 # read by 1002-avf-security-level.patch (kernel)
 # CONFIG_CS_RELAX_PLATFORM_TASK_PORTS is not set
@@ -1830,6 +2001,9 @@ CONFIG_MODEM_AGAIN=y
 
 # read by hakios_commpage.h (kernel)
 # CONFIG_ISA_FLOOR is not set
+
+# read by cpu.c (kernel)
+# CONFIG_JTAG is not set
 
 # read by MiniAppleKeyStore.cpp (kernel)
 # CONFIG_KEYSTORE_ENTCHECK is not set
@@ -2023,6 +2197,12 @@ CONFIG_MODEM_AGAIN=y
 # the Galaxy S9's hardware watchdog is not armed (a restart still goes to recovery: INFORM3 is written)
 # CONFIG_WDT is not set
 
+# read by cpu.c (kernel)
+# CONFIG_WFE_MODE is not set
+
+# read by cpu.c (kernel)
+# CONFIG_WFI is not set
+
 # read by hakios.exec.c (kernel)
 # CONFIG_XPCPROXY_IDVERSION is not set
 
@@ -2037,17 +2217,26 @@ CONFIG_MODEM_AGAIN=y
 # CONFIG_BOOTARGS is not set
 
 #
-# Sensors (10)
+# Sensors (16)
 #
 
 # read by hakios.ssp.c (kernel)
 # CONFIG_SHUB is not set
+
+# the accelerometer's factory offsets, sent to the hub before the sensors go on, as Samsung does
+# CONFIG_SHUB_ACC_CAL is not set
+
+# the accelerometer's (and gyroscope's) position in the formation of step 5
+# CONFIG_SHUB_ACC_POS is not set
 
 # at step 2, power the CHUB domain on if step 1 found it off, using the PMU's chub_on sequence
 # CONFIG_SHUB_CHUB_ON is not set
 
 # read by hakios.ssp.c (kernel)
 # CONFIG_SHUB_DIV is not set
+
+# the same for the gyroscope (gyro_lsm6dsl.c set_gyro_cal(): SSP 0xCD, s32 x, y, z), the three
+# CONFIG_SHUB_GYRO_CAL is not set
 
 # wait for MCU_RESP before every exchange, as Samsung's driver does
 # CONFIG_SHUB_HELLO is not set
@@ -2061,11 +2250,20 @@ CONFIG_MODEM_AGAIN=y
 # sample period in ms (default 20; light, proximity and pressure use 200)
 # CONFIG_SHUB_MS is not set
 
+# a memory reader added to the hub's firmware as it is sent, for the GNSS bring-up (docs/gnss.md), which
+# CONFIG_SHUB_PEEK is not set
+
 # read by hakios.ssp.c (kernel)
 # CONFIG_SHUB_REQ_LEN is not set
 
 # RPC that carries SSP to the hub
 # CONFIG_SHUB_REQ_RPC is not set
+
+# with step 6: every n seconds two lines, the accelerometer's and the gyroscope's: the mean over
+# CONFIG_SHUB_SAY is not set
+
+# with step 6: thirty seconds after the boot, /dev/hakios-sensors opened and read for n seconds
+# CONFIG_SHUB_SELFREAD is not set
 
 # read by hakios.ssp.c (kernel)
 # CONFIG_SHUB_SENSORS is not set

@@ -183,6 +183,21 @@
  *                      and the other three CSISs' DMA commons (read, and their interrupt masks for the pattern's while).
  *                      Off by default: on 3 November the sweep's read of CMU_ISPPRE 0x303C took a synchronous external
  *                      abort (isp_status(), the phone's cam-fix.img)
+ *   cam_s9_selfread=N  with 7: thirty seconds after the boot, /dev/hakios-camera opened and N frames read from inside the
+ *                      kernel, through the file system as a program reads them (a kernel without a program that reads
+ *                      the device shows the whole way so: the node, open, the stream woken by the first read, the frames
+ *                      packed, the close that ends it); each thirtieth frame's header in the log, then the rate. With it,
+ *                      sysctl kern.hakios.camera_selfread=N (the USB console's too) reads N more
+ *   cam_s9_selfread_focus=1  the reader also writes HAKIOS_CAMERA_FOCUS, as a capture device would (cam_af=4): after its
+ *                      150th frame a position (600 of 1023), after its 200th a search on a window whose middle is
+ *                      cam_s9_selfread_x, cam_s9_selfread_y (1024ths of the picture as read; 512, 512 unless said)
+ *   cam_s9_cached=1    read() copies the frame through a second, cached mapping of the ring (see cam_cached below):
+ *                      off by default
+ *   cam_rear=1         the camera of the run is the rear one, a Samsung S5K2L3 on CSIS0 (hakios.exynos_camera_rear.c,
+ *                      which reads the cam_rear_* ones; rear_side() below): 2016 x 1512 RAW10 at 30 frames a second
+ *   cam_af=N           the lens (hakios.ak737x.c, which reads the cam_af_* ones): 1 its chip and the EEPROM looked at, 2
+ *                      the lens held at a position, 3 the autofocus, 4 that and HAKIOS_CAMERA_FOCUS. None or 0: no
+ *                      lens, as before (VDDAF is switched with the sensor's supplies either way: Android's order)
  *   cam_s9_mmu_probe=1 the SysMMU (0x16310000) mapped and read: MMU_CTRL/CFG/STATUS/VERSION in the log, and a SysMMU
  *                      found translating stops the DMA. Off by default (its clock or Q-channel may be off, and a read
  *                      then aborts, as the PCIe SysMMU's did): the SysMMU is taken as off, pass-through, and the DMA
@@ -232,9 +247,22 @@
 #include <sys/hakios.physmap.h>
 #include <sys/systm.h>
 #include <sys/uio.h>
+#include <sys/fcntl.h>
+#include <sys/sysctl.h>
+#include <sys/vnode.h>
+#include <kern/kalloc.h>
 #include <vm/vm_kern.h>
 #include <sys/hakios.exynos_soc.h>
 #include <sys/hakios.xnu.h>
+
+/*
+ * Two camera drivers share the configuration symbol EXYNOS_CAMERA and the kernel's three entry points: this one (with
+ * hakios.ak737x.c and hakios.exynos_camera_rear.c), run on the Galaxy S9, and hakios.exynos_camera_star2.c, Anan Jaser's, run
+ * on the Galaxy S9+. A kernel has one of them: the S9+'s configuration (HAKIOS_DEVICE_IS_STAR2LTE, written into
+ * dev/hakios.drivers.h by tools/hakios-config.py) compiles this file to nothing, every other one compiles that file to
+ * nothing. Bringing the two into one driver waits until both phones can be run (docs/exynos9810-cameras.md).
+ */
+#ifndef HAKIOS_DEVICE_IS_STAR2LTE
 
 static bool leaving;
 
@@ -314,6 +342,7 @@ static struct hakios_hsi2c sensor_bus = {
 	.pins_mask = 0xff00u, .pins_want = 0x3300u,
 	.ipclk_mhz = 400, .bus_hz = 400000,     /* clock-frequency = <400000> */
 };
+static struct hakios_hsi2c *sbus = &sensor_bus;        /* the bus of the camera of this run: the rear one's with cam_rear=1 */
 
 /* ---- pins and the clock ---- */
 
@@ -342,6 +371,53 @@ static bool broken;                     /* a write did not read back, or the bus
 static bool powered;                    /* the sensor's power-up was begun */
 static uint32_t gate_found, mux_found, div_found, qch_found;
 static bool clock_mine;
+
+/*
+ * The lens (hakios.ak737x.c: the AK737x on hsi2c@10900000, the EEPROM, the autofocus), only with boot-arg cam_af=N.
+ * Without it cam_af is 0 and none of these is called: the camera is as it was before there was a lens driver.
+ */
+uint32_t hakios_ak737x_setup(uint32_t ipclk_mhz, int (*say)(const char *, ...));
+void hakios_ak737x_up(void);
+void hakios_ak737x_down(void);
+bool hakios_ak737x_frame(vm_offset_t raw, uint32_t stride, uint32_t width, uint32_t height, uint64_t number, bool settled);
+void hakios_ak737x_shot(vm_offset_t raw, uint32_t stride, uint32_t width, uint32_t height);
+uint32_t hakios_ak737x_focus(void);
+void hakios_ak737x_ask(uint32_t a, uint32_t b, uint32_t c, uint32_t d);
+void hakios_ak737x_closed(void);
+bool hakios_ak737x_searching(void);
+static uint32_t cam_af;
+
+/*
+ * The rear camera (hakios.exynos_camera_rear.c: the S5K2L3, its supplies on the S2MPB03, its clock, reset and bus), only
+ * with boot-arg cam_rear=1. Without it cam_rear is 0, none of these is called and nothing of the rear camera's is read
+ * or written. Three of its supplies are on the S2MPB02, the front camera's chip: they go through pmic_put() below, which
+ * takes their registers only with cam_rear=1.
+ */
+uint32_t hakios_s9rear_setup(uint32_t ipclk_mhz, int (*say)(const char *, ...));
+bool hakios_s9rear_map(vm_offset_t peric0, vm_offset_t peric1, vm_offset_t cmu_top);
+bool hakios_s9rear_look(void);
+bool hakios_s9rear_up(void);
+void hakios_s9rear_down(void);
+struct hakios_hsi2c *hakios_s9rear_bus(uint8_t *addr);
+bool hakios_s9rear_mode(void);
+struct hakios_hsi2c *hakios_s9rear_lens_bus(void);
+void hakios_s9rear_lens_up(void);
+void hakios_s9rear_lens_down(void);
+void hakios_s9rear_poll(uint64_t frame);
+void hakios_ak737x_rear(struct hakios_hsi2c *bus);
+bool hakios_s9cam_pb02_on(uint32_t which);
+void hakios_s9cam_pb02_off(uint32_t which);
+static uint32_t cam_rear;
+#define B1CTRL1         0x0B            /* BUCK1, VDD_EXT_1P3_PB03 (the S2MPB03's low-voltage input): as BUCK2's two */
+#define B1CTRL2         0x0C
+static const struct ldo rear_ldos[] = {
+	{ "VDDAF_COMMON_CAM (LDO14, 3.3 V)", 0x2B, 0x6C, true },
+	{ "VDDD_1.8V_OIS (LDO10, 1.8 V)", 0x27, 0x30, true },
+	{ "VDDD_2.8V_OIS (LDO15, 2.8 V)", 0x2C, 0x58, true },
+};
+#define NREAR           (sizeof(rear_ldos) / sizeof(rear_ldos[0]))
+static uint8_t rear_found[NREAR], b1ctrl1_found, b1ctrl2_found;
+static bool rear_mine[NREAR], buck1_mine, rear_looked;
 
 static inline uint32_t
 rd(vm_offset_t base, uint32_t off)
@@ -391,6 +467,17 @@ pmic_allowed(uint8_t reg, uint8_t value)
 			return value == ldos[i].vsel || value == (LDO_ON | ldos[i].vsel);
 		}
 	}
+	for (uint32_t i = 0; cam_rear && i < NREAR; i++) {
+		if (reg == rear_ldos[i].reg) {
+			return value == rear_ldos[i].vsel || value == (LDO_ON | rear_ldos[i].vsel);
+		}
+	}
+	if (cam_rear && reg == B1CTRL2) {
+		return value == BUCK2_VSEL;     /* 1.3 V, as BUCK2's */
+	}
+	if (cam_rear && reg == B1CTRL1) {
+		return (value & ~BUCK_ON) == (b1ctrl1_found & ~BUCK_ON) && ((value & BUCK_ON) == 0 || (value & BUCK_ON) == BUCK_ON);
+	}
 	if (reg == B2CTRL2) {
 		return value == BUCK2_VSEL;
 	}
@@ -419,7 +506,7 @@ pmic_put(uint8_t reg, uint8_t value, const char *name)
 		same = false;
 	} else {
 		/* BUCK2's control register: its enable bits read back (the rest is as found and not ours) */
-		same = reg == B2CTRL1 ? (back & BUCK_ON) == (value & BUCK_ON) : back == value;
+		same = (reg == B2CTRL1 || reg == B1CTRL1) ? (back & BUCK_ON) == (value & BUCK_ON) : back == value;
 	}
 	if (!same) {
 		say("exynos_camera: S2MPB02 %#x (%s): wrote %#x, read back %#x (bus %#x): no more writing for this run\n",
@@ -508,6 +595,149 @@ ldo_off(uint32_t i)
 	}
 }
 
+/* ---- the rear camera's part of the S2MPB02 (cam_rear=1): BUCK1 and three LDOs ---- */
+
+/* one of the rear camera's three LDOs to the device tree's voltage and on, unless it was found on; said */
+bool
+hakios_s9cam_pb02_on(uint32_t i)
+{
+	if (!cam_rear || !rear_looked || i >= NREAR) {
+		return false;
+	}
+	if (rear_found[i] & LDO_ON) {
+		say("exynos_camera: rear: %s was on already (%#x): left as it is\n", rear_ldos[i].name, rear_found[i]);
+		return true;
+	}
+	if ((rear_found[i] & LDO_VSEL) != rear_ldos[i].vsel && !pmic_put(rear_ldos[i].reg, rear_ldos[i].vsel, rear_ldos[i].name)) {
+		return false;
+	}
+	rear_mine[i] = true;
+	if (!pmic_put(rear_ldos[i].reg, (uint8_t)(LDO_ON | rear_ldos[i].vsel), rear_ldos[i].name)) {
+		return false;
+	}
+	say("exynos_camera: rear: S2MPB02 write: %#x = %#x (%s on), read back the same\n", rear_ldos[i].reg,
+	    LDO_ON | rear_ldos[i].vsel, rear_ldos[i].name);
+	spin_us(200);
+	return true;
+}
+
+void
+hakios_s9cam_pb02_off(uint32_t i)
+{
+	if (cam_rear && i < NREAR && rear_mine[i]) {
+		bool was_broken = broken;
+
+		broken = false;         /* switching off is always tried */
+		if (pmic_put(rear_ldos[i].reg, rear_ldos[i].vsel, rear_ldos[i].name)) {
+			rear_mine[i] = false;
+			say("exynos_camera: rear: S2MPB02 write: %#x = %#x (%s off), read back the same\n", rear_ldos[i].reg,
+			    rear_ldos[i].vsel, rear_ldos[i].name);
+		}
+		broken = broken || was_broken;
+	}
+}
+
+/* BUCK1 (VDD_EXT_1P3_PB03) at 1.3 V and on, unless it was found on (the device tree has it always on) */
+static bool
+buck1_on(void)
+{
+	if ((b1ctrl1_found & BUCK_ON) == BUCK_ON) {
+		return true;
+	}
+	if (b1ctrl2_found != BUCK2_VSEL && !pmic_put(B1CTRL2, BUCK2_VSEL, "BUCK1's voltage")) {
+		return false;
+	}
+	buck1_mine = true;
+	if (!pmic_put(B1CTRL1, (uint8_t)((b1ctrl1_found & ~BUCK_ON) | BUCK_ON), "VDD_EXT_1P3_PB03 (BUCK1)")) {
+		return false;
+	}
+	say("exynos_camera: rear: S2MPB02 write: VDD_EXT_1P3_PB03 (BUCK1) on at 1.3 V (B1CTRL1 %#x, B1CTRL2 %#x)\n",
+	    (b1ctrl1_found & ~BUCK_ON) | BUCK_ON, BUCK2_VSEL);
+	spin_us(200);
+	return true;
+}
+
+static void
+buck1_off(void)
+{
+	if (buck1_mine) {
+		bool was_broken = broken;
+
+		broken = false;
+		if (pmic_put(B1CTRL1, (uint8_t)(b1ctrl1_found & ~BUCK_ON), "VDD_EXT_1P3_PB03 (BUCK1)")) {
+			buck1_mine = false;
+			say("exynos_camera: rear: S2MPB02 write: VDD_EXT_1P3_PB03 (BUCK1) off again (B1CTRL1 %#x)\n",
+			    b1ctrl1_found & ~BUCK_ON);
+		}
+		broken = broken || was_broken;
+	}
+}
+
+/* step 1's reads for the rear camera: BUCK1 and the three LDOs on the S2MPB02 as found, then the S2MPB03 (the rear file) */
+static bool
+rear_look_supplies(void)
+{
+	if (pmic_get(B1CTRL1, &b1ctrl1_found) != 0 || pmic_get(B1CTRL2, &b1ctrl2_found) != 0) {
+		say("exynos_camera: rear: 1: BUCK1's registers cannot be read (%x)\n", pmic_bus.last_error);
+		return false;
+	}
+	say("exynos_camera: rear: 1: VDD_EXT_1P3_PB03 (BUCK1, the S2MPB03's input): B1CTRL1 %#x (%s), B1CTRL2 %#x (voltage code; "
+	    "the device tree's %#x, 1.3 V)\n", b1ctrl1_found, (b1ctrl1_found & BUCK_ON) == BUCK_ON ? "on" :
+	    (b1ctrl1_found & BUCK_ON) ? "in another mode" : "off", b1ctrl2_found, BUCK2_VSEL);
+	for (uint32_t i = 0; i < NREAR; i++) {
+		if (pmic_get(rear_ldos[i].reg, &rear_found[i]) != 0) {
+			say("exynos_camera: rear: 1: %s cannot be read (%x)\n", rear_ldos[i].name, pmic_bus.last_error);
+			return false;
+		}
+		say("exynos_camera: rear: 1: %s: %#x (%s, voltage code %#x, the device tree's %#x)\n", rear_ldos[i].name,
+		    rear_found[i], (rear_found[i] & LDO_ON) ? "on" : "off", rear_found[i] & LDO_VSEL, rear_ldos[i].vsel);
+	}
+	rear_looked = true;
+	return hakios_s9rear_look();
+}
+
+/* step 2 for the rear camera: BUCK1 seen on (or switched on), then the rear file's power-up and ID */
+static bool
+rear_sensor_up(void)
+{
+	for (uint32_t i = 0; i < NREAR; i++) {
+		if ((rear_found[i] & LDO_ON) && (rear_found[i] & LDO_VSEL) != rear_ldos[i].vsel) {
+			say("exynos_camera: rear: 2: %s is on at another voltage: someone else has it; nothing is written\n",
+			    rear_ldos[i].name);
+			return false;
+		}
+	}
+	if ((b1ctrl1_found & BUCK_ON) != 0 && ((b1ctrl1_found & BUCK_ON) != BUCK_ON || b1ctrl2_found != BUCK2_VSEL)) {
+		say("exynos_camera: rear: 2: BUCK1 is on in another mode or at another voltage (%#x, %#x): nothing is written\n",
+		    b1ctrl1_found, b1ctrl2_found);
+		return false;
+	}
+	powered = true;
+	if (!buck1_on() || !hakios_s9rear_up()) {
+		hakios_s9rear_down();
+		buck1_off();
+		powered = false;
+		return false;
+	}
+	hakios_s9rear_lens_up();        /* the lens's bus; the OIS and the aperture as their boot-args say */
+	if (cam_af) {
+		hakios_ak737x_up();
+	}
+	return true;
+}
+
+static void
+rear_power_down(void)
+{
+	if (cam_af) {
+		hakios_ak737x_down();   /* the lens parked and its chip asleep while VDDAF_COMMON is still there */
+	}
+	hakios_s9rear_lens_down();
+	hakios_s9rear_down();
+	buck1_off();
+	powered = false;
+}
+
 /* a pin: an output (CON nibble 1) at the level given */
 static void
 pin_out(vm_offset_t bank, uint32_t number, bool high)
@@ -550,6 +780,13 @@ power_down(void)
 	if (!powered) {
 		return;
 	}
+	if (cam_rear) {
+		rear_power_down();
+		return;
+	}
+	if (cam_af) {
+		hakios_ak737x_down();   /* the lens parked and its chip asleep while VDDAF is still there */
+	}
 	pin_out(peric1 + GPC1, MCLK_PIN, false);
 	pin_out(peric0 + GPG2, RESET_PIN, false);
 	spin_us(1000);
@@ -578,9 +815,9 @@ static uint32_t
 sensor_get(uint16_t reg, uint8_t *buf, uint32_t len)
 {
 	uint8_t address[2] = { (uint8_t)(reg >> 8), (uint8_t)reg };
-	uint32_t error = hakios_hsi2c_message(&sensor_bus, sensor_addr, false, address, 2, false);
+	uint32_t error = hakios_hsi2c_message(sbus, sensor_addr, false, address, 2, false);
 
-	return error ? error : hakios_hsi2c_message(&sensor_bus, sensor_addr, true, buf, len, true);
+	return error ? error : hakios_hsi2c_message(sbus, sensor_addr, true, buf, len, true);
 }
 
 static void
@@ -596,7 +833,28 @@ look_pins(const char *when)
 
 #define PMU_PA                  EXYNOS_PMU_PA
 #define PMU_SIZE                0x5000
-#define PMU_DPHY_ISO_CSIS1      EXYNOS_CAM_PMU_DPHY_ISO_CSIS1          /* bit 0: 1 the isolation bypassed (CSIS1 and CSIS3's M0S4S2) */
+/*
+ * What differs between the two cameras' ways in (the front's values here; rear_side() puts in the rear's, cam_rear=1):
+ * the CSIS, its D-PHY, its WDMA, the PHY's isolation word in the PMU and its reset bit, the lanes, the frame.
+ */
+static uint64_t csis_pa = EXYNOS_CSIS1_PA, phy_pa = EXYNOS_CSIS1_PHY_PA, wdma_pa = EXYNOS_CSIS1_WDMA_PA;
+static uint32_t phy_bytes = 0x3000;
+static uint32_t iso_off = EXYNOS_CAM_PMU_DPHY_ISO_CSIS1;        /* PMU: bit 0, 1 the isolation bypassed */
+static uint32_t dphy_reset_bit = 1u << 2;       /* SYSREG_ISPPRE 0x500: CSIS1's M0S4S2 */
+static uint32_t dphy_base;                      /* the D-PHY's registers: +0x1400 in CSIS0's block (M4S4 top) */
+static bool dphy_bias;                          /* CSIS0's: the bias block's four words too */
+static uint32_t cam_lanes = 2, cam_settle = 36, cam_interleave = 3;
+static uint32_t ch_format[4] = { 0x2B, 0x3F, 0x12, 0x3F }, ch_vc[4] = { 0, 1, 0, 3 };
+static uint32_t frame_w = 1632, frame_h = 1224;
+static uint32_t slot_bytes = 4u << 20;
+static uint32_t mode_lines = 0x04F2, mode_margin = 4, line_ns = 26283;
+static uint32_t dma_mux_off;                    /* SYSREG_ISPPRE: the WDMA's input mux, 0: not written (the front's) */
+static uint32_t dma_mux_found;
+static bool dma_mux_mine;
+static bool sensor_hold = true;                 /* the sensor takes the grouped parameter hold (0x0104) */
+static bool frame_turn = true;                  /* read() turns the frame half a turn (the front sensor's mounting) */
+static const char *csis_name = "CSIS1", *cam_name = "the front camera";
+#define PMU_DPHY_ISO_CSIS1      iso_off         /* (CSIS1 and CSIS3's M0S4S2: 0x730; CSIS0's M4S4, the display's too: 0x70C) */
 #define PMU_DPU_STATUS          EXYNOS_CAM_PMU_DPU_STATUS          /* pd-dpu, pd-isppre's parent */
 #define PMU_ISPPRE_CONFIG       EXYNOS_CAM_PMU_ISPPRE_CONFIG
 #define PMU_ISPPRE_STATUS       EXYNOS_CAM_PMU_ISPPRE_STATUS
@@ -636,9 +894,9 @@ static const uint32_t qchs[] = { 0x3020, QCH_CSIS1, 0x3028, 0x302C, 0x3038, QCH_
 
 #define SYSREG_ISPPRE_PA        EXYNOS_SYSREG_ISPPRE_PA
 #define DPHY_RESET              0x0500          /* the MIPI PHYs' resets: bit 2 CSIS1's M0S4S2 (1: running) */
-#define DPHY_RESET_CSIS1        (1u << 2)
+#define DPHY_RESET_CSIS1        dphy_reset_bit
 
-#define CSIS1_PA                EXYNOS_CSIS1_PA
+#define CSIS1_PA                csis_pa
 #define CSIS_VERSION            0x000
 #define CSIS_CMN_CTRL           0x004
 #define CSIS_CLK_CTRL           0x008           /* CLKGATE_TRAIL [31:16], CLKGATE_EN [7:4] (reset 0xF), read only here */
@@ -663,17 +921,18 @@ static const uint32_t qchs[] = { 0x3020, QCH_CSIS1, 0x3028, 0x302C, 0x3038, QCH_
 #define CSIS_IRQ_MASK0          0x011FFF1Fu     /* the BSP's default masks */
 #define CSIS_IRQ_MASK1          0x0000FFF0u
 
-#define CSIS1_PHY_PA            EXYNOS_CSIS1_PHY_PA
-#define DPHY_ACTRL_SC_06        0x1018
-#define DPHY_DCTRL_SC_02        0x1084
+#define CSIS1_PHY_PA            phy_pa
+#define DPHY_BIAS_CTRL(n)       (0x0400 + 4 * (n))      /* BIAS_CTRL_01-06: CSIS0's block only */
+#define DPHY_ACTRL_SC_06        (0x1018 + dphy_base)
+#define DPHY_DCTRL_SC_02        (0x1084 + dphy_base)
 #define DPHY_LANE(n)            (0x400u * (n))
-#define DPHY_ACTRL_SD_08        0x143C          /* [6:5] SKEW_DLYSEL */
-#define DPHY_DCTRL_SD_05        0x14AC          /* bit 2 HS_MODE_SEL */
-#define DPHY_DCTRL_SD_06        0x14B0          /* [7:0] HSSETTLECTL */
-#define DPHY_DCTRL_SD_13        0x14E0          /* bit 0 SKEWCAL_EN */
-#define SETTLE_719              36              /* fimc-is-hw-settle-10nm-lpp.h at 720 */
+#define DPHY_ACTRL_SD_08        (0x143C + dphy_base)        /* [6:5] SKEW_DLYSEL */
+#define DPHY_DCTRL_SD_05        (0x14AC + dphy_base)        /* bit 2 HS_MODE_SEL */
+#define DPHY_DCTRL_SD_06        (0x14B0 + dphy_base)        /* [7:0] HSSETTLECTL */
+#define DPHY_DCTRL_SD_13        (0x14E0 + dphy_base)        /* bit 0 SKEWCAL_EN */
+#define SETTLE_719              cam_settle      /* 36: fimc-is-hw-settle-10nm-lpp.h at 720 */
 
-#define CSIS1_WDMA_PA           EXYNOS_CSIS1_WDMA_PA    /* VC0's; the DMA common of CSIS1 at +0x400 */
+#define CSIS1_WDMA_PA           wdma_pa    /* VC0's; the DMA common of CSIS1 at +0x400 */
 #define DMA_CTRL                0x000
 #define DMA_FMT                 0x004
 #define DMA_ADDR(n)             (0x010 + 4 * (n))
@@ -721,10 +980,11 @@ static const uint32_t qchs[] = { 0x3020, QCH_CSIS1, 0x3028, 0x302C, 0x3038, QCH_
 #define HW_FORMAT_RAW10         0x2B
 #define HW_FORMAT_EMBEDDED      0x12
 #define HW_FORMAT_UNKNOWN       0x3F
-#define FRAME_W                 1632
-#define FRAME_H                 1224
+#define FRAME_W                 frame_w         /* 1632 x 1224, the front camera's mode; 2016 x 1512, the rear's */
+#define FRAME_H                 frame_h
+#define MAX_W                   2016            /* the widest frame: the line buffers' size */
 #define LINE_BYTES              (FRAME_W * 2)   /* the WDMA's RAW10 (PACK12 off): a pixel in 16 bits, little-endian, [9:0] */
-#define BUF_BYTES               (4u << 20)
+#define BUF_BYTES               slot_bytes      /* 4 MB (the front's); the rear camera's frame takes 6098944 */
 #define CANARY                  0xA5
 /*
  * The frame's memory: none of XNU's own is below 4 GB on the S9 (its RAM is the bank from 0x880000000), so it is
@@ -740,11 +1000,13 @@ static const uint32_t qchs[] = { 0x3020, QCH_CSIS1, 0x3028, 0x302C, 0x3038, QCH_
 #define MEM_BYTES               ((uint32_t)EXYNOS9810_MEM_SIZE(CAMERA))
 #define MEM_FLOOR               EXYNOS9810_MEM_DPU_SCAN_END     /* the display's scan-out buffers end here */
 #define MEM_CEILING             EXYNOS9810_MEM_CAMERA_END       /* UFS's own-mode memory */
-#define RING_SLOTS              4
+#define RING_SLOTS              4u
 #define SLOT_BYTES              BUF_BYTES       /* a raw frame's place: 3264 x 1224 = 3995136 bytes, in 4 MB */
 #define STILL_OFF               (RING_SLOTS * SLOT_BYTES)       /* camshot's copy of a frame of the stream */
 #define RGB_OFF                 (STILL_OFF + SLOT_BYTES)        /* camshot's picture */
 #define RGB_BYTES               (FRAME_W * FRAME_H * 3)
+
+extern boolean_t pmap_valid_page(ppnum_t pn);
 
 static const uint64_t other_cmn_pa[3] = { 0x162B0400, 0x162D0400, 0x162E0400 };        /* CSIS0, 2, 3: read only */
 
@@ -766,6 +1028,17 @@ static uint32_t frame_last;             /* buffer_report()'s: the bytes up to th
 static uint32_t frame_ends;             /* sensor_frame()'s frame ends */
 static uint32_t cam_exp = 1000, cam_gain = 0x40, cam_pack12;
 static uint32_t cam_probe, cam_mmu_probe;      /* cam_s9_probe, cam_s9_mmu_probe: the risky reads, off by default */
+
+/*
+ * cam_s9_cached=1: read() takes the frame through a second, cached mapping of the ring (hakios_physmap_cached()), read
+ * only, each frame's cache lines dropped (DC IVAC) before its lines are copied: what the WDMA wrote is fetched again
+ * from memory, and nothing is ever written through this mapping, so no line of it is ever dirty. The write-combined
+ * mapping stays the one everything else uses (the fill, the meter, the lens's measure, camshot). Without it a read
+ * copies the frame out of the uncached mapping at about 60 MB a second: 102 ms for the rear camera's 6.1 MB (the phone,
+ * 12 November), longer than the ring's four frames last.
+ */
+static uint32_t cam_cached;
+static vm_offset_t buffer_cached;
 
 /* the SysMMU found translating; never read unless cam_s9_mmu_probe=1 (else taken as off: pass-through) */
 static bool
@@ -837,7 +1110,7 @@ sensor_put(uint16_t reg, uint16_t value, uint32_t bytes)
 	} else {
 		buf[2] = (uint8_t)value;
 	}
-	error = hakios_hsi2c_message(&sensor_bus, sensor_addr, false, buf, 2 + bytes, true);
+	error = hakios_hsi2c_message(sbus, sensor_addr, false, buf, 2 + bytes, true);
 	if (error != 0) {
 		say("exynos_camera: the sensor did not take %#06x = %#x (%x)\n", reg, value, error);
 		sensor_broken = true;
@@ -870,8 +1143,8 @@ static const uint16_t mode_1632x1224[][2] = {
 	{ 0xB134, 0x0000 }, { 0x307C, 0x0340 }, { 0x3052, 0x0104 }, { 0x6214, 0x7970 }, { 0x0216, 0x0000 },
 };
 #define MODE_ENTRIES    (sizeof(mode_1632x1224) / sizeof(mode_1632x1224[0]))
-#define MODE_LINES      0x04F2          /* 0x0340 as the table leaves it */
-#define MODE_MARGIN     4               /* SENSOR_3H1_COARSE_INTEGRATION_TIME_MAX_MARGIN */
+#define MODE_LINES      mode_lines      /* 0x04F2: 0x0340 as the front's table leaves it */
+#define MODE_MARGIN     mode_margin     /* 4: SENSOR_3H1_COARSE_INTEGRATION_TIME_MAX_MARGIN */
 
 /* ---- stopping things (also on the way out: no sleeping, bounded) ---- */
 
@@ -924,8 +1197,10 @@ stream_stop(void)
 	if (!streaming) {
 		return;
 	}
-	(void)sensor_put(0x0104, 0x00, 1);
-	(void)sensor_put(0x6028, 0x4000, 2);
+	if (!cam_rear) {
+		(void)sensor_put(0x0104, 0x00, 1);
+		(void)sensor_put(0x6028, 0x4000, 2);
+	}
 	(void)sensor_put(0x0100, 0x00, 1);
 	streaming = false;
 	say("exynos_camera: the sensor told to stop streaming (0x0100 = 0)\n");
@@ -978,6 +1253,10 @@ isp_down(void)
 	}
 	link_stop();
 	phy_off();
+	if (dma_mux_mine && domain_up) {
+		wr(sysreg_isppre, dma_mux_off, dma_mux_found);
+		dma_mux_mine = false;
+	}
 	if (cdma_mine && domain_up) {
 		wr(cdma, CDMA_ARB_PRI, cdma_found[0]);
 		wr(cdma, CDMA_CTRL, cdma_found[1]);
@@ -1125,7 +1404,7 @@ isp_up(void)
 		cmu_isppre = ml_io_map(CMU_ISPPRE_PA, 0x8000);    /* the Q-channels' debug states are at +0x7010 */
 		sysreg_isppre = ml_io_map(SYSREG_ISPPRE_PA, 0x1000);
 		csis = ml_io_map(CSIS1_PA, 0x1000);
-		dphy = ml_io_map(CSIS1_PHY_PA, 0x3000);
+		dphy = ml_io_map(CSIS1_PHY_PA, phy_bytes);
 		wdma = ml_io_map(CSIS1_WDMA_PA, 0x1000);
 		cdma = ml_io_map(CSIS_DMA_PA, 0x1000);
 		if (cam_mmu_probe) {
@@ -1229,12 +1508,34 @@ buffer_get(void)
 		    MEM_FLOOR, MEM_CEILING);
 		return false;
 	}
+	/*
+	 * ... and none of it may be memory the VM manages: where a loader's device tree hands the kernel more of the lower
+	 * bank (the ios-27 tree's extra RAM), a range that reached into the camera's would be written over by the DMA
+	 */
+	for (uint64_t pa = MEM_PA; pa < MEM_PA + MEM_BYTES; pa += PAGE_SIZE) {
+		if (pmap_valid_page((ppnum_t)(pa >> PAGE_SHIFT))) {
+			say("exynos_camera: the frame's memory: %#llx is the VM's RAM (the loader gave the kernel the camera's range "
+			    "%#llx-%#llx): no DMA in this run\n", pa, MEM_PA, MEM_PA + MEM_BYTES - 1);
+			buffer_busy = true;
+			return false;
+		}
+	}
+	if ((uint64_t)FRAME_W * 2 * FRAME_H > SLOT_BYTES || (uint64_t)RGB_OFF >= MEM_BYTES) {
+		say("exynos_camera: the frame's memory: a ring of %u slots of %u bytes and a still do not fit %u bytes\n", RING_SLOTS,
+		    SLOT_BYTES, MEM_BYTES);
+		return false;
+	}
 	buffer = hakios_physmap_wc(MEM_PA, MEM_BYTES);
 	if (buffer == 0) {
 		say("exynos_camera: the frame's memory (%u bytes at %#llx, physical) cannot be mapped\n", MEM_BYTES, MEM_PA);
 		return false;
 	}
 	buffer_pa = MEM_PA;
+	if (cam_cached) {
+		buffer_cached = hakios_physmap_cached(MEM_PA, (uint64_t)RING_SLOTS * SLOT_BYTES);
+		say("exynos_camera: cam_s9_cached=1: the ring mapped a second time, cached, for read() (at %#lx)%s\n",
+		    (unsigned long)buffer_cached, buffer_cached ? "" : ": NOT mapped, read() uses the uncached mapping");
+	}
 	say("exynos_camera: the buffer: %u bytes at %#llx (physical, outside XNU's RAM, below 4 GB; mapped write-combined "
 	    "at %#lx)\n", BUF_BYTES, buffer_pa, (unsigned long)buffer);
 	return true;
@@ -1294,8 +1595,8 @@ buffer_report(const char *step)
 static void
 phy_on(void)
 {
-	say("exynos_camera: 4: the D-PHY (M0S4S2, CSIS1): isolation bypass, PMU 0x730 %#x |= 1; reset bit 2 of 0x16210500 "
-	    "(%#x) cleared, then set\n", iso_found, rd(sysreg_isppre, DPHY_RESET));
+	say("exynos_camera: 4: the D-PHY of %s: isolation bypass, PMU %#x %#x |= 1; reset bit %#x of 0x16210500 (%#x) cleared, "
+	    "then set\n", csis_name, iso_off, iso_found, dphy_reset_bit, rd(sysreg_isppre, DPHY_RESET));
 	phy_mine = true;
 	wr(pmu, PMU_DPHY_ISO_CSIS1, rd(pmu, PMU_DPHY_ISO_CSIS1) | ISO_BYPASS);
 	wr(sysreg_isppre, DPHY_RESET, rd(sysreg_isppre, DPHY_RESET) & ~DPHY_RESET_CSIS1);
@@ -1310,9 +1611,21 @@ link_setup(void)
 {
 	uint32_t v;
 
+	if (dma_mux_off != 0 && !dma_mux_mine) {
+		/*
+		 * the WDMA's input (fimc_is_hw_camif_cfg's "DMA input MUX"): ISPPRE_SC_CON2, GLUEMUX_PDP_DMA0_OTF_SEL, 1 for
+		 * a mode without the phase-detection path (the CSIS itself; 2 and 3 are the PDP cores). As found on the way down
+		 */
+		dma_mux_found = rd(sysreg_isppre, dma_mux_off);
+		dma_mux_mine = true;
+		wr(sysreg_isppre, dma_mux_off, 1);
+		/* (only this word is read: SC_CON8 and PDP_IN_EN beside it are the secure world's, and reading them aborts) */
+		say("exynos_camera: %s's WDMA's input mux (SYSREG_ISPPRE %#x): %#x -> %#x (1: the CSIS itself)\n", csis_name,
+		    dma_mux_off, dma_mux_found, rd(sysreg_isppre, dma_mux_off));
+	}
 	wr(csis, CSIS_CMN_CTRL, rd(csis, CSIS_CMN_CTRL) | CMN_SW_RESET);
 	if (!wait_for(csis, CSIS_CMN_CTRL, CMN_SW_RESET, 0, 100, false)) {
-		say("exynos_camera: CSIS1's reset does not finish (CMN_CTRL %#x)\n", rd(csis, CSIS_CMN_CTRL));
+		say("exynos_camera: %s's reset does not finish (CMN_CTRL %#x)\n", csis_name, rd(csis, CSIS_CMN_CTRL));
 		return false;
 	}
 	link_on = true;         /* (from here, the way down resets it again) */
@@ -1321,18 +1634,16 @@ link_setup(void)
 	wr(csis, CSIS_INT_SRC0, rd(csis, CSIS_INT_SRC0));
 	wr(csis, CSIS_INT_SRC1, rd(csis, CSIS_INT_SRC1));
 	v = rd(csis, CSIS_CMN_CTRL) & ~((3u << CMN_LANES_SHIFT) | (3u << CMN_INTERLEAVE_SHIFT));
-	wr(csis, CSIS_CMN_CTRL, v | (1u << CMN_LANES_SHIFT) | (3u << CMN_INTERLEAVE_SHIFT));
+	wr(csis, CSIS_CMN_CTRL, v | ((cam_lanes - 1) << CMN_LANES_SHIFT) | (cam_interleave << CMN_INTERLEAVE_SHIFT));
 	wr(csis, CSIS_PHY_CMN_CTRL, (rd(csis, CSIS_PHY_CMN_CTRL) & ~(0xfu << PHY_ENABLE_DAT_SHIFT)) |
-	    (3u << PHY_ENABLE_DAT_SHIFT));
+	    (((1u << cam_lanes) - 1) << PHY_ENABLE_DAT_SHIFT));
 	/* VC0 RAW10 1632 x 1224, two pixels a clock; CH1 nothing; CH2 VC0's embedded data (0 x 0); CH3 nothing */
-	wr(csis, CSIS_ISP_CONFIG(0), (rd(csis, CSIS_ISP_CONFIG(0)) & ~0x33ffu) | (1u << 12) | (HW_FORMAT_RAW10 << 2) | 0);
-	wr(csis, CSIS_ISP_RESOL(0), (FRAME_H << 16) | FRAME_W);
-	wr(csis, CSIS_ISP_CONFIG(1), (rd(csis, CSIS_ISP_CONFIG(1)) & ~0x33ffu) | (1u << 12) | (HW_FORMAT_UNKNOWN << 2) | 1);
-	wr(csis, CSIS_ISP_RESOL(1), 0);
-	wr(csis, CSIS_ISP_CONFIG(2), (rd(csis, CSIS_ISP_CONFIG(2)) & ~0x33ffu) | (1u << 12) | (HW_FORMAT_EMBEDDED << 2) | 0);
-	wr(csis, CSIS_ISP_RESOL(2), 0);
-	wr(csis, CSIS_ISP_CONFIG(3), (rd(csis, CSIS_ISP_CONFIG(3)) & ~0x33ffu) | (1u << 12) | (HW_FORMAT_UNKNOWN << 2) | 3);
-	wr(csis, CSIS_ISP_RESOL(3), 0);
+	/* (the rear camera's mode: VC0 RAW10 2016 x 1512; CH1 nothing of VC0, CH2 nothing of VC2, CH3 nothing of VC3) */
+	for (uint32_t ch = 0; ch < 4; ch++) {
+		wr(csis, CSIS_ISP_CONFIG(ch), (rd(csis, CSIS_ISP_CONFIG(ch)) & ~0x33ffu) | (1u << 12) | (ch_format[ch] << 2) |
+		    ch_vc[ch]);
+		wr(csis, CSIS_ISP_RESOL(ch), ch == 0 ? (FRAME_H << 16) | FRAME_W : 0);
+	}
 
 	/* VC0's WDMA: 2D, legacy storage, RAW10 (or PACK12), the width; its common: OTF in, RAW10 */
 	v = rd(wdma, DMA_FMT) & ~0x3fu;
@@ -1471,8 +1782,8 @@ pattern_frame(void)
 	}
 	buffer_fill();
 	phy_on();
-	say("exynos_camera: 4: CSIS1 reset and set up for %u x %u RAW10 on VC0 (%s), two lanes\n", FRAME_W, FRAME_H,
-	    cam_pack12 ? "PACK12" : "RAW10 as it comes");
+	say("exynos_camera: 4: %s reset and set up for %u x %u RAW10 on VC0 (%s), %u lanes\n", csis_name, FRAME_W, FRAME_H,
+	    cam_pack12 ? "PACK12" : "RAW10 as it comes", cam_lanes);
 	if (!link_setup()) {
 		return false;
 	}
@@ -1532,8 +1843,8 @@ pattern_frame(void)
 		say("exynos_camera: 4: nothing reached the buffer\n");
 		return false;
 	}
-	say("exynos_camera: 4: THE PATTERN REACHED MEMORY: %u bytes (%u x %u RAW10 packed would be %u)\n", last, FRAME_W,
-	    FRAME_H, FRAME_W * FRAME_H * 10 / 8);
+	say("exynos_camera: 4: THE PATTERN REACHED MEMORY through %s's WDMA: %u bytes (%u x %u RAW10 packed would be %u)\n",
+	    csis_name, last, FRAME_W, FRAME_H, FRAME_W * FRAME_H * 10 / 8);
 	return true;
 }
 
@@ -1551,9 +1862,16 @@ sensor_get16(uint16_t reg)
 static void
 phy_setup(void)
 {
+	if (dphy_bias) {
+		/* CSIS0's block (csi_hw_s_phy_default_value, instance A): BIAS_CTRL_01, 03, 05 and 06 */
+		wr(dphy, DPHY_BIAS_CTRL(1), 0x00000010);
+		wr(dphy, DPHY_BIAS_CTRL(3), 0x00000005);
+		wr(dphy, DPHY_BIAS_CTRL(5), 0x00000068);
+		wr(dphy, DPHY_BIAS_CTRL(6), 0x0000006C);
+	}
 	wr(dphy, DPHY_ACTRL_SC_06, 2);
 	wr(dphy, DPHY_DCTRL_SC_02, (rd(dphy, DPHY_DCTRL_SC_02) & ~0xffu) | 1u);
-	for (uint32_t lane = 0; lane < 2; lane++) {
+	for (uint32_t lane = 0; lane < cam_lanes; lane++) {
 		wr(dphy, DPHY_ACTRL_SD_08 + DPHY_LANE(lane), rd(dphy, DPHY_ACTRL_SD_08 + DPHY_LANE(lane)) & ~(3u << 5));
 		wr(dphy, DPHY_DCTRL_SD_13 + DPHY_LANE(lane), rd(dphy, DPHY_DCTRL_SD_13 + DPHY_LANE(lane)) & ~1u);
 		wr(dphy, DPHY_DCTRL_SD_05 + DPHY_LANE(lane), rd(dphy, DPHY_DCTRL_SD_05 + DPHY_LANE(lane)) | (1u << 2));
@@ -1668,9 +1986,11 @@ exposure_put(uint32_t lines, uint32_t again, uint32_t dgain)
 {
 	bool ok;
 
-	ok = sensor_put(0x0104, 0x01, 1) && sensor_put(0x0202, (uint16_t)lines, 2) && sensor_put(0x0204, (uint16_t)again, 2)
-	    && sensor_put(0x020E, (uint16_t)dgain, 2);
-	(void)sensor_put(0x0104, 0x00, 1);
+	ok = (!sensor_hold || sensor_put(0x0104, 0x01, 1)) && sensor_put(0x0202, (uint16_t)lines, 2) &&
+	    sensor_put(0x0204, (uint16_t)again, 2) && sensor_put(0x020E, (uint16_t)dgain, 2);
+	if (sensor_hold) {
+		(void)sensor_put(0x0104, 0x00, 1);
+	}
 	if (ok) {
 		ae_lines = lines;
 		ae_again = again;
@@ -1756,6 +2076,21 @@ mode_load(void)
 
 	exp = exp < 2 ? 2 : exp;
 	exp = exp > MODE_LINES - MODE_MARGIN ? MODE_LINES - MODE_MARGIN : exp;
+	if (cam_rear) {
+		/* the S5K2L3's tables (hakios.exynos_camera_rear.c), then the exposure as the front's: the same registers */
+		if (!hakios_s9rear_mode()) {
+			sensor_broken = true;
+			return false;
+		}
+		gains_read();
+		if (!exposure_put(exp, cam_gain, 0x100)) {
+			return false;
+		}
+		say("exynos_camera: 5: read back: output %u x %u, frame %u lines of %u clocks, exposure %u, gain %#x, digital %#x "
+		    "(a line here is %u ns)\n", sensor_get16(0x034C), sensor_get16(0x034E), sensor_get16(0x0340),
+		    sensor_get16(0x0342), sensor_get16(0x0202), sensor_get16(0x0204), sensor_get16(0x020E), line_ns);
+		return true;
+	}
 	say("exynos_camera: 5: the sensor's mode: setfile A's 1632 x 1224 at 30 frames a second, %u 16-bit writes; then "
 	    "0x3092 = 0, exposure %u lines (0x0202), analog gain %#x (0x0204, 0x20 is 1x), digital 1x; auto-exposure %s\n",
 	    (unsigned)MODE_ENTRIES, exp, cam_gain, cam_ae ? "on" : "off (cam_s9_ae=0)");
@@ -1786,8 +2121,8 @@ stream_start(void)
 	uint64_t until;
 
 	phy_setup();
-	say("exynos_camera: 5: CSIS1 reset and set up again; the ring filled; VC0's WDMA on, its eight frame pointers on "
-	    "the ring's %u slots\n", RING_SLOTS);
+	say("exynos_camera: 5: %s reset and set up again; the ring filled; VC0's WDMA on, its eight frame pointers on "
+	    "the ring's %u slots of %u bytes\n", csis_name, RING_SLOTS, SLOT_BYTES);
 	if (!link_setup()) {
 		return false;
 	}
@@ -1808,14 +2143,22 @@ stream_start(void)
 	wr(csis, CSIS_PHY_CMN_CTRL, rd(csis, CSIS_PHY_CMN_CTRL) | PHY_ENABLE_CLK);
 	wr(csis, CSIS_CMN_CTRL, rd(csis, CSIS_CMN_CTRL) & ~CMN_QCHANNEL_EN);
 	wr(csis, CSIS_CMN_CTRL, rd(csis, CSIS_CMN_CTRL) | CMN_CSI_EN);
-	say("exynos_camera: 5: STREAM ON: 0x0104 = 0, 8 ms, 0x6028 = 0x4000, 0x0100 = 1, 0x0216 = 0\n");
-	if (!sensor_put(0x0104, 0x00, 1)) {
-		return false;
-	}
-	delay_for_interval(8, NSEC_PER_MSEC);
-	streaming = true;
-	if (!sensor_put(0x6028, 0x4000, 2) || !sensor_put(0x0100, 0x01, 1) || !sensor_put(0x0216, 0x00, 1)) {
-		return false;
+	if (cam_rear) {
+		say("exynos_camera: 5: STREAM ON: 0x0100 = 0x0103 (16 bits: mode_select 1, image_orientation 3)\n");
+		streaming = true;
+		if (!sensor_put(0x0100, 0x0103, 2)) {
+			return false;
+		}
+	} else {
+		say("exynos_camera: 5: STREAM ON: 0x0104 = 0, 8 ms, 0x6028 = 0x4000, 0x0100 = 1, 0x0216 = 0\n");
+		if (!sensor_put(0x0104, 0x00, 1)) {
+			return false;
+		}
+		delay_for_interval(8, NSEC_PER_MSEC);
+		streaming = true;
+		if (!sensor_put(0x6028, 0x4000, 2) || !sensor_put(0x0100, 0x01, 1) || !sensor_put(0x0216, 0x00, 1)) {
+			return false;
+		}
 	}
 	nanoseconds_to_absolutetime(300 * NSEC_PER_MSEC, &until);
 	until += mach_absolute_time();
@@ -1983,7 +2326,7 @@ sensor_frame(void)
 	say("exynos_camera: 5: %u frame end(s) in %llu ms, %u with the WDMA's FIFO error; the frame taken: %u (slot %d), "
 	    "exposure %u lines (%u us), gain %#x, digital %#x; the WDMA off; streaming off\n", ends,
 	    absolutetime_ms(mach_absolute_time() - start), dma_errors, ends, taken, ae_lines,
-	    ae_lines * 263 / 10, ae_again, ae_dgain);
+	    (uint32_t)((uint64_t)ae_lines * line_ns / 1000), ae_again, ae_dgain);
 	frames_halt();
 	if (taken < 0) {
 		taken = slot;
@@ -2062,6 +2405,11 @@ map_blocks(void)
 		peric0 = 0;
 		return false;
 	}
+	if (cam_rear && !hakios_s9rear_map(peric0, peric1, cmu_top)) {
+		say("exynos_camera: rear: 1: a block could not be mapped\n");
+		peric0 = 0;
+		return false;
+	}
 	return true;
 }
 
@@ -2092,6 +2440,9 @@ look_supplies(void)
 		}
 		say("exynos_camera: 1: %s: %#x (%s, voltage code %#x, Android's %#x)\n", ldos[i].name, found[i],
 		    (found[i] & LDO_ON) ? "on" : "off", found[i] & LDO_VSEL, ldos[i].vsel);
+	}
+	if (cam_rear) {
+		return rear_look_supplies();
 	}
 	return true;
 }
@@ -2173,6 +2524,9 @@ sensor_up(void)
 	uint8_t model[2] = { 0 }, revision = 0, frames = 0, mode = 0;
 	uint32_t error;
 
+	if (cam_rear) {
+		return rear_sensor_up();
+	}
 	for (uint32_t i = 0; i < NLDOS; i++) {
 		if (ldos[i].switched && (found[i] & LDO_ON) && (found[i] & LDO_VSEL) != ldos[i].vsel) {
 			say("exynos_camera: 2: %s is on at another voltage: someone else has it; nothing is written\n", ldos[i].name);
@@ -2230,6 +2584,9 @@ sensor_up(void)
 	(void)sensor_get(0x0100, &mode, 1);
 	say("exynos_camera: 2: THE SENSOR ANSWERS: model ID %#06x, revision %#x, frame count %u, mode_select %#x "
 	    "(0: standby)\n", (model[0] << 8) | model[1], revision, frames, mode);
+	if (cam_af) {
+		hakios_ak737x_up();     /* VDDAF came up with the sensor's supplies: the lens's chip and the EEPROM */
+	}
 	return true;
 }
 
@@ -2265,10 +2622,10 @@ all_down(void)
  * [9:0], 3264 bytes a line. The front camera's picture comes out as the sensor sees it (mirrored): no flip is made here.
  */
 static const char *const bayer_name[4] = { "RGGB", "GRBG", "GBRG", "BGGR" };
-static uint16_t rows[3][FRAME_W];               /* three lines of the frame, the black level off */
+static uint16_t rows[3][MAX_W];               /* three lines of the frame, the black level off */
 static int32_t row_of[3] = { -1, -1, -1 };
-static uint8_t raw_line[LINE_BYTES];            /* a line copied out of the uncached mapping */
-static uint8_t out_row[FRAME_W * 3];
+static uint8_t raw_line[MAX_W * 2];            /* a line copied out of the uncached mapping */
+static uint8_t out_row[MAX_W * 3];
 static uint8_t gamma_lut[4096];
 static uint32_t cam_sat = 140;
 
@@ -2362,6 +2719,11 @@ picture(uint32_t n, uint32_t *wp, uint32_t *hp)
 		say("exynos_camera: camshot: the DMA wrote %u bytes, %u lines' worth at %u a line: the rest of the picture is "
 		    "the buffer's fill (0xA5)\n", frame_last, frame_last / stride, stride);
 	}
+	if ((uint64_t)RGB_OFF + (uint64_t)w * h * 3 > MEM_BYTES) {
+		say("usb: camshot failed: a picture of %u x %u does not fit the camera's memory after the ring and the still (%u "
+		    "bytes left): ask for a larger N (camshot 2)\n", w, h, MEM_BYTES - RGB_OFF);
+		return false;
+	}
 	gamma_make();
 	meter(frame, &m);
 	/*
@@ -2445,7 +2807,7 @@ shot_send(uint32_t n, bool pattern)
 	if (!picture(n, &w, &h)) {
 		return;
 	}
-	if (hakios_usb_picture(buffer + RGB_OFF, w, h, pattern ? "the test pattern" : "the front camera") != 0) {
+	if (hakios_usb_picture(buffer + RGB_OFF, w, h, pattern ? "the test pattern" : cam_name) != 0) {
 		say("usb: camshot failed: the USB link is not up, or is sending another picture\n");
 	}
 }
@@ -2491,6 +2853,9 @@ shot_run(uint32_t n, bool pattern)
 	if (!got) {
 		shot_failed(why);
 		return;
+	}
+	if (cam_af && !pattern) {
+		hakios_ak737x_shot(frame, cam_stride >= LINE_BYTES ? cam_stride : LINE_BYTES, FRAME_W, FRAME_H);
 	}
 	shot_send(n, pattern);
 }
@@ -2540,10 +2905,11 @@ hakios_exynos_camera_shot(uint32_t n, int pattern)
  * 64; a buffer of the header's size learns the size. write(): HAKIOS_CAMERA_EXPOSURE (a lines, b analog gain; the auto-exposure off while
  * they come, back on two seconds after the last, or at once with a = 0), HAKIOS_CAMERA_SENSOR (there is one camera here: taken, and the frames carry the
  * number asked for, so that a capture device that asks for its back camera gets these frames), HAKIOS_CAMERA_FOCUS
- * (no lens motor: taken, nothing done). EIO once the stream has failed.
+ * (taken, nothing done, and the frames say HAKIOS_CAMERA_NO_FOCUS; with cam_af=4 the lens's driver, hakios.ak737x.c,
+ * takes it and the frames carry the lens's position). EIO once the stream has failed.
  */
 #define RAW10_LINE              (FRAME_W * 5 / 4)       /* 2040 */
-#define LINE_NS                 26283                   /* 10608 clocks of 403.6 MHz */
+#define LINE_NS                 line_ns                 /* 26283: 10608 clocks of 403.6 MHz (the front's) */
 #define STREAM_IDLE_MS          2000                    /* a stream goes down this long after the last read */
 
 static LCK_GRP_DECLARE(s9cam_grp, "hakios-exynos-camera");
@@ -2562,10 +2928,12 @@ static uint32_t manual_lines, manual_again;
 static bool manual, manual_pending;
 static uint64_t manual_until;            /* the reader's exposure holds until then: two seconds after its last */
 static uint32_t stream_readers;
+static uint64_t read_wc, read_pack, read_out, read_n;     /* where a read()'s time goes (selfread says) */
+static uint32_t stream_overtaken;       /* reads refused: the WDMA came round to the frame's slot before it was read out */
 static uint32_t cam_always;             /* cam_s9_always */
 static volatile bool cam_open;          /* /dev/hakios-camera is open */
 static uint64_t last_read;              /* the time of the last read's start or wake (a reader waiting is a reader) */
-static uint8_t pack_line[LINE_BYTES], packed[RAW10_LINE];
+static uint8_t pack_line[MAX_W * 2], packed[MAX_W * 5 / 4];
 
 static int
 s9dev_open(__unused dev_t dev, __unused int flags, __unused int type, __unused struct proc *p)
@@ -2629,7 +2997,7 @@ s9dev_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 	f.height = FRAME_H;
 	f.stride = RAW10_LINE;
 	f.format = 1;
-	f.bayer = 3 - (cam_bayer & 3);  /* (turned half a turn below: the pattern's order reversed) */
+	f.bayer = frame_turn ? 3 - (cam_bayer & 3) : (cam_bayer & 3);  /* (turned half a turn below: the pattern's order reversed) */
 	f.black = BLACK_LEVEL;
 	f.sequence = slot_info[slot].sequence;
 	f.time = slot_info[slot].time;
@@ -2643,7 +3011,7 @@ s9dev_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 	f.frame_lines_max = MODE_LINES;
 	f.margin = MODE_MARGIN;
 	f.sensor = asked_sensor;
-	f.focus = HAKIOS_CAMERA_NO_FOCUS;
+	f.focus = cam_af ? hakios_ak737x_focus() : HAKIOS_CAMERA_NO_FOCUS;
 	stream_readers++;
 	lck_mtx_unlock(&s9cam_lock);
 
@@ -2653,25 +3021,57 @@ s9dev_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 	 * S9's front sensor sits a half turn from the iPhone's, and the Camera app showed its frames upside down
 	 */
 	lck_mtx_lock(&s9read_lock);
+	if (buffer_cached != 0 && uio_resid(uio) > 0) {
+		vm_offset_t start = buffer_cached + (uint64_t)slot * SLOT_BYTES;
+
+		for (vm_offset_t line = start; line < start + (uint64_t)FRAME_H * LINE_BYTES; line += 64) {
+			__asm__ volatile ("dc ivac, %0" : : "r" (line) : "memory");
+		}
+		__asm__ volatile ("dsb sy" : : : "memory");
+	}
 	for (uint32_t y = 0; error == 0 && y < FRAME_H && uio_resid(uio) > 0; y++) {
-		memcpy(pack_line, (const void *)(buffer + (uint64_t)slot * SLOT_BYTES + (uint64_t)(FRAME_H - 1 - y) * LINE_BYTES),
-		    LINE_BYTES);
+		uint64_t t0 = mach_absolute_time(), t1, t2;
+
+		memcpy(pack_line, (const void *)((buffer_cached ? buffer_cached : buffer) + (uint64_t)slot * SLOT_BYTES +
+		    (uint64_t)(frame_turn ? FRAME_H - 1 - y : y) * LINE_BYTES), LINE_BYTES);
+		t1 = mach_absolute_time();
 		for (uint32_t x = 0, o = 0; x < FRAME_W; x += 4, o += 5) {
 			uint32_t v[4];
 
 			for (uint32_t k = 0; k < 4; k++) {
-				uint32_t p = FRAME_W - 1 - (x + k);
+				uint32_t p = frame_turn ? FRAME_W - 1 - (x + k) : x + k;
 
 				v[k] = ((uint32_t)pack_line[2 * p] | ((uint32_t)pack_line[2 * p + 1] << 8)) & 0x3ff;
 				packed[o + k] = (uint8_t)(v[k] >> 2);
 			}
 			packed[o + 4] = (uint8_t)((v[0] & 3) | ((v[1] & 3) << 2) | ((v[2] & 3) << 4) | ((v[3] & 3) << 6));
 		}
+		t2 = mach_absolute_time();
 		error = uiomove((caddr_t)packed, (int)MIN((user_ssize_t)RAW10_LINE, uio_resid(uio)), uio);
+		read_wc += t1 - t0;
+		read_pack += t2 - t1;
+		read_out += mach_absolute_time() - t2;
 	}
+	read_n++;
 	lck_mtx_unlock(&s9read_lock);
 	lck_mtx_lock(&s9cam_lock);
 	stream_readers--;
+	/*
+	 * The ring is four frames long: the WDMA starts on this frame's slot again when the third frame after it has ended,
+	 * and it writes a frame faster than a reader packs one. If it has finished the slot (the fourth frame after ours has
+	 * ended, or the third did a whole frame's time ago), it passed the reader on the way down and the lines below that
+	 * point are the newer frame's: the read is refused (EAGAIN: read again), never given as a frame.
+	 */
+	if (error == 0 && stream_running) {
+		uint64_t frame_time;
+
+		nanoseconds_to_absolutetime((uint64_t)MODE_LINES * LINE_NS * 15 / 16, &frame_time);
+		if (stream_newest >= f.sequence + RING_SLOTS || (stream_newest == f.sequence + RING_SLOTS - 1 &&
+		    stream_newest_slot >= 0 && mach_absolute_time() - slot_info[stream_newest_slot].time > frame_time)) {
+			stream_overtaken++;
+			error = EAGAIN;
+		}
+	}
 	lck_mtx_unlock(&s9cam_lock);
 	wakeup(&stream_readers);
 	return error;
@@ -2701,6 +3101,10 @@ s9dev_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 		}
 		break;
 	case HAKIOS_CAMERA_FOCUS:
+		if (cam_af) {
+			hakios_ak737x_ask(c.a, c.b, c.c, c.d);
+		}
+		break;
 	case HAKIOS_CAMERA_KEEP:
 		break;
 	default:
@@ -2729,6 +3133,134 @@ s9dev_make(void)
 	say("exynos_camera: 7: /dev/hakios-camera made (major %d): the frames as the POCO's driver gives them\n", major);
 }
 
+/*
+ * ---- cam_s9_selfread=N: the device read from inside the kernel, as a program would read it ----
+ *
+ * /dev/hakios-camera opened by its path and read through VFS (vnode_open, vn_rdwr into kernel memory, vnode_close):
+ * the same open(), read() and close() of this file as a process's. For a kernel whose user space has no reader yet.
+ */
+static int selfread_ask;        /* frames asked for (the boot-arg's, then the sysctl's) */
+static uint32_t selfread_focus, selfread_x = 512, selfread_y = 512;
+SYSCTL_DECL(_kern_hakios);
+SYSCTL_INT(_kern_hakios, OID_AUTO, camera_selfread, CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED, &selfread_ask, 0, "set to N in a run with cam_s9_selfread=: N frames of /dev/hakios-camera read from inside the kernel (hakios.exynos_camera.c)");
+
+static void
+selfread_command(vnode_t vp, vfs_context_t ctx, uint32_t a, uint32_t b, uint32_t c, uint32_t d)
+{
+	struct hakios_camera_command cmd = { .command = HAKIOS_CAMERA_FOCUS, .bytes = 0, .a = a, .b = b, .c = c, .d = d };
+	int resid = 0, error;
+
+	error = vn_rdwr(UIO_WRITE, vp, (caddr_t)&cmd, (int)sizeof(cmd), 0, UIO_SYSSPACE, 0, vfs_context_ucred(ctx), &resid,
+	    vfs_context_proc(ctx));
+	say("exynos_camera: selfread: HAKIOS_CAMERA_FOCUS written to the device (a %#x, b %u, c %u, d %u): %s (%d)\n", a, b, c, d,
+	    error == 0 ? "taken" : "refused", error);
+}
+
+static void
+selfread_run(uint32_t frames)
+{
+	const int bytes = (int)(sizeof(struct hakios_camera_frame) + (size_t)RAW10_LINE * FRAME_H);
+	vfs_context_t ctx = vfs_context_kernel();
+	struct hakios_camera_frame *f;
+	uint64_t start, first = 0, last = 0, gaps = 0, ms;
+	uint32_t got = 0, again = 0, bad = 0, overtaken0 = stream_overtaken, overtaken = stream_overtaken;
+	uint64_t wc0 = read_wc, pack0 = read_pack, out0 = read_out, n0 = read_n, reads;
+	vnode_t vp = NULLVP;
+	uint8_t *data;
+	int error;
+
+	data = kalloc_data((vm_size_t)bytes, Z_WAITOK);
+	if (data == NULL) {
+		say("exynos_camera: selfread: no memory for a frame (%d bytes)\n", bytes);
+		return;
+	}
+	error = vnode_open(HAKIOS_CAMERA_DEVICE, FREAD | FWRITE, 0, 0, &vp, ctx);
+	if (error != 0) {
+		say("exynos_camera: selfread: %s cannot be opened (%d)\n", HAKIOS_CAMERA_DEVICE, error);
+		kfree_data(data, (vm_size_t)bytes);
+		return;
+	}
+	say("exynos_camera: selfread: %s opened from inside the kernel; %u frames to read, %d bytes each (the header, then "
+	    "%u x %u MIPI RAW10)\n", HAKIOS_CAMERA_DEVICE, frames, bytes, FRAME_W, FRAME_H);
+	f = (struct hakios_camera_frame *)(void *)data;
+	start = mach_absolute_time();
+	while (got < frames && again < 4 && !shots_closed) {
+		int resid = bytes;
+
+		error = vn_rdwr(UIO_READ, vp, (caddr_t)data, bytes, 0, UIO_SYSSPACE, 0, vfs_context_ucred(ctx), &resid,
+		    vfs_context_proc(ctx));
+		if (error == EAGAIN && stream_overtaken != overtaken) {
+			overtaken = stream_overtaken;   /* (a frame the WDMA overtook: not a frame, read again) */
+			continue;
+		}
+		if (error == EAGAIN) {
+			again++;                /* (no frame in the read's own wait: the camera coming up) */
+			continue;
+		}
+		if (error != 0) {
+			say("exynos_camera: selfread: read failed (%d) after %u frames\n", error, got);
+			break;
+		}
+		again = 0;
+		bad += memcmp(f->magic, HAKIOS_CAMERA_MAGIC, 8) != 0 || f->width != FRAME_W || f->height != FRAME_H || resid != 0;
+		if (got == 0) {
+			first = f->sequence;
+		} else {
+			gaps += f->sequence > last ? f->sequence - last - 1 : 0;
+		}
+		last = f->sequence;
+		got++;
+		if (selfread_focus && got == 150) {
+			selfread_command(vp, ctx, 600, 0, 0, 0);
+		} else if (selfread_focus && got == 200) {
+			selfread_command(vp, ctx, HAKIOS_CAMERA_NO_FOCUS, 1, selfread_x, selfread_y);
+		}
+		if (got == 1 || got % 30 == 0 || got == frames || (selfread_focus && got >= 150 && got < 290 && got % 10 == 0)) {
+			uint32_t sum = 0;
+
+			for (int i = (int)sizeof(*f); i < bytes; i += 4099) {
+				sum += data[i];
+			}
+			say("exynos_camera: selfread: frame %u: sequence %llu, %d bytes, %u x %u, exposure %u lines, gain %u, focus %d, "
+			    "a sum over its bytes %u; %llu ms since the open\n", got, f->sequence, bytes - resid, f->width, f->height,
+			    f->exposure_lines, f->gain, (int)f->focus, sum, absolutetime_ms(mach_absolute_time() - start));
+		}
+	}
+	ms = absolutetime_ms(mach_absolute_time() - start);
+	say("exynos_camera: selfread: %u FRAMES READ THROUGH %s in %llu ms (%llu.%llu a second, the camera's power-up "
+	    "counted), sequence %llu to %llu, %llu of the stream's not read in between, %u with a bad header or short, %u "
+	    "reads refused because the WDMA overtook them\n", got,
+	    HAKIOS_CAMERA_DEVICE, ms, ms ? (uint64_t)got * 1000 / ms : 0, ms ? (uint64_t)got * 10000 / ms % 10 : 0, first, last,
+	    gaps, bad, overtaken - overtaken0);
+	reads = read_n - n0;
+	if (reads != 0) {
+		say("exynos_camera: selfread: where a read's time went, a frame, over %llu reads: %llu ms copying the lines out of "
+		    "the frame's %s mapping (%u bytes a frame), %llu ms packing them to RAW10, %llu ms handing %u bytes to "
+		    "the reader; no conversion besides\n", reads, absolutetime_ms(read_wc - wc0) / reads,
+		    buffer_cached ? "cached" : "uncached", FRAME_W * 2 * FRAME_H,
+		    absolutetime_ms(read_pack - pack0) / reads, absolutetime_ms(read_out - out0) / reads, RAW10_LINE * FRAME_H);
+	}
+	(void)vnode_close(vp, FREAD | FWRITE, ctx);
+	kfree_data(data, (vm_size_t)bytes);
+}
+
+static void
+selfread_thread(void *arg, __unused wait_result_t result)
+{
+	delay_for_interval(30, NSEC_PER_SEC);           /* the boot's rush over, /dev there */
+	__atomic_store_n(&selfread_ask, (int)(uintptr_t)arg, __ATOMIC_RELEASE);
+	while (!shots_closed) {
+		int n = __atomic_exchange_n(&selfread_ask, 0, __ATOMIC_ACQ_REL);
+
+		if (n > 0) {
+			selfread_run(n > 3000 ? 3000 : (uint32_t)n);
+		} else {
+			delay_for_interval(250, NSEC_PER_MSEC);
+		}
+	}
+	thread_terminate(current_thread());
+}
+
 /* a stream is wanted: always (cam_s9_always), for a camshot, or by a reader that has read lately */
 static bool
 stream_wanted(void)
@@ -2749,11 +3281,11 @@ stream_session(void)
 	uint32_t timeouts = 0;
 	struct meter m = { { 0, 0, 0 }, 0, 0 };
 	static uint64_t numbered;       /* the frames of the earlier streams: the numbers go on */
-	bool ok = false;
+	bool ok = false, ae_near = false, lens_holds;
 	int slot;
 
-	say("exynos_camera: 7: THE STREAM: the front camera up, 1632 x 1224 RAW10 at 30 frames a second into the ring "
-	    "(%u slots of 4 MB at %#llx), the auto-exposure %s\n", RING_SLOTS, MEM_PA, cam_ae ? "on" : "off");
+	say("exynos_camera: 7: THE STREAM: %s up, %u x %u RAW10 at 30 frames a second into the ring (%u slots of %u bytes at "
+	    "%#llx), the auto-exposure %s\n", cam_name, FRAME_W, FRAME_H, RING_SLOTS, SLOT_BYTES, MEM_PA, cam_ae ? "on" : "off");
 	dma_errors = 0;
 	if (!sensor_up() || !isp_up() || mmu_translating()) {
 		goto down;
@@ -2811,15 +3343,27 @@ stream_session(void)
 			manual = false;         /* the reader that asked has gone quiet: the kernel's own exposure again */
 			say("exynos_camera: 7: no exposure asked for two seconds: the auto-exposure again\n");
 		}
-		if (cam_ae && !manual && frm_now >= next_meter) {
-			meter(buffer + (uint64_t)slot * SLOT_BYTES, &m);
-			next_meter = frm_now + (ae_step(&m, true) ? 6 : 3);
+		/* the lens's turn (cam_af): while it searches, the exposure is left as it is */
+		lens_holds = cam_af && hakios_ak737x_frame(buffer + (uint64_t)slot * SLOT_BYTES, LINE_BYTES, FRAME_W, FRAME_H,
+		    frm_now, ae_near);
+		if (cam_rear) {
+			hakios_s9rear_poll(frm_now);    /* the OIS's and the aperture's sysctls */
 		}
-		if (__atomic_load_n(&shot_asked, __ATOMIC_ACQUIRE) && (seen >= cam_ae_frames || !cam_ae)) {
-			/* camshot: the newest frame out of the ring (the auto-exposure has had its frames), then the picture */
+		if (cam_ae && !manual && !lens_holds && frm_now >= next_meter) {
+			meter(buffer + (uint64_t)slot * SLOT_BYTES, &m);
+			ae_near = ae_step(&m, true);
+			next_meter = frm_now + (ae_near ? 6 : 3);
+		}
+		if (__atomic_load_n(&shot_asked, __ATOMIC_ACQUIRE) && (seen >= cam_ae_frames || !cam_ae) &&
+		    (!cam_af || seen >= cam_ae_frames + 240 || !hakios_ak737x_searching())) {
+			/* camshot: the newest frame out of the ring (the auto-exposure has had its frames, and with cam_af the lens
+			 * its search, eight seconds at the most), then the picture */
 			memcpy((void *)(buffer + STILL_OFF), (const void *)(buffer + (uint64_t)slot * SLOT_BYTES), SLOT_BYTES);
 			frame = buffer + STILL_OFF;
 			frame_last = FRAME_H * LINE_BYTES;
+			if (cam_af) {
+				hakios_ak737x_shot(frame, LINE_BYTES, FRAME_W, FRAME_H);
+			}
 			say("exynos_camera: camshot %u: frame %llu of the stream (slot %d; exposure %u lines, gain %#x, digital "
 			    "%#x)\n", ++n_camshots, frm_now, slot, ae_lines, ae_again, ae_dgain);
 			shot_send(shot_n, false);
@@ -2846,6 +3390,9 @@ stream_session(void)
 	say("exynos_camera: 7: the stream ends (%s): %llu frames, %llu seen, %llu lost, %u FIFO errors\n",
 	    ok ? "nobody reads" : "no frames", frm_last, seen, lost, dma_errors);
 down:
+	if (cam_af) {
+		hakios_ak737x_closed();
+	}
 	all_down();
 	lck_mtx_lock(&s9cam_lock);
 	stream_running = false;
@@ -2987,6 +3534,61 @@ out:
 	thread_terminate(current_thread());
 }
 
+/*
+ * The rear camera's way in (cam_rear=1), in place of the front's: CSIS0 (fimc_is_sensor@16230000), its D-PHY (the slave
+ * half of the M4S4 "top" PHY at 0x16160000, whose master half is the display's DSI: its isolation word, PMU 0x70C, is
+ * found bypassed while the panel runs and is then left alone; its reset is bit 0 of SYSREG_ISPPRE's 0x500), VC0's WDMA at
+ * 0x162B0000 (its DMA common at +0x400), whose input mux, SYSREG_ISPPRE's ISPPRE_SC_CON2 (0x40C), is set to 1, the CSIS
+ * itself (the test pattern did not reach this WDMA with the 0 the boot leaves there). The S5K2L3's mode: 2016 x 1512 RAW10 at 30 frames a second on four lanes at
+ * 1352 Mb/s (module-2l3's mode 14, "2016x1512_30fps_mode2": no phase-detection channel), CSI_MODE_VC_ONLY, the settle
+ * 66 (fimc-is-hw-settle-10nm-lpp.h at 1350). Its frame is 0x9F00 lines of 0x338 clocks of 1011.1 MHz: a line is 815 ns,
+ * the margin 0x30 lines (SENSOR_2L3_COARSE_INTEGRATION_TIME_MAX_MARGIN). A frame is 2016 x 1512 x 2 = 6096384 bytes as
+ * the WDMA writes it: the ring's four slots and the still take 30.5 MB of the camera's 32, so camshot's picture is at
+ * most 1008 x 756 (N from 2). The sensor has no grouped parameter hold in Android's driver (USE_GROUP_PARAM_HOLD 0).
+ * read() gives the frame as the sensor does: which way up iOS wants it is not known yet.
+ */
+static void
+rear_side(void)
+{
+	static const uint32_t format[4] = { HW_FORMAT_RAW10, HW_FORMAT_UNKNOWN, HW_FORMAT_UNKNOWN, HW_FORMAT_UNKNOWN };
+	static const uint32_t vc[4] = { 0, 0, 2, 3 };
+
+	csis_pa = 0x16230000UL;
+	phy_pa = 0x16160000UL;
+	phy_bytes = 0x4000;
+	wdma_pa = 0x162B0000UL;
+	iso_off = 0x070C;
+	dphy_reset_bit = 1u << 0;
+	dphy_base = 0x1400;
+	dphy_bias = true;
+	dma_mux_off = 0x040C;
+	cam_lanes = 4;
+	cam_settle = 66;
+	cam_interleave = 2;
+	for (uint32_t ch = 0; ch < 4; ch++) {
+		ch_format[ch] = format[ch];
+		ch_vc[ch] = vc[ch];
+	}
+	frame_w = 2016;
+	frame_h = 1512;
+	slot_bytes = 0x5D1000;
+	mode_lines = 0x9F00;
+	mode_margin = 0x30;
+	line_ns = 815;
+	sensor_hold = false;
+	frame_turn = false;
+	csis_name = "CSIS0";
+	cam_name = "the rear camera";
+	asked_sensor = 1;
+	cam_exp = 12000;
+	/*
+	 * CLKCMU_ISPPRE_BUS undivided, 466 MHz, Android's own: the sensor sends its lines at 4 x 1352 Mb/s, 540 million
+	 * pixels a second, and the CSIS takes two a clock. At the front camera's 233 MHz CSIS0 overflowed and the WDMA's
+	 * FIFO filled in every frame (the phone, 12 November); at 466 MHz there was not one error. cam_s9_ispdiv says other
+	 */
+	cam_ispdiv = 0;
+}
+
 void
 hakios_exynos_camera_init(void)
 {
@@ -3004,6 +3606,16 @@ hakios_exynos_camera_init(void)
 		ipclk = 400;
 	}
 	pmic_bus.ipclk_mhz = sensor_bus.ipclk_mhz = ipclk;
+	cam_rear = hakios_s9rear_setup(ipclk, say);
+	if (cam_rear) {
+		sbus = hakios_s9rear_bus(&sensor_addr);
+		sensor_addr_given = sensor_addr;
+		rear_side();
+	}
+	if (cam_rear) {
+		hakios_ak737x_rear(hakios_s9rear_lens_bus());   /* the rear lens's motor: the same driver on the rear's bus */
+	}
+	cam_af = hakios_ak737x_setup(ipclk, say);
 	PE_parse_boot_argn("cam_s9_exp", &cam_exp, sizeof(cam_exp));
 	PE_parse_boot_argn("cam_s9_gain", &cam_gain, sizeof(cam_gain));
 	if (cam_gain < 0x20 || cam_gain > 0x200) {
@@ -3027,6 +3639,7 @@ hakios_exynos_camera_init(void)
 		}
 	}
 	PE_parse_boot_argn("cam_s9_always", &cam_always, sizeof(cam_always));
+	PE_parse_boot_argn("cam_s9_cached", &cam_cached, sizeof(cam_cached));
 	PE_parse_boot_argn("cam_s9_ae", &cam_ae, sizeof(cam_ae));
 	PE_parse_boot_argn("cam_s9_ae_frames", &cam_ae_frames, sizeof(cam_ae_frames));
 	if (cam_ae_frames < 2 || cam_ae_frames > 30) {
@@ -3047,4 +3660,17 @@ hakios_exynos_camera_init(void)
 	if (kernel_thread_start(camera_thread, (void *)(uintptr_t)steps, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	}
+	{
+		uint32_t frames = 0;
+
+		PE_parse_boot_argn("cam_s9_selfread_focus", &selfread_focus, sizeof(selfread_focus));
+		PE_parse_boot_argn("cam_s9_selfread_x", &selfread_x, sizeof(selfread_x));
+		PE_parse_boot_argn("cam_s9_selfread_y", &selfread_y, sizeof(selfread_y));
+		if (steps >= 7 && PE_parse_boot_argn("cam_s9_selfread", &frames, sizeof(frames)) && frames != 0 &&
+		    kernel_thread_start(selfread_thread, (void *)(uintptr_t)frames, &thread) == KERN_SUCCESS) {
+			thread_deallocate(thread);
+		}
+	}
 }
+
+#endif /* HAKIOS_DEVICE_IS_STAR2LTE */

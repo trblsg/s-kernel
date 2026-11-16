@@ -1,0 +1,18 @@
+# OPT-IN ONLY (DISABLE_HOGS=1): CPU burners measured by STARLTE TOP on this hardware, not crash loops. The owner wants the real iOS 27, so
+# the default build keeps them; the verification boot decides. (evidence: ios26-f / ios27-phone-gpu g1 / boot70-71)
+com.apple.analyticsd
+com.apple.audioanalyticsd
+com.apple.ecosystemanalyticsd
+com.apple.geoanalyticsd
+com.apple.inputanalyticsd
+com.apple.wifianalyticsd
+com.apple.findmy.findmylocated
+com.apple.ReportCrash
+com.apple.logd
+com.apple.sharingd
+com.apple.PerfPowerServices
+com.apple.PerfPowerServicesExtended
+com.apple.modelcatalogd
+com.apple.modelmanagerd
+com.apple.accessibility.axassetsd
+com.apple.parsecd
