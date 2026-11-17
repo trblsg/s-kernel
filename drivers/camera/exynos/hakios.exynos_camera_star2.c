@@ -285,8 +285,6 @@
 #include <sys/hakios.exynos_soc.h>
 #include <sys/hakios.xnu.h>
 #include <sys/sysctl.h>
-#include "hakios.s5k2l3_setfiles.h"
-#include "hakios.s5k3m3_setfiles.h"
 
 /*
  * Two camera drivers share the configuration symbol EXYNOS_CAMERA and the kernel's three entry points: hakios.exynos_camera.c (with
@@ -296,6 +294,10 @@
  * nothing. Bringing the two into one driver waits until both phones can be run (docs/exynos9810-cameras.md).
  */
 #ifdef HAKIOS_DEVICE_IS_STAR2LTE
+
+/* made at build time, for this device only: tools/mk-star2-setfiles.sh, xnu-build.sh */
+#include "hakios.s5k2l3_setfiles.h"
+#include "hakios.s5k3m3_setfiles.h"
 
 /* the S2MPB02's I2C controller is the flashlight's too (hakios.s2mpb02_torch.c): one transfer at a time */
 void hakios_s2mpb02_bus_lock(void);
