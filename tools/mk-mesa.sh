@@ -56,17 +56,36 @@ SDK=$THEOS/sdks/iPhoneOS16.5.sdk
 CC=$ROOT/xnu-deps/host/bin/xnu-clang
 mkdir -p "$B/out"
 cd "$B"
+: > meson-setup.log
+: > ninja.log
+# set -e is not enough on its own here: the long commands write to the two logs above, so a failure
+# would end the caller's step with "exit code 1" and nothing else -- which is what the S9 installer's
+# userland step did on 16 November. Say where it stopped and print the end of the log that says why.
+trap 's=$?; if [ "$s" != 0 ]; then
+	echo "mk-mesa.sh: stopped with exit $s"
+	for l in meson-setup.log ninja.log; do
+		if [ -s "$l" ]; then echo "== the last 40 lines of $B/$l"; tail -40 "$l"; fi
+	done
+fi; exit "$s"' EXIT
 
 # The sources are the archive's with tools/mesa/*.patch on top. When the patches change, a tree that was
 # patched with the earlier ones is of no use (and builds without a word into a library that does not match
 # the rest): the sources are taken from the archive again and everything is built anew, about a minute.
 PATCHES=$(cat "$ROOT"/tools/mesa/*.patch | sha256sum | cut -d' ' -f1)
 if [ ! -d mesa-$VERSION ] || [ "$(cat mesa-$VERSION/.hakios-patches 2>/dev/null)" != "$PATCHES" ]; then
-	[ -f mesa-$VERSION.tar.xz ] || curl -sL --fail -o mesa-$VERSION.tar.xz https://archive.mesa3d.org/mesa-$VERSION.tar.xz
-	echo "$SHA256  mesa-$VERSION.tar.xz" | sha256sum -c --quiet
+	echo "mk-mesa.sh: unpacking Mesa $VERSION and applying tools/mesa/*.patch"
+	# -S: silent progress, but a failed download still says why (plain -s hid it)
+	[ -f mesa-$VERSION.tar.xz ] ||
+		curl -sS -L --fail --retry 3 --retry-delay 5 -o mesa-$VERSION.tar.xz "https://archive.mesa3d.org/mesa-$VERSION.tar.xz" ||
+		{ echo "mk-mesa.sh: cannot download https://archive.mesa3d.org/mesa-$VERSION.tar.xz"; exit 1; }
+	echo "$SHA256  mesa-$VERSION.tar.xz" | sha256sum -c --quiet ||
+		{ echo "mk-mesa.sh: mesa-$VERSION.tar.xz does not have the expected sha256"; exit 1; }
 	rm -rf mesa-$VERSION build-*
 	tar xJf mesa-$VERSION.tar.xz
-	for p in "$ROOT"/tools/mesa/*.patch; do patch -s --no-backup-if-mismatch -d mesa-$VERSION -p1 < "$p"; done
+	for p in "$ROOT"/tools/mesa/*.patch; do
+		echo "mk-mesa.sh:   $(basename "$p")"
+		patch -s --no-backup-if-mismatch -d mesa-$VERSION -p1 < "$p"
+	done
 	echo "$PATCHES" > mesa-$VERSION/.hakios-patches
 fi
 # ours, kept in the repository: always the current ones
@@ -110,14 +129,16 @@ cpp_link_args = ['-lz']
 INI
 DRIVERS=${DRIVERS:-softpipe,freedreno,panfrost}
 BUILD=build-${DRIVERS//,/-}
+echo "mk-mesa.sh: meson setup $BUILD ($DRIVERS)"
 [ -f $BUILD/build.ninja ] || meson setup $BUILD mesa-$VERSION --cross-file cross.ini --wrap-mode=nofallback \
 	--prefix=/redwood --libdir=lib --buildtype=release -Db_ndebug=true \
 	-Dplatforms= -Dgallium-drivers="$DRIVERS" -Dfreedreno-kmds=msm -Dvulkan-drivers= -Dglx=disabled -Degl=disabled -Dgbm=disabled \
 	-Dosmesa=true -Dllvm=disabled -Dshared-glapi=enabled -Dgles1=disabled -Dgles2=enabled -Dopengl=true \
 	-Dzlib=disabled -Dzstd=disabled -Dxmlconfig=disabled -Dexpat=disabled -Dshader-cache=disabled -Dvalgrind=disabled \
 	-Dlibunwind=disabled -Dglvnd=disabled -Dvideo-codecs= -Dtools= -Dgallium-vdpau=disabled -Dgallium-va=disabled \
-	-Dgallium-xa=disabled -Dlmsensors=disabled -Dbuild-tests=false > meson-setup.log
-ninja -C $BUILD > ninja.log
+	-Dgallium-xa=disabled -Dlmsensors=disabled -Dbuild-tests=false > meson-setup.log 2>&1
+echo "mk-mesa.sh: ninja -C $BUILD"
+ninja -C $BUILD > ninja.log 2>&1
 # air_run draws with a translated Metal shader and reads the pixels back; it is
 # the only way to find out whether the Adreno takes work that did not come from
 # the window server. Built only when asked, since it is a test program.

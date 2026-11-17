@@ -616,8 +616,10 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 			# the OpenGL ES library, and the table of functions that hands CoreAnimation's calls to it
 			# (Mesa says beside the library what it was built from: one from other patches is built again)
 			M=../xnu-deps/build/mesa/out
-			[ "$(cat $M/built-from 2>/dev/null)" = "$(cat ../tools/mesa/*.patch ../tools/mesa/hakios-drm/* | sha256sum)" ] ||
+			if [ "$(cat $M/built-from 2>/dev/null)" != "$(cat ../tools/mesa/*.patch ../tools/mesa/hakios-drm/* | sha256sum)" ]; then
+				echo "build.sh: Mesa's patches changed since libOSMesa.8.dylib was built: tools/mk-mesa.sh"
 				../tools/mk-mesa.sh
+			fi
 			# ... and the compiler library separately, because the hash above covers the PATCHES
 			# and the library is built from tools/mesa/air/, which they do not mention. Two boots
 			# of 22 October carried a libhakiosair.dylib three hours older than the driver beside
