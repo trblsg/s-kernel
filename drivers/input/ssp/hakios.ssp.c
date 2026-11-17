@@ -1723,39 +1723,6 @@ rates_to_boot_locked(void)
 	rates_made = true;
 }
 
-/*
- * write(): struct hakios_sensor_rate records, each the period a sensor is to be read at from now on. A record of an
- * unknown type or of a period outside 5-1000 ms (other than off and the boot's) fails the write with EINVAL; the
- * records before it stand.
- */
-static int
-sensors_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
-{
-	while (uio_resid(uio) >= (user_ssize_t)sizeof(struct hakios_sensor_rate)) {
-		struct hakios_sensor_rate r;
-		int id, error = uiomove((caddr_t)&r, sizeof(r), uio);
-
-		if (error != 0) {
-			return error;
-		}
-		id = ssp_id_of(r.type);
-		if (id < 0 || (r.period_ms != HAKIOS_SENSOR_RATE_OFF && r.period_ms != HAKIOS_SENSOR_RATE_BOOT &&
-		    (r.period_ms < RATE_MS_LEAST || r.period_ms > RATE_MS_MOST))) {
-			return EINVAL;
-		}
-		lck_mtx_lock(&shub_lock);
-		if (!rates_made) {
-			rates_to_boot_locked();
-		}
-		if (rate_ms[id] != r.period_ms) {
-			rate_ms[id] = r.period_ms;
-			rate_pending |= 1ull << id;
-		}
-		lck_mtx_unlock(&shub_lock);
-	}
-	return uio_resid(uio) == 0 ? 0 : EINVAL;
-}
-
 static int
 sensors_open(__unused dev_t dev, __unused int flags, __unused int devtype, __unused proc_t p)
 {
@@ -1809,15 +1776,24 @@ sensors_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 }
 
 /*
- * A line of text written to the device goes to the kernel's log with the writer's name: what the reader in user space
- * has to say (it found the device, which orientation it worked out) is then on the USB console beside the hub's own
- * lines, on systems whose user space has no other way there. At most 200 characters a write.
+ * write(): two formats, told apart by the first 8 bytes, which are a struct hakios_sensor_rate only when they say so
+ * (a text line begins with a printable byte, never a HAKIOS_SENSOR_* type):
+ *
+ *   - struct hakios_sensor_rate records, each the period a sensor is to be read at from now on (userland/src/
+ *     hakios.sensors.h; userland/src/inject.c writes one at a time). A record of an unknown type or of a period
+ *     outside 5-1000 ms (other than off and the boot's) fails the write with EINVAL; the records before it stand.
+ *   - a line of text, put in the kernel's log with the writer's name: what the reader in user space has to say (it
+ *     found the device, which orientation it worked out) is then on the USB console beside the hub's own lines, on
+ *     systems whose user space has no other way there (the ios-27 tree's orientation library).
+ *
+ * At most 200 characters (or 25 records) a write; the rest of a longer one is dropped, not an error.
  */
 static int
 sensors_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 {
-	char text[201], name[32] = "?";
+	char text[201];
 	size_t n = (size_t)uio_resid(uio);
+	bool rates = false;
 	int error;
 
 	if (n > sizeof(text) - 1) {
@@ -1827,18 +1803,51 @@ sensors_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 	if (error != 0) {
 		return error;
 	}
-	uio_setresid(uio, 0);           /* the rest of a longer write is dropped, not an error */
-	while (n > 0 && (text[n - 1] == '\n' || text[n - 1] == '\r')) {
-		n--;
+	uio_setresid(uio, 0);
+	if (n >= sizeof(struct hakios_sensor_rate) && n % sizeof(struct hakios_sensor_rate) == 0) {
+		struct hakios_sensor_rate r;
+
+		memcpy(&r, text, sizeof(r));
+		rates = ssp_id_of(r.type) >= 0;
 	}
-	text[n] = 0;
-	for (size_t i = 0; i < n; i++) {
-		if (text[i] < 0x20 || text[i] > 0x7e) {
-			text[i] = '.';
+	if (rates) {
+		for (size_t at = 0; at < n; at += sizeof(struct hakios_sensor_rate)) {
+			struct hakios_sensor_rate r;
+			int id;
+
+			memcpy(&r, text + at, sizeof(r));
+			id = ssp_id_of(r.type);
+			if (id < 0 || (r.period_ms != HAKIOS_SENSOR_RATE_OFF && r.period_ms != HAKIOS_SENSOR_RATE_BOOT &&
+			    (r.period_ms < RATE_MS_LEAST || r.period_ms > RATE_MS_MOST))) {
+				return EINVAL;
+			}
+			lck_mtx_lock(&shub_lock);
+			if (!rates_made) {
+				rates_to_boot_locked();
+			}
+			if (rate_ms[id] != r.period_ms) {
+				rate_ms[id] = r.period_ms;
+				rate_pending |= 1ull << id;
+			}
+			lck_mtx_unlock(&shub_lock);
 		}
+		return 0;
 	}
-	proc_selfname(name, (int)sizeof(name));
-	say("sensors: %s[%d] says: %s\n", name, proc_selfpid(), text);
+	{
+		char name[32] = "?";
+
+		while (n > 0 && (text[n - 1] == '\n' || text[n - 1] == '\r')) {
+			n--;
+		}
+		text[n] = 0;
+		for (size_t i = 0; i < n; i++) {
+			if (text[i] < 0x20 || text[i] > 0x7e) {
+				text[i] = '.';
+			}
+		}
+		proc_selfname(name, (int)sizeof(name));
+		say("sensors: %s[%d] says: %s\n", name, proc_selfpid(), text);
+	}
 	return 0;
 }
 
