@@ -105,6 +105,14 @@ MORE="metal_m2v=1 tu_debug=perf" tools/metal-run.sh   # and Turnip's own account
 
 The summary's frames per gesture come from `tools/frames.py`, which runs anywhere Python does: `python tools/frames.py logs/last.log`.
 
+The kernel's own view of the frames comes from the `fps:` lines it writes with boot-arg `fps_log=1`:
+`python tools/fps.py logs/last.log` gives the frames a second while the screen moved (mean, median and
+the slow tail), drawing and flip-wait times, the GPU's busy time, its clock and the G3D's temperature,
+and the slowest seconds with their numbers. `FPS_MOVING_FROM=N` sets how few frames a second may show
+and still count as moving (default 10); a second below it is "still" (a pause, a clock) and is left out
+of the averages. A boot without `touch_lat=1` still has these lines, so a GLES and a Metal run can be
+compared from the same kind of log.
+
 `tools/metal-run.sh` keeps `/private/var` between boots by default (`ufs=2 ufs_write=1 var_store=1`, the partition
 `darwin` only; `PERSIST=0` for none), so the shader stages the window server compiles are compiled once. To put them
 into the image, so that not even the first boot compiles them: with the phone back in Android,
