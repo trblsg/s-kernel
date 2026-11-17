@@ -1,0 +1,1361 @@
+/*
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 the HakiOS authors (Scion).
+ *
+ * metal_tri: a triangle through the Metal API on the Metal-on-Vulkan plug-in (src/metalvk/, METAL=vk), on the phone, checked pixel by
+ * pixel. The first step of Metal for applications on the Galaxy S9 (docs/metal.md): MTLDevice, library, render pipeline, command queue,
+ * render pass, read back, on metal2vulkan's runtime over PanVK on the Mali-G72.
+ *
+ *   metal_tri [--bundle DIR] [--metallib FILE] [--size N] [--out FILE.ppm] [--surface] [--register] [--hold SECONDS]
+ *             [--xr none|over|add] [--fetch] [--row-bytes B] [--frames K] [--ycbcr] [--texel-buffer OFFSET [--a8] [--blit] [--render]]
+ *
+ * The device: MTLCreateSystemDefaultDevice() first, Metal's own discovery (the kernel names the plug-in with boot-arg metal=N). When it
+ * answers nil, the plug-in at --bundle (default /redwood/lib/HakiosMetal.bundle) is loaded and its class made the way Metal makes it,
+ * -initWithAcceleratorPort: on the IOAcceleratorES service; so this runs without any boot-arg, in this process only, and nothing else on
+ * the phone is shown a device. The bundle registers its class only in a process it is shown to (src/hakios_metal_shown.c): put
+ * "metal_tri" in HakiosMetal.clients beside it. --register then hands the object to Metal as its discovery does (MTLAddDevice) and checks
+ * that MTLCreateSystemDefaultDevice() answers it; the application always does. The plug-in opens the GPU only at the device's first real
+ * use, and each step says whether its runtime (libmetal2vulkan) is in the process yet.
+ *
+ * The shaders: tools/metal/air/tri_vertex.ll and tri_fragment.ll, AIR written by hand and put in a library by tools/metal/mkmetallib.py
+ * (no Xcode needed); default /redwood/share/metal_tri.metallib. The vertex stage makes the three corners from the vertex id (bottom
+ * left red, bottom right green, top blue), so the draw needs no buffer.
+ *
+ * What is checked, on a N x N BGRA8 target cleared to (0.1, 0.1, 0.3): every pixel whose centre is clearly inside the triangle is
+ * not the clear colour and its colour is the barycentric mix of the corners within 8/255 per channel; every pixel clearly outside is
+ * the clear colour exactly; pixels near an edge are not judged. --surface renders into a texture over an IOSurface (what a
+ * CAMetalLayer's drawable is) and reads the surface's own memory, instead of a Shared texture's getBytes:. The picture is written as a
+ * PPM with --out.
+ *
+ * --xr draws the same triangle into a BGR10_XR target (the extended-range format of a CAMetalLayer's wide-colour drawable) and judges
+ * each pixel's three 10-bit codes against Metal's store of the expected value v, code = round(384 + 510 v) of v rounded to half: none
+ * unblended (v the corners' mix), over blended with BlendAlpha and OneMinusBlendAlpha at a blend colour alpha of 0.25
+ * (v = 0.25 mix + 0.75 clear), add with One and One (v = mix + clear). Inside within 2 codes, outside the clear's codes exactly. On a
+ * device without framebuffer fetch the runtime blends such a target's codes through a unorm view of its word (metal2vulkan,
+ * tools/metal/m2v/0004-xr10-unorm-blend.patch), and this is its check.
+ *
+ * --fetch draws the triangle twice in one pass with a fragment function that reads its colour attachment ([[color(0)]], framebuffer
+ * fetch: tools/metal/air/tri_fetch.ll, the corners' mix over 2 plus the attachment over 2) and judges every pixel against 3/4 of the mix
+ * plus 1/4 of the clear (fetch_check below); with --surface into a texture over an IOSurface.
+ *
+ * --row-bytes B makes the --surface surface's rows B bytes apart instead of 4 N (a multiple of 16, as Metal asks): the window server's
+ * framebuffers are 1125 pixels wide at 4608-byte rows, wider than the driver's own linear rows (4544), so they are textures whose
+ * image cannot be the driver's linear one (docs/metal.md, phase 7). --frames K draws the triangle K more times, a command buffer each
+ * waited for, and says how long a commit took to complete on average: where a texture is a shadow of its surface, every frame copies
+ * the surface in and back out.
+ *
+ * --ycbcr draws the triangle with a fragment function that reads a two-plane YCbCr texture (YCBCR8_420_2P, 500) over a '420f'
+ * IOSurface at the fragment's own pixel (tools/metal/air/tri_ycbcr.ll), the planes one luma code and chroma 128, which reads as that
+ * code's gray, and judges the inside of the triangle at each step (ycbcr_check below): drawn twice with the planes as they are, then
+ * after the processor wrote them under the surface's lock, then after a render pass cleared an R8Unorm texture over the luma plane in a
+ * command buffer of its own, then in the same command buffer as the draw. metal2vulkan converts the planes again only where the
+ * surface's seed changed or its own commands wrote them (tools/metal/m2v/0011); each step must read the codes the planes hold then, and
+ * says how long its command buffer took from commit to completion (with --size 2048 the conversion is most of it).
+ *
+ * --texel-buffer OFFSET draws the triangle with tri_ycbcr reading an RGBA8Unorm texture (--a8: A8Unorm) made over a no-copy buffer at
+ * OFFSET bytes with rows --row-bytes apart, as CoreAnimation's text and icon textures are, and judges every pixel against its texel
+ * (texel_buffer_check below); with --blit the GPU writes the texels first, a blit from a buffer, and the memory is checked before the
+ * draw reads them; with --render (RGBA8) the triangle is rendered into that texture instead, and judged in the buffer's memory.
+ */
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#import <QuartzCore/QuartzCore.h>
+#import <UIKit/UIKit.h>
+#import <IOSurface/IOSurfaceRef.h>
+#include <IOKit/IOKitLib.h>
+#include <mach-o/dyld.h>
+#include <objc/runtime.h>
+#include <execinfo.h>
+#include <math.h>
+#include <signal.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static const double clear_rgb[3] = { 0.1, 0.1, 0.3 };
+
+/* the triangle of tri_vertex.ll in normalised device coordinates, y up */
+static const double corner[3][2] = { { -0.8, -0.8 }, { 0.8, -0.8 }, { 0.0, 0.8 } };
+
+/* what Metal sends a plug-in's device class (MetalPluginClassName) */
+@interface NSObject (HakiosMetalPlugin)
+- (id)initWithAcceleratorPort:(unsigned)port;
+@end
+
+/* Metal's own registration of a device, which its discovery calls for the object a plug-in's class made (exported by Metal) */
+extern void MTLAddDevice(id<MTLDevice> device);
+
+/* whether the plug-in's runtime is in this process yet: the device opens the GPU only at its first real use (HakiosMetalVK.mm) */
+static const char *
+runtime_state(void)
+{
+	for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+		const char *name = _dyld_get_image_name(i);
+
+		if (name != NULL && strstr(name, "libmetal2vulkan") != NULL) {
+			return "loaded";
+		}
+	}
+	return "not loaded";
+}
+
+/* DISCOVER: Metal's own device first; false for an application that carries its own plug-in, which is then the one it tests */
+static id<MTLDevice>
+make_device(const char *bundle_path, bool register_it, bool discover)
+{
+	id<MTLDevice> device = discover ? MTLCreateSystemDefaultDevice() : nil;
+	if (device != nil) {
+		printf("metal_tri: device by Metal's own discovery: %s\n", device.name.UTF8String);
+		return device;
+	}
+	printf("metal_tri: MTLCreateSystemDefaultDevice() is nil (no metal=N): the plug-in at %s, by hand\n", bundle_path);
+	NSBundle *bundle = [NSBundle bundleWithPath:@(bundle_path)];
+	NSError *error = nil;
+	if (bundle == nil || ![bundle loadAndReturnError:&error]) {
+		printf("metal_tri: FAIL: the bundle did not load: %s\n", error.description.UTF8String ?: "no bundle");
+		return nil;
+	}
+	Class cls = NSClassFromString(@"HakiosMetalDevice");
+	if (cls == Nil) {
+		printf("metal_tri: FAIL: no class HakiosMetalDevice (is metal_tri in HakiosMetal.clients beside the bundle?)\n");
+		return nil;
+	}
+	io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOAcceleratorES"));
+	if (service == IO_OBJECT_NULL) {
+		printf("metal_tri: FAIL: no IOAcceleratorES service\n");
+		return nil;
+	}
+	/*
+	 * Sent as an init (the category below), as Metal sends it: the receiver is consumed and the result returned retained. The plug-in
+	 * returns the object allocated here, initialised, or the process's device made before in its place (keeping the new allocation on
+	 * purpose, HakiosMetalVK.mm); a caller that released it as well (a cast function pointer under ARC does) would free a _MTLDevice
+	 * whose -init never ran, which faults.
+	 */
+	device = [[cls alloc] initWithAcceleratorPort:service];
+	IOObjectRelease(service);
+	if (device == nil) {
+		printf("metal_tri: FAIL: -initWithAcceleratorPort: gave nil (the plug-in's log says why)\n");
+		return nil;
+	}
+	printf("metal_tri: the plug-in's class made a %s; its runtime is %s\n", object_getClassName(device), runtime_state());
+	if (register_it) {
+		/* what Metal's discovery does with that object; MTLCreateSystemDefaultDevice() above made Metal's device list */
+		MTLAddDevice(device);
+		id<MTLDevice> found = MTLCreateSystemDefaultDevice();
+		printf("metal_tri: after MTLAddDevice(), MTLCreateSystemDefaultDevice() is %s; the runtime is %s\n",
+		    found == device ? "this device" : found != nil ? "ANOTHER device" : "nil", runtime_state());
+		if (found != device) {
+			printf("metal_tri: FAIL: Metal did not take the device\n");
+			return nil;
+		}
+	}
+	printf("metal_tri: device by the plug-in's own class: %s; the runtime is %s\n", device.name.UTF8String, runtime_state());
+	return device;
+}
+
+/* barycentric coordinates of the pixel centre (px, py), y down, on an n x n target */
+static void
+barycentric(double px, double py, unsigned n, double w[3])
+{
+	double x = (px + 0.5) / n * 2 - 1, y = 1 - (py + 0.5) / n * 2;
+	double x0 = corner[0][0], y0 = corner[0][1], x1 = corner[1][0], y1 = corner[1][1], x2 = corner[2][0], y2 = corner[2][1];
+	double d = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
+	w[0] = ((y1 - y2) * (x - x2) + (x2 - x1) * (y - y2)) / d;
+	w[1] = ((y2 - y0) * (x - x2) + (x0 - x2) * (y - y2)) / d;
+	w[2] = 1 - w[0] - w[1];
+}
+
+/* METAL_TRI_STEPS=1: each call said before it is made, so that a fault names the call it is in */
+static void
+step(const char *what)
+{
+	if (getenv("METAL_TRI_STEPS") != NULL) {
+		printf("      -> %s\n", what);
+	}
+}
+
+/* a fault in the runtime or the driver: where, by image and symbol, then the default action */
+static void
+fault(int sig)
+{
+	void *frames[48];
+	int n = backtrace(frames, 48);
+	dprintf(2, "metal_tri: signal %d, called from:\n", sig);
+	backtrace_symbols_fd(frames, n, 2);
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
+
+/* the library and the render pipeline of tri_vertex and tri_fragment, into BGRA8Unorm */
+static id<MTLRenderPipelineState>
+make_pipeline(id<MTLDevice> device, const char *metallib)
+{
+	NSError *error = nil;
+	step("newLibraryWithURL:");
+	id<MTLLibrary> library = [device newLibraryWithURL:[NSURL fileURLWithPath:@(metallib)] error:&error];
+	if (library == nil) {
+		printf("metal_tri: FAIL: newLibraryWithURL: %s: %s\n", metallib, error.description.UTF8String);
+		return nil;
+	}
+	step("functionNames");
+	printf("ok    library: %s\n", [[library.functionNames componentsJoinedByString:@" "] UTF8String]);
+	step("newFunctionWithName: and the pipeline descriptor");
+	MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+	pd.vertexFunction = [library newFunctionWithName:@"tri_vertex"];
+	pd.fragmentFunction = [library newFunctionWithName:@"tri_fragment"];
+	pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+	if (pd.vertexFunction == nil || pd.fragmentFunction == nil) {
+		printf("metal_tri: FAIL: tri_vertex or tri_fragment is not in the library\n");
+		return nil;
+	}
+	CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+	step("newRenderPipelineStateWithDescriptor:error:");
+	id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithDescriptor:pd error:&error];
+	if (pipeline == nil) {
+		printf("metal_tri: FAIL: newRenderPipelineStateWithDescriptor: %s\n", error.description.UTF8String);
+		return nil;
+	}
+	printf("ok    render pipeline (AIR to SPIR-V to the GPU's code) in %.0f ms\n", (CFAbsoluteTimeGetCurrent() - t0) * 1000);
+	return pipeline;
+}
+
+/* one render pass into target: a clear and the triangle; committed and waited for */
+static bool
+render(id<MTLCommandQueue> queue, id<MTLRenderPipelineState> pipeline, id<MTLTexture> target, const double clear[3], bool quiet)
+{
+	step("render pass, command buffer, encoder");
+	MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+	rp.colorAttachments[0].texture = target;
+	rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+	rp.colorAttachments[0].clearColor = MTLClearColorMake(clear[0], clear[1], clear[2], 1);
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+	[enc setRenderPipelineState:pipeline];
+	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	[enc endEncoding];
+	CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+	step("commit and wait");
+	[cb commit];
+	[cb waitUntilCompleted];
+	bool done = cb.status == MTLCommandBufferStatusCompleted;
+	if (!quiet || !done) {
+		printf("%s render pass: status %ld in %.1f ms%s%s\n", done ? "ok   " : "FAIL ", (long)cb.status,
+		    (CFAbsoluteTimeGetCurrent() - t0) * 1000, cb.error ? ": " : "", cb.error ? cb.error.description.UTF8String : "");
+	}
+	return done;
+}
+
+/* a BGRA8 texture of n x n, over the IOSurface when one is given */
+static id<MTLTexture>
+make_target(id<MTLDevice> device, unsigned n, IOSurfaceRef ios)
+{
+	MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:n height:n
+	    mipmapped:NO];
+	td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	td.storageMode = MTLStorageModeShared;
+	return ios != NULL ? [device newTextureWithDescriptor:td iosurface:ios plane:0] : [device newTextureWithDescriptor:td];
+}
+
+static IOSurfaceRef
+make_surface(unsigned n, unsigned row_bytes)
+{
+	NSDictionary *props = @{ (id)kIOSurfaceWidth: @(n), (id)kIOSurfaceHeight: @(n), (id)kIOSurfaceBytesPerElement: @4,
+		(id)kIOSurfaceBytesPerRow: @(row_bytes != 0 ? row_bytes : n * 4), (id)kIOSurfacePixelFormat: @((unsigned)'BGRA') };
+	return IOSurfaceCreate((__bridge CFDictionaryRef)props);
+}
+
+/* every byte of the surface's memory set to `value`, the texels' too (the pass clears them) */
+static void
+fill_surface(IOSurfaceRef ios, unsigned char value)
+{
+	IOSurfaceLock(ios, 0, NULL);
+	memset(IOSurfaceGetBaseAddress(ios), value, IOSurfaceGetAllocSize(ios));
+	IOSurfaceUnlock(ios, 0, NULL);
+}
+
+/* the bytes of the surface that are no texel's (between the rows, and after the last row) that no longer hold `value` */
+static size_t
+padding_changed(IOSurfaceRef ios, unsigned n, unsigned char value)
+{
+	size_t changed = 0, row = IOSurfaceGetBytesPerRow(ios), size = IOSurfaceGetAllocSize(ios);
+	IOSurfaceLock(ios, kIOSurfaceLockReadOnly, NULL);
+	const unsigned char *base = IOSurfaceGetBaseAddress(ios);
+	for (size_t at = 0; at < size; at++) {
+		bool texel = at / row < n && at % row < (size_t)n * 4;
+		changed += !texel && base[at] != value;
+	}
+	IOSurfaceUnlock(ios, kIOSurfaceLockReadOnly, NULL);
+	return changed;
+}
+
+/* the surface's rows into pixels (n x n x 4, tightly packed) */
+static void
+read_surface(IOSurfaceRef ios, unsigned char *pixels, unsigned n)
+{
+	IOSurfaceLock(ios, kIOSurfaceLockReadOnly, NULL);
+	const unsigned char *base = IOSurfaceGetBaseAddress(ios);
+	size_t row = IOSurfaceGetBytesPerRow(ios);
+	for (unsigned y = 0; y < n; y++) {
+		memcpy(pixels + (size_t)y * n * 4, base + y * row, (size_t)n * 4);
+	}
+	IOSurfaceUnlock(ios, kIOSurfaceLockReadOnly, NULL);
+}
+
+/*
+ * Every pixel whose centre is clearly inside the triangle has the barycentric mix of the corners within 8/255 per channel; every pixel
+ * clearly outside is the clear colour exactly; pixels near an edge are not judged. Returns the number wrong.
+ */
+static unsigned
+judge(const unsigned char *pixels, unsigned n, const double clear[3], unsigned *inside, unsigned *outside, bool say)
+{
+	unsigned bad_in = 0, bad_out = 0;
+	unsigned char want_clear[3] = { (unsigned char)lround(clear[2] * 255), (unsigned char)lround(clear[1] * 255),
+		(unsigned char)lround(clear[0] * 255) };   /* B G R */
+	*inside = *outside = 0;
+	for (unsigned y = 0; y < n; y++) {
+		for (unsigned x = 0; x < n; x++) {
+			const unsigned char *p = pixels + ((size_t)y * n + x) * 4;
+			double w[3];
+			barycentric(x, y, n, w);
+			double margin = 2.5 / n;                 /* about a pixel and a quarter in barycentric terms */
+			if (w[0] > margin && w[1] > margin && w[2] > margin) {
+				(*inside)++;
+				double want[3] = { w[2] * 255, w[1] * 255, w[0] * 255 };     /* B G R from (r, g, b) = (w0, w1, w2) */
+				bool ok = true;
+				for (int c = 0; c < 3; c++) {
+					ok = ok && fabs(p[c] - want[c]) <= 8;
+				}
+				if (!ok && bad_in++ < 4 && say) {
+					printf("      inside (%u,%u): BGRA %u %u %u %u, want about %.0f %.0f %.0f 255\n", x, y, p[0], p[1], p[2], p[3],
+					    want[0], want[1], want[2]);
+				}
+			} else if (w[0] < -margin || w[1] < -margin || w[2] < -margin) {
+				(*outside)++;
+				if ((p[0] != want_clear[0] || p[1] != want_clear[1] || p[2] != want_clear[2]) && bad_out++ < 4 && say) {
+					printf("      outside (%u,%u): BGRA %u %u %u %u, want the clear colour %u %u %u 255\n", x, y, p[0], p[1], p[2],
+					    p[3], want_clear[0], want_clear[1], want_clear[2]);
+				}
+			}
+		}
+	}
+	return bad_in + bad_out;
+}
+
+/* ---------------------------------------------------------------------------------------------------------- the YCbCr check (--ycbcr) */
+
+/* a '420f' surface of n x n (n a multiple of 32): plane 0 the luma codes, n bytes a row; plane 1 the Cb and Cr pairs, n bytes a row */
+static IOSurfaceRef
+make_420f(unsigned n)
+{
+	NSDictionary *luma = @{ (id)kIOSurfacePlaneWidth: @(n), (id)kIOSurfacePlaneHeight: @(n), (id)kIOSurfacePlaneBytesPerElement: @1,
+		(id)kIOSurfacePlaneBytesPerRow: @(n), (id)kIOSurfacePlaneOffset: @0, (id)kIOSurfacePlaneSize: @(n * n) };
+	NSDictionary *chroma = @{ (id)kIOSurfacePlaneWidth: @(n / 2), (id)kIOSurfacePlaneHeight: @(n / 2),
+		(id)kIOSurfacePlaneBytesPerElement: @2, (id)kIOSurfacePlaneBytesPerRow: @(n), (id)kIOSurfacePlaneOffset: @(n * n),
+		(id)kIOSurfacePlaneSize: @(n * n / 2) };
+	NSDictionary *props = @{ (id)kIOSurfaceWidth: @(n), (id)kIOSurfaceHeight: @(n), (id)kIOSurfacePixelFormat: @((unsigned)'420f'),
+		(id)kIOSurfaceAllocSize: @(n * n * 3 / 2), (id)kIOSurfacePlaneInfo: @[ luma, chroma ] };
+	return IOSurfaceCreate((__bridge CFDictionaryRef)props);
+}
+
+/* the planes written by the processor, under the surface's lock for writing (which changes its seed): luma `code`, chroma 128 */
+static void
+fill_420f(IOSurfaceRef ios, unsigned char code)
+{
+	IOSurfaceLock(ios, 0, NULL);
+	memset(IOSurfaceGetBaseAddressOfPlane(ios, 0), code, IOSurfaceGetBytesPerRowOfPlane(ios, 0) * IOSurfaceGetHeightOfPlane(ios, 0));
+	memset(IOSurfaceGetBaseAddressOfPlane(ios, 1), 128, IOSurfaceGetBytesPerRowOfPlane(ios, 1) * IOSurfaceGetHeightOfPlane(ios, 1));
+	IOSurfaceUnlock(ios, 0, NULL);
+}
+
+/*
+ * The draw's command buffer: with `clear_luma` >= 0, first a render pass that clears `luma` (an R8Unorm texture over plane 0) to that
+ * code, then the triangle reading `yuv` into `target`; committed and waited for. Then the inside of the triangle judged: gray `want`
+ * within 2. False, saying why, if it is not.
+ */
+static bool
+ycbcr_step(const char *what, id<MTLCommandQueue> queue, id<MTLRenderPipelineState> pipeline, id<MTLTexture> target,
+    id<MTLTexture> yuv, id<MTLTexture> luma, int clear_luma, unsigned char want, unsigned n)
+{
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	if (clear_luma >= 0) {
+		MTLRenderPassDescriptor *lp = [MTLRenderPassDescriptor renderPassDescriptor];
+		lp.colorAttachments[0].texture = luma;
+		lp.colorAttachments[0].loadAction = MTLLoadActionClear;
+		lp.colorAttachments[0].storeAction = MTLStoreActionStore;
+		lp.colorAttachments[0].clearColor = MTLClearColorMake(clear_luma / 255.0, 0, 0, 1);
+		[[cb renderCommandEncoderWithDescriptor:lp] endEncoding];
+	}
+	MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+	rp.colorAttachments[0].texture = target;
+	rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+	rp.colorAttachments[0].clearColor = MTLClearColorMake(clear_rgb[0], clear_rgb[1], clear_rgb[2], 1);
+	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+	[enc setRenderPipelineState:pipeline];
+	[enc setFragmentTexture:yuv atIndex:0];
+	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	[enc endEncoding];
+	CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+	[cb commit];
+	[cb waitUntilCompleted];
+	double ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000;
+	if (cb.status != MTLCommandBufferStatusCompleted) {
+		printf("FAIL  %s: command buffer status %ld%s%s\n", what, (long)cb.status, cb.error ? ": " : "",
+		    cb.error ? cb.error.description.UTF8String : "");
+		return false;
+	}
+	unsigned char *pixels = calloc(n, (size_t)n * 4);
+	[target getBytes:pixels bytesPerRow:(size_t)n * 4 fromRegion:MTLRegionMake2D(0, 0, n, n) mipmapLevel:0];
+	unsigned inside = 0, wrong = 0;
+	for (unsigned y = 0; y < n; y++) {
+		for (unsigned x = 0; x < n; x++) {
+			double w[3];
+			barycentric(x, y, n, w);
+			double margin = 2.5 / n;
+			if (w[0] <= margin || w[1] <= margin || w[2] <= margin) {
+				continue;
+			}
+			const unsigned char *p = pixels + ((size_t)y * n + x) * 4;
+			inside++;
+			bool ok = abs(p[0] - want) <= 2 && abs(p[1] - want) <= 2 && abs(p[2] - want) <= 2;
+			if (!ok && wrong++ < 3) {
+				printf("      (%u,%u): BGRA %u %u %u %u, want gray %u\n", x, y, p[0], p[1], p[2], p[3], want);
+			}
+		}
+	}
+	free(pixels);
+	bool pass = inside > 0 && wrong == 0;
+	printf("%s %s: gray %u read, %u pixels inside judged, %u wrong; %.1f ms from commit to completion\n", pass ? "ok   " : "FAIL ", what,
+	    want, inside, wrong, ms);
+	return pass;
+}
+
+static bool
+ycbcr_check(id<MTLDevice> device, const char *metallib, unsigned n)
+{
+	NSError *error = nil;
+	n &= ~31u;
+	id<MTLLibrary> library = [device newLibraryWithURL:[NSURL fileURLWithPath:@(metallib)] error:&error];
+	if (library == nil) {
+		printf("metal_tri: FAIL: newLibraryWithURL: %s: %s\n", metallib, error.description.UTF8String);
+		return false;
+	}
+	MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+	pd.vertexFunction = [library newFunctionWithName:@"tri_vertex"];
+	pd.fragmentFunction = [library newFunctionWithName:@"tri_ycbcr"];
+	pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+	if (pd.vertexFunction == nil || pd.fragmentFunction == nil) {
+		printf("metal_tri: FAIL: tri_vertex or tri_ycbcr is not in the library\n");
+		return false;
+	}
+	id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithDescriptor:pd error:&error];
+	if (pipeline == nil) {
+		printf("metal_tri: FAIL: newRenderPipelineStateWithDescriptor: %s\n", error.description.UTF8String);
+		return false;
+	}
+	printf("ok    render pipeline reading a texture\n");
+	IOSurfaceRef ios = make_420f(n);
+	if (ios == NULL || IOSurfaceGetPlaneCount(ios) != 2) {
+		printf("metal_tri: FAIL: no '420f' surface of %ux%u\n", n, n);
+		return false;
+	}
+	/* YCBCR8_420_2P (500): no name in the public SDK */
+	MTLTextureDescriptor *yd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:(MTLPixelFormat)500 width:n height:n
+	    mipmapped:NO];
+	yd.usage = MTLTextureUsageShaderRead;
+	MTLTextureDescriptor *ld = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm width:n height:n
+	    mipmapped:NO];
+	ld.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	id<MTLTexture> yuv = [device newTextureWithDescriptor:yd iosurface:ios plane:0];
+	id<MTLTexture> luma = [device newTextureWithDescriptor:ld iosurface:ios plane:0];
+	id<MTLTexture> target = make_target(device, n, NULL);
+	if (yuv == nil || luma == nil || target == nil) {
+		printf("metal_tri: FAIL: the textures (YCbCr %s, luma %s, target %s)\n", yuv ? "made" : "refused", luma ? "made" : "refused",
+		    target ? "made" : "refused");
+		CFRelease(ios);
+		return false;
+	}
+	id<MTLCommandQueue> queue = [device newCommandQueue];
+	bool pass = true;
+	fill_420f(ios, 0x40);
+	pass &= ycbcr_step("the planes as the processor wrote them", queue, pipeline, target, yuv, luma, -1, 0x40, n);
+	pass &= ycbcr_step("again, the planes unchanged", queue, pipeline, target, yuv, luma, -1, 0x40, n);
+	fill_420f(ios, 0xc0);
+	pass &= ycbcr_step("after the processor wrote them again (locked)", queue, pipeline, target, yuv, luma, -1, 0xc0, n);
+	pass &= ycbcr_step("again, unchanged", queue, pipeline, target, yuv, luma, -1, 0xc0, n);
+	/* the GPU writes the luma plane: in a command buffer before the draw's, then in the draw's own */
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	MTLRenderPassDescriptor *lp = [MTLRenderPassDescriptor renderPassDescriptor];
+	lp.colorAttachments[0].texture = luma;
+	lp.colorAttachments[0].loadAction = MTLLoadActionClear;
+	lp.colorAttachments[0].storeAction = MTLStoreActionStore;
+	lp.colorAttachments[0].clearColor = MTLClearColorMake(0x20 / 255.0, 0, 0, 1);
+	[[cb renderCommandEncoderWithDescriptor:lp] endEncoding];
+	[cb commit];
+	[cb waitUntilCompleted];
+	pass &= ycbcr_step("after a render pass cleared the luma plane", queue, pipeline, target, yuv, luma, -1, 0x20, n);
+	pass &= ycbcr_step("after one cleared it in the same command buffer", queue, pipeline, target, yuv, luma, 0x60, 0x60, n);
+	pass &= ycbcr_step("again, unchanged", queue, pipeline, target, yuv, luma, -1, 0x60, n);
+	CFRelease(ios);
+	return pass;
+}
+
+/* ---------------------------------------------------------------------------------------------------------- the BGR10_XR check (--xr) */
+
+/* the code Metal stores for a channel's value V in an extended-range format: V rounded to half, then 384 + 510 V, clamped */
+static int
+xr_code(double v)
+{
+	double h = (double)(__fp16)(float)v;
+	long c = lround(384 + 510 * h);
+	return c < 0 ? 0 : c > 1023 ? 1023 : (int)c;
+}
+
+/* --xr's blend colour alpha, over's factor */
+static const double xr_k = 0.25;
+
+/* the pipeline of tri_vertex and tri_fragment into FORMAT (BGR10_XR or its _sRGB twin), blended by MODE (none, over, add); nil if refused */
+static id<MTLRenderPipelineState>
+xr_pipeline(id<MTLDevice> device, const char *metallib, const char *mode, MTLPixelFormat format)
+{
+	bool over = strcmp(mode, "over") == 0, add = strcmp(mode, "add") == 0;
+	NSError *error = nil;
+
+	if (!over && !add && strcmp(mode, "none") != 0) {
+		printf("metal_tri: --xr none, over or add\n");
+		return nil;
+	}
+	id<MTLLibrary> library = [device newLibraryWithURL:[NSURL fileURLWithPath:@(metallib)] error:&error];
+	if (library == nil) {
+		printf("metal_tri: FAIL: newLibraryWithURL: %s: %s\n", metallib, error.description.UTF8String);
+		return nil;
+	}
+	MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+	pd.vertexFunction = [library newFunctionWithName:@"tri_vertex"];
+	pd.fragmentFunction = [library newFunctionWithName:@"tri_fragment"];
+	MTLRenderPipelineColorAttachmentDescriptor *a = pd.colorAttachments[0];
+	a.pixelFormat = format;
+	a.blendingEnabled = over || add;
+	a.sourceRGBBlendFactor = a.sourceAlphaBlendFactor = over ? MTLBlendFactorBlendAlpha : MTLBlendFactorOne;
+	a.destinationRGBBlendFactor = a.destinationAlphaBlendFactor = over ? MTLBlendFactorOneMinusBlendAlpha : MTLBlendFactorOne;
+	id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithDescriptor:pd error:&error];
+	if (pipeline == nil) {
+		printf("metal_tri: FAIL: a pipeline into pixel format %lu blended %s: %s\n", (unsigned long)format, mode,
+		    error.description.UTF8String);
+	}
+	return pipeline;
+}
+
+/* a pass into TARGET: a clear to CLEAR and the triangle, at --xr's blend colour; the drawable presented if there is one */
+static bool
+xr_render(id<MTLCommandQueue> queue, id<MTLRenderPipelineState> pipeline, id<MTLTexture> target, const double clear[3],
+    id<CAMetalDrawable> drawable)
+{
+	MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+	rp.colorAttachments[0].texture = target;
+	rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+	rp.colorAttachments[0].clearColor = MTLClearColorMake(clear[0], clear[1], clear[2], 1);
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+	[enc setRenderPipelineState:pipeline];
+	[enc setBlendColorRed:0 green:0 blue:0 alpha:(float)xr_k];
+	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	[enc endEncoding];
+	if (drawable != nil) {
+		[cb presentDrawable:drawable];
+	}
+	[cb commit];
+	[cb waitUntilCompleted];
+	if (cb.status != MTLCommandBufferStatusCompleted) {
+		printf("FAIL  render pass: status %ld%s%s\n", (long)cb.status, cb.error ? ": " : "", cb.error ? cb.error.description.UTF8String : "");
+		return false;
+	}
+	return true;
+}
+
+/*
+ * The n x n BGR10_XR words of a pass xr_render made, blended by MODE over CLEAR: each pixel clearly inside within 2 codes of Metal's
+ * store of the expected value, each clearly outside the clear's codes exactly. The number wrong; INSIDE, OUTSIDE and WORST (the largest
+ * error inside, in codes) said back.
+ */
+static unsigned
+xr_judge(const uint32_t *words, unsigned n, const char *mode, const double clear[3], unsigned *inside, unsigned *outside,
+    unsigned *worst, bool say)
+{
+	bool over = strcmp(mode, "over") == 0, add = strcmp(mode, "add") == 0;
+	unsigned bad_in = 0, bad_out = 0;
+
+	*inside = *outside = *worst = 0;
+	for (unsigned y = 0; y < n; y++) {
+		for (unsigned x = 0; x < n; x++) {
+			uint32_t w = words[(size_t)y * n + x];
+			int got[3] = { (int)(w >> 20 & 0x3ff), (int)(w >> 10 & 0x3ff), (int)(w & 0x3ff) };   /* R G B */
+			double b[3], margin = 2.5 / n;
+			barycentric(x, y, n, b);
+			bool in = b[0] > margin && b[1] > margin && b[2] > margin;
+			bool out = b[0] < -margin || b[1] < -margin || b[2] < -margin;
+			if (!in && !out) {
+				continue;
+			}
+			int want[3];
+			for (int c = 0; c < 3; c++) {
+				double d = (double)(__fp16)(float)clear[c], s = (double)(__fp16)(float)b[c];
+				double v = !in ? d : over ? xr_k * s + (1 - xr_k) * d : add ? s + d : s;
+				want[c] = in ? xr_code(v) : xr_code(clear[c]);
+			}
+			unsigned far = 0;
+			for (int c = 0; c < 3; c++) {
+				unsigned e = (unsigned)abs(got[c] - want[c]);
+				far = e > far ? e : far;
+			}
+			bool ok = in ? far <= 2 : far == 0;
+			if (in) {
+				(*inside)++;
+				*worst = far > *worst ? far : *worst;
+			} else {
+				(*outside)++;
+			}
+			if (!ok && (in ? bad_in++ : bad_out++) < 4 && say) {
+				printf("      %s (%u,%u): codes %d %d %d (top bits %u), want %d %d %d\n", in ? "inside" : "outside", x, y, got[0],
+				    got[1], got[2], w >> 30, want[0], want[1], want[2]);
+			}
+		}
+	}
+	return bad_in + bad_out;
+}
+
+/* the triangle into an n x n BGR10_XR target, blended by MODE (none, over, add), judged code by code; whether it passed */
+static bool
+xr_check(id<MTLDevice> device, const char *metallib, unsigned n, const char *mode, bool surface)
+{
+	id<MTLRenderPipelineState> pipeline = xr_pipeline(device, metallib, mode, MTLPixelFormatBGR10_XR);
+	if (pipeline == nil) {
+		return false;
+	}
+	printf("ok    BGR10_XR render pipeline, blended %s\n", mode);
+	MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGR10_XR width:n height:n
+	    mipmapped:NO];
+	td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	td.storageMode = MTLStorageModeShared;
+	IOSurfaceRef ios = NULL;
+	if (surface) {
+		NSDictionary *props = @{ (id)kIOSurfaceWidth: @(n), (id)kIOSurfaceHeight: @(n), (id)kIOSurfaceBytesPerElement: @4,
+			(id)kIOSurfaceBytesPerRow: @(n * 4), (id)kIOSurfacePixelFormat: @((unsigned)'w30r') };
+		ios = IOSurfaceCreate((__bridge CFDictionaryRef)props);
+	}
+	id<MTLTexture> target = surface ? (ios ? [device newTextureWithDescriptor:td iosurface:ios plane:0] : nil)
+	    : [device newTextureWithDescriptor:td];
+	if (target == nil) {
+		printf("metal_tri: FAIL: no %ux%u BGR10_XR %s\n", n, n, surface ? "texture over an IOSurface" : "Shared texture");
+		return false;
+	}
+	if (!xr_render([device newCommandQueue], pipeline, target, clear_rgb, nil)) {
+		return false;
+	}
+	uint32_t *words = calloc(n, (size_t)n * 4);
+	if (ios != NULL) {
+		IOSurfaceLock(ios, kIOSurfaceLockReadOnly, NULL);
+		const unsigned char *base = IOSurfaceGetBaseAddress(ios);
+		for (unsigned y = 0; y < n; y++) {
+			memcpy(words + (size_t)y * n, base + y * IOSurfaceGetBytesPerRow(ios), (size_t)n * 4);
+		}
+		IOSurfaceUnlock(ios, kIOSurfaceLockReadOnly, NULL);
+	} else {
+		[target getBytes:words bytesPerRow:(size_t)n * 4 fromRegion:MTLRegionMake2D(0, 0, n, n) mipmapLevel:0];
+	}
+	unsigned inside, outside, worst, wrong = xr_judge(words, n, mode, clear_rgb, &inside, &outside, &worst, true);
+	uint32_t centre = words[(size_t)(n * 2 / 3) * n + n / 2], corner_word = words[0];
+	printf("      a pixel inside: 0x%08x (top bits %u); the corner outside: 0x%08x (top bits %u)\n", centre, centre >> 30,
+	    corner_word, corner_word >> 30);
+	bool pass = inside > 0 && wrong == 0;
+	printf("%s BGR10_XR triangle blended %s: %ux%u %s, %u inside (largest error %u codes) and %u outside judged, %u wrong\n",
+	    pass ? "ok   " : "FAIL ", mode, n, n, surface ? "read from the IOSurface's own memory" : "read with getBytes:", inside, worst,
+	    outside, wrong);
+	free(words);
+	if (ios != NULL) {
+		CFRelease(ios);
+	}
+	return pass;
+}
+
+/* ---------------------------------------------------------------------------------------------------- framebuffer fetch (--fetch) */
+
+/*
+ * The triangle drawn twice in one pass by tri_fetch (tools/metal/air/tri_fetch.ll: the corners' mix m over 2 plus the attachment's own
+ * colour over 2) into an n x n BGRA8 target cleared to the clear colour C, judged pixel by pixel. The first draw reads C and writes
+ * m/2 + C/2; the second reads that and writes 3m/4 + C/4. Inside within 3/255 per channel of that (the first draw's result is stored as
+ * 8-bit codes before the second reads it), outside the clear colour exactly. A pixel left at m/2 + C/2 means the second draw read the
+ * attachment before the first draw's write reached it (fetch unordered between draws), and one at m/2 + C/4 or so that the first read
+ * something other than the clear; both are counted apart. On PanVK (Mali-G72, neither rasterization-order attachment access nor the
+ * pixel interlock) metal2vulkan reads the attachment as an input attachment after a barrier between the draws
+ * (tools/metal/m2v/0005-unordered-framebuffer-fetch.patch), and this is its check.
+ */
+static bool
+fetch_check(id<MTLDevice> device, const char *metallib, unsigned n, bool surface)
+{
+	NSError *error = nil;
+	id<MTLLibrary> library = [device newLibraryWithURL:[NSURL fileURLWithPath:@(metallib)] error:&error];
+	if (library == nil) {
+		printf("metal_tri: FAIL: newLibraryWithURL: %s: %s\n", metallib, error.description.UTF8String);
+		return false;
+	}
+	MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+	pd.vertexFunction = [library newFunctionWithName:@"tri_vertex"];
+	pd.fragmentFunction = [library newFunctionWithName:@"tri_fetch"];
+	pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+	if (pd.vertexFunction == nil || pd.fragmentFunction == nil) {
+		printf("metal_tri: FAIL: tri_vertex or tri_fetch is not in the library\n");
+		return false;
+	}
+	id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithDescriptor:pd error:&error];
+	if (pipeline == nil) {
+		printf("metal_tri: FAIL: the fetching pipeline was refused: %s\n", error.description.UTF8String);
+		return false;
+	}
+	printf("ok    render pipeline reading [[color(0)]]\n");
+	IOSurfaceRef ios = surface ? make_surface(n, 0) : NULL;
+	id<MTLTexture> target = (!surface || ios != NULL) ? make_target(device, n, ios) : nil;
+	if (target == nil) {
+		printf("metal_tri: FAIL: no %ux%u BGRA8 %s\n", n, n, surface ? "texture over an IOSurface" : "Shared texture");
+		return false;
+	}
+	MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+	rp.colorAttachments[0].texture = target;
+	rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+	rp.colorAttachments[0].clearColor = MTLClearColorMake(clear_rgb[0], clear_rgb[1], clear_rgb[2], 1);
+	id<MTLCommandBuffer> cb = [[device newCommandQueue] commandBuffer];
+	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+	[enc setRenderPipelineState:pipeline];
+	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	[enc endEncoding];
+	[cb commit];
+	[cb waitUntilCompleted];
+	if (cb.status != MTLCommandBufferStatusCompleted) {
+		printf("FAIL  render pass: status %ld%s%s\n", (long)cb.status, cb.error ? ": " : "",
+		    cb.error ? cb.error.description.UTF8String : "");
+		return false;
+	}
+	unsigned char *pixels = calloc(n, (size_t)n * 4);
+	if (surface) {
+		read_surface(ios, pixels, n);
+	} else {
+		[target getBytes:pixels bytesPerRow:(size_t)n * 4 fromRegion:MTLRegionMake2D(0, 0, n, n) mipmapLevel:0];
+	}
+	unsigned char want_clear[3] = { (unsigned char)lround(clear_rgb[2] * 255), (unsigned char)lround(clear_rgb[1] * 255),
+		(unsigned char)lround(clear_rgb[0] * 255) };   /* B G R */
+	unsigned inside = 0, outside = 0, bad_in = 0, bad_out = 0, stale = 0;
+	double worst = 0;
+	for (unsigned y = 0; y < n; y++) {
+		for (unsigned x = 0; x < n; x++) {
+			const unsigned char *p = pixels + ((size_t)y * n + x) * 4;
+			double w[3];
+			barycentric(x, y, n, w);
+			double margin = 2.5 / n;
+			if (w[0] > margin && w[1] > margin && w[2] > margin) {
+				inside++;
+				double m[3] = { w[2], w[1], w[0] }, c[3] = { clear_rgb[2], clear_rgb[1], clear_rgb[0] };   /* B G R */
+				bool ok = true, once = true;
+				double err = 0;
+				for (int k = 0; k < 3; k++) {
+					double want = (0.75 * m[k] + 0.25 * c[k]) * 255, first = (0.5 * m[k] + 0.5 * c[k]) * 255;
+					err = fmax(err, fabs(p[k] - want));
+					ok = ok && fabs(p[k] - want) <= 3;
+					once = once && fabs(p[k] - first) <= 3;
+				}
+				worst = fmax(worst, err);
+				if (!ok) {
+					stale += once;
+					if (bad_in++ < 4) {
+						printf("      inside (%u,%u): BGRA %u %u %u %u, want about %.0f %.0f %.0f 255%s\n", x, y, p[0], p[1], p[2], p[3],
+						    (0.75 * m[0] + 0.25 * c[0]) * 255, (0.75 * m[1] + 0.25 * c[1]) * 255, (0.75 * m[2] + 0.25 * c[2]) * 255,
+						    once ? " (the first draw's value: the second read before it)" : "");
+					}
+				}
+			} else if (w[0] < -margin || w[1] < -margin || w[2] < -margin) {
+				outside++;
+				if ((p[0] != want_clear[0] || p[1] != want_clear[1] || p[2] != want_clear[2]) && bad_out++ < 4) {
+					printf("      outside (%u,%u): BGRA %u %u %u %u, want the clear colour %u %u %u 255\n", x, y, p[0], p[1], p[2],
+					    p[3], want_clear[0], want_clear[1], want_clear[2]);
+				}
+			}
+		}
+	}
+	bool pass = inside > 0 && bad_in == 0 && bad_out == 0;
+	printf("%s fetch triangle drawn twice: %ux%u %s, %u inside (largest error %.1f/255) and %u outside judged, %u wrong (%u at the "
+	    "first draw's value)\n", pass ? "ok   " : "FAIL ", n, n, surface ? "read from the IOSurface's own memory" : "read with getBytes:",
+	    inside, worst, outside, bad_in + bad_out, stale);
+	free(pixels);
+	if (ios != NULL) {
+		CFRelease(ios);
+	}
+	return pass;
+}
+
+/* -------------------------------------------------------------------------------------- a texture over a no-copy buffer (--texel-buffer) */
+
+/* the texels of --texel-buffer: every byte a function of its texel and channel, so that a wrong offset or row pitch shows */
+static unsigned char
+texel_byte(unsigned x, unsigned y, unsigned c)
+{
+	return (unsigned char)(c == 0 ? x * 5 + y * 3 : c == 1 ? x ^ (y * 7) : c == 2 ? x * 11 + y * 13 + 1 : 255 - ((x + 2 * y) & 127));
+}
+
+/*
+ * The triangle drawn by tri_ycbcr (a fragment function that reads its texture at its own pixel) from an n x n RGBA8Unorm texture, or with
+ * --a8 an A8Unorm one, made over a no-copy buffer (newBufferWithBytesNoCopy: of page-aligned memory) at OFFSET bytes into it with rows
+ * ROW_BYTES apart: what CoreAnimation's text and icon textures are in the window server (docs/metal.md, phases 8 and 9: offsets of 32 to
+ * 16000 bytes, rows of 224, 288 or 720 bytes, which are not multiples of 64). Every other byte of the memory holds 0x5a. Inside the
+ * triangle every pixel must be its texel exactly (an A8 texture reads as 0, 0, 0, a); outside, the clear colour. Then the memory's other
+ * bytes are checked unchanged. Whether the runtime read the buffer's own pages or a shadow image of the texture it copies before each
+ * use is what the device's image requirements decide: the runtime's shadow.log says so (metal2vulkan-degrade-shadowed-texture), and
+ * --frames K says what a draw costs.
+ */
+static bool
+texel_buffer_check(id<MTLDevice> device, const char *metallib, unsigned n, unsigned offset, unsigned row_bytes, bool a8, unsigned frames,
+    bool blit, bool render_to)
+{
+	unsigned bpp = a8 ? 1 : 4;
+	if (row_bytes == 0) {
+		row_bytes = n * bpp;
+	}
+	if (row_bytes < n * bpp) {
+		printf("metal_tri: FAIL: rows of %u bytes hold fewer than %u texels\n", row_bytes, n);
+		return false;
+	}
+	NSError *error = nil;
+	id<MTLLibrary> library = [device newLibraryWithURL:[NSURL fileURLWithPath:@(metallib)] error:&error];
+	if (library == nil) {
+		printf("metal_tri: FAIL: newLibraryWithURL: %s: %s\n", metallib, error.description.UTF8String);
+		return false;
+	}
+	MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+	pd.vertexFunction = [library newFunctionWithName:@"tri_vertex"];
+	pd.fragmentFunction = [library newFunctionWithName:@"tri_ycbcr"];
+	pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+	id<MTLRenderPipelineState> pipeline = pd.vertexFunction && pd.fragmentFunction ?
+	    [device newRenderPipelineStateWithDescriptor:pd error:&error] : nil;
+	if (pipeline == nil) {
+		printf("metal_tri: FAIL: no pipeline of tri_vertex and tri_ycbcr: %s\n", error ? error.description.UTF8String : "not in the library");
+		return false;
+	}
+	size_t page = (size_t)getpagesize(), used = offset + (size_t)row_bytes * n, size = (used + page - 1) / page * page;
+	unsigned char *memory = NULL;
+	if (posix_memalign((void **)&memory, page, size) != 0) {
+		printf("metal_tri: FAIL: no %zu bytes of memory\n", size);
+		return false;
+	}
+	memset(memory, 0x5a, size);
+	for (unsigned y = 0; y < n && !blit; y++) {
+		for (unsigned x = 0; x < n; x++) {
+			for (unsigned c = 0; c < bpp; c++) {
+				memory[offset + (size_t)y * row_bytes + x * bpp + c] = texel_byte(x, y, a8 ? 3 : c);
+			}
+		}
+	}
+	id<MTLBuffer> buffer = [device newBufferWithBytesNoCopy:memory length:size options:MTLResourceStorageModeShared deallocator:nil];
+	MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:a8 ? MTLPixelFormatA8Unorm : MTLPixelFormatRGBA8Unorm
+	    width:n height:n mipmapped:NO];
+	td.usage = MTLTextureUsageShaderRead | (render_to ? MTLTextureUsageRenderTarget : 0);
+	td.storageMode = MTLStorageModeShared;
+	id<MTLTexture> texture = buffer ? [buffer newTextureWithDescriptor:td offset:offset bytesPerRow:row_bytes] : nil;
+	id<MTLTexture> target = make_target(device, n, NULL);
+	if (texture == nil || target == nil) {
+		printf("metal_tri: FAIL: no %s texture over the no-copy buffer at offset %u with rows of %u bytes\n", a8 ? "A8Unorm" : "RGBA8Unorm",
+		    offset, row_bytes);
+		free(memory);
+		return false;
+	}
+	printf("ok    %ux%u %s texture over a no-copy buffer of %zu bytes at offset %u, rows %u bytes apart\n", n, n,
+	    a8 ? "A8Unorm" : "RGBA8Unorm", size, offset, row_bytes);
+	id<MTLCommandQueue> queue = [device newCommandQueue];
+	if (render_to && !a8) {
+		/* --render: the triangle rendered into the texture itself, and the memory read by the processor */
+		MTLRenderPipelineDescriptor *rd = [MTLRenderPipelineDescriptor new];
+		rd.vertexFunction = pd.vertexFunction;
+		rd.fragmentFunction = [library newFunctionWithName:@"tri_fragment"];
+		rd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+		id<MTLRenderPipelineState> drawn = rd.fragmentFunction ? [device newRenderPipelineStateWithDescriptor:rd error:&error] : nil;
+		if (drawn == nil || !render(queue, drawn, texture, clear_rgb, true)) {
+			printf("FAIL  no render pass into the texture over the buffer\n");
+			free(memory);
+			return false;
+		}
+		unsigned char *bgra = calloc(n, (size_t)n * 4);
+		for (unsigned y = 0; y < n; y++) {
+			for (unsigned x = 0; x < n; x++) {
+				const unsigned char *t = memory + offset + (size_t)y * row_bytes + x * 4;
+				unsigned char *q = bgra + ((size_t)y * n + x) * 4;
+				q[0] = t[2], q[1] = t[1], q[2] = t[0], q[3] = t[3];
+			}
+		}
+		unsigned in_px, out_px, wrong_px = judge(bgra, n, clear_rgb, &in_px, &out_px, true);
+		size_t stray = 0;
+		for (size_t i = 0; i < size; i++) {
+			bool texel = i >= offset && i < used && (i - offset) % row_bytes < (size_t)n * 4;
+			stray += !texel && memory[i] != 0x5a;
+		}
+		free(bgra);
+		printf("%s render pass into the texture over the buffer: %u inside and %u outside judged in its memory, %u wrong; %zu bytes "
+		    "outside the texels changed\n", wrong_px == 0 && stray == 0 && in_px > 0 ? "ok   " : "FAIL ", in_px, out_px, wrong_px, stray);
+		free(memory);
+		return wrong_px == 0 && stray == 0 && in_px > 0;
+	}
+	if (blit) {
+		/* --blit: the texels written by the GPU, a blit from a buffer of their bytes, and then the memory read by the processor */
+		id<MTLBuffer> source = [device newBufferWithLength:(NSUInteger)n * n * bpp options:MTLResourceStorageModeShared];
+		unsigned char *bytes = source.contents;
+		for (unsigned y = 0; y < n; y++) {
+			for (unsigned x = 0; x < n; x++) {
+				for (unsigned c = 0; c < bpp; c++) {
+					bytes[((size_t)y * n + x) * bpp + c] = texel_byte(x, y, a8 ? 3 : c);
+				}
+			}
+		}
+		id<MTLCommandBuffer> cb = [queue commandBuffer];
+		id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
+		[be copyFromBuffer:source sourceOffset:0 sourceBytesPerRow:(NSUInteger)n * bpp sourceBytesPerImage:(NSUInteger)n * n * bpp
+		    sourceSize:MTLSizeMake(n, n, 1) toTexture:texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+		[be endEncoding];
+		[cb commit];
+		[cb waitUntilCompleted];
+		size_t wrong_texels = 0;
+		for (unsigned y = 0; y < n; y++) {
+			for (unsigned x = 0; x < n; x++) {
+				for (unsigned c = 0; c < bpp; c++) {
+					wrong_texels += memory[offset + (size_t)y * row_bytes + x * bpp + c] != texel_byte(x, y, a8 ? 3 : c);
+				}
+			}
+		}
+		printf("%s blit from a buffer into the texture: status %ld, %zu of %u texel bytes in the memory wrong\n",
+		    cb.status == MTLCommandBufferStatusCompleted && wrong_texels == 0 ? "ok   " : "FAIL ", (long)cb.status, wrong_texels, n * n * bpp);
+		if (cb.status != MTLCommandBufferStatusCompleted || wrong_texels != 0) {
+			free(memory);
+			return false;
+		}
+	}
+	double total = 0;
+	for (unsigned f = 0; f <= frames; f++) {
+		MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+		rp.colorAttachments[0].texture = target;
+		rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+		rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+		rp.colorAttachments[0].clearColor = MTLClearColorMake(clear_rgb[0], clear_rgb[1], clear_rgb[2], 1);
+		id<MTLCommandBuffer> cb = [queue commandBuffer];
+		id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+		[enc setRenderPipelineState:pipeline];
+		[enc setFragmentTexture:texture atIndex:0];
+		[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+		[enc endEncoding];
+		CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+		[cb commit];
+		[cb waitUntilCompleted];
+		if (cb.status != MTLCommandBufferStatusCompleted) {
+			printf("FAIL  render pass: status %ld%s%s\n", (long)cb.status, cb.error ? ": " : "", cb.error ? cb.error.description.UTF8String : "");
+			free(memory);
+			return false;
+		}
+		total += f != 0 ? CFAbsoluteTimeGetCurrent() - t0 : 0;
+	}
+	if (frames != 0) {
+		printf("ok    %u more frames: %.2f ms each from commit to completion on average\n", frames, total * 1000 / frames);
+	}
+	unsigned char *pixels = calloc(n, (size_t)n * 4);
+	[target getBytes:pixels bytesPerRow:(size_t)n * 4 fromRegion:MTLRegionMake2D(0, 0, n, n) mipmapLevel:0];
+	unsigned char want_clear[3] = { (unsigned char)lround(clear_rgb[2] * 255), (unsigned char)lround(clear_rgb[1] * 255),
+		(unsigned char)lround(clear_rgb[0] * 255) };   /* B G R */
+	unsigned inside = 0, outside = 0, bad_in = 0, bad_out = 0;
+	for (unsigned y = 0; y < n; y++) {
+		for (unsigned x = 0; x < n; x++) {
+			const unsigned char *p = pixels + ((size_t)y * n + x) * 4;
+			double w[3], margin = 2.5 / n;
+			barycentric(x, y, n, w);
+			if (w[0] > margin && w[1] > margin && w[2] > margin) {
+				unsigned char want[4] = { a8 ? 0 : texel_byte(x, y, 2), a8 ? 0 : texel_byte(x, y, 1), a8 ? 0 : texel_byte(x, y, 0),
+					texel_byte(x, y, 3) };   /* B G R A */
+				inside++;
+				if (memcmp(p, want, 4) != 0 && bad_in++ < 4) {
+					printf("      inside (%u,%u): BGRA %u %u %u %u, want the texel's %u %u %u %u\n", x, y, p[0], p[1], p[2], p[3], want[0],
+					    want[1], want[2], want[3]);
+				}
+			} else if (w[0] < -margin || w[1] < -margin || w[2] < -margin) {
+				outside++;
+				if ((p[0] != want_clear[0] || p[1] != want_clear[1] || p[2] != want_clear[2]) && bad_out++ < 4) {
+					printf("      outside (%u,%u): BGRA %u %u %u %u, want the clear colour\n", x, y, p[0], p[1], p[2], p[3]);
+				}
+			}
+		}
+	}
+	size_t changed = 0;
+	for (size_t i = 0; i < size; i++) {
+		bool texel = i >= offset && i < used && (i - offset) % row_bytes < (size_t)n * bpp;
+		changed += !texel && memory[i] != 0x5a;
+	}
+	bool pass = inside > 0 && bad_in == 0 && bad_out == 0 && changed == 0;
+	printf("%s texel-buffer triangle: %ux%u read with getBytes:, %u inside and %u outside judged, %u wrong; %zu bytes of the memory "
+	    "outside the texels changed\n", pass ? "ok   " : "FAIL ", n, n, inside, outside, bad_in + bad_out, changed);
+	free(pixels);
+	texture = nil;
+	buffer = nil;
+	free(memory);
+	return pass;
+}
+
+/* ------------------------------------------------------------------------------------------------------------------ the application */
+
+/*
+ * Run from MetalTri.app (a bundle whose identifier is com.hakios.metaltri), with no arguments: a window whose layer shows, as its
+ * contents, an IOSurface the Metal device has just rendered into, two surfaces in turn, a frame every half second with the clear colour
+ * changing, every frame judged as above and the tally written under it. So the pixels on the panel are Metal's, through the window
+ * server's OpenGL ES compositor, which takes the surface as any layer's contents. (A CAMetalLayer and its drawables are the next step:
+ * they need the device registered with Metal, MTLAddDevice, which discovery does with boot-arg metal=N.)
+ * The plug-in, its runtime, the Vulkan driver and the library are taken from the application's own directory when it has them
+ * (HakiosMetal.bundle, HakiosMetal.icd naming libvulkan_panfrost.dylib there, HakiosMetal.clients naming metal_tri, metal_tri.metallib:
+ * a hand test that needs nothing in the image), else from the image's (/redwood/lib/HakiosMetal.bundle, /redwood/share/metal_tri.metallib,
+ * userland/build.sh METAL=vk).
+ *
+ * With MTXRBlend (none, over or add) in the application's Info.plist (a copy of MetalTri.app under another identifier beginning
+ * com.hakios.metaltri), the window shows a CAMetalLayer instead, of pixel format BGR10_XR (MTXRFormat BGR10_XR_sRGB: its sRGB twin, the
+ * format of the Astronomy wallpaper's layer), into whose drawables --xr's triangle is drawn and presented, so the panel shows an
+ * extended-range drawable through the window server's compositor. A linear drawable is read back and judged as --xr judges.
+ */
+@interface MTApp : UIResponder <UIApplicationDelegate>
+@property (strong) UIWindow *window;
+@end
+
+@interface MTView : UIViewController
+@end
+
+static struct {
+	id<MTLDevice> device;
+	id<MTLCommandQueue> queue;
+	id<MTLRenderPipelineState> pipeline;
+	IOSurfaceRef surface[2];
+	id<MTLTexture> target[2];
+	unsigned n, frame, good, bad;
+	unsigned char *pixels;
+	CALayer *picture;
+	UILabel *label;
+	NSString *status;
+	const char *xr;                  /* MTXRBlend: the CAMetalLayer form, blended so; NULL for the IOSurface one */
+	MTLPixelFormat xr_format;
+	CAMetalLayer *xr_layer;
+	uint32_t *xr_words;
+} app;
+
+@implementation MTView
+- (void)viewDidLoad
+{
+	[super viewDidLoad];
+	self.view.backgroundColor = UIColor.blackColor;
+	CGRect b = self.view.bounds;
+	CGFloat side = MIN(b.size.width, b.size.height) - 32;
+	if (app.xr != NULL) {
+		app.xr_layer = [CAMetalLayer layer];
+		app.xr_layer.device = app.device;
+		app.xr_layer.pixelFormat = app.xr_format;
+		app.xr_layer.framebufferOnly = NO;
+		app.xr_layer.drawableSize = CGSizeMake(app.n, app.n);
+		app.picture = app.xr_layer;
+	} else {
+		app.picture = [CALayer layer];
+	}
+	app.picture.frame = CGRectMake((b.size.width - side) / 2, 120, side, side);
+	app.picture.magnificationFilter = kCAFilterNearest;
+	[self.view.layer addSublayer:app.picture];
+	app.label = [[UILabel alloc] initWithFrame:CGRectMake(16, 140 + side, b.size.width - 32, b.size.height - 160 - side)];
+	app.label.numberOfLines = 0;
+	app.label.textColor = UIColor.whiteColor;
+	app.label.font = [UIFont monospacedSystemFontOfSize:15 weight:UIFontWeightRegular];
+	[self.view addSubview:app.label];
+	UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 50, b.size.width - 32, 60)];
+	title.numberOfLines = 2;
+	title.textColor = UIColor.whiteColor;
+	title.font = [UIFont boldSystemFontOfSize:20];
+	title.text = @"Metal on the Mali-G72\nmetal2vulkan over PanVK";
+	[self.view addSubview:title];
+	app.label.text = app.status;
+	if (app.pipeline != nil) {
+		[NSTimer scheduledTimerWithTimeInterval:0.5 target:self selector:@selector(tick:) userInfo:nil repeats:YES];
+		[self tick:nil];
+	}
+}
+
+- (void)tick:(NSTimer *)timer
+{
+	unsigned i = app.frame++ & 1;
+	double hue = (app.frame % 12) / 12.0, clear[3];
+	for (int c = 0; c < 3; c++) {           /* a dim colour going round the wheel */
+		double h = fmod(hue + c / 3.0, 1.0);
+		clear[c] = 0.08 + 0.22 * (0.5 + 0.5 * cos(h * 2 * M_PI));
+		clear[c] = round(clear[c] * 255) / 255;
+	}
+	CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+	bool done;
+	unsigned inside = 0, outside = 0, wrong = 1, worst = 0;
+	double ms;
+	if (app.xr != NULL) {
+		/*
+		 * A drawable of the CAMetalLayer: drawn, a linear one read back and judged (an sRGB one is shown only), then presented by a
+		 * command buffer of its own, as the plug-in turns a presented drawable's codes into its surface's bytes.
+		 */
+		id<CAMetalDrawable> drawable = [app.xr_layer nextDrawable];
+		done = drawable != nil && xr_render(app.queue, app.pipeline, drawable.texture, clear, nil);
+		ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000;
+		if (done && app.xr_format == MTLPixelFormatBGR10_XR) {
+			[drawable.texture getBytes:app.xr_words bytesPerRow:(size_t)app.n * 4 fromRegion:MTLRegionMake2D(0, 0, app.n, app.n)
+			    mipmapLevel:0];
+			wrong = xr_judge(app.xr_words, app.n, app.xr, clear, &inside, &outside, &worst, false);
+		} else {
+			wrong = done ? 0 : 1;
+		}
+		if (drawable != nil) {
+			id<MTLCommandBuffer> present = [app.queue commandBuffer];
+			[present presentDrawable:drawable];
+			[present commit];
+		}
+	} else {
+		done = render(app.queue, app.pipeline, app.target[i], clear, true);
+		ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000;
+		if (done) {
+			read_surface(app.surface[i], app.pixels, app.n);
+			wrong = judge(app.pixels, app.n, clear, &inside, &outside, false);
+		}
+	}
+	if (done && wrong == 0) {
+		app.good++;
+	} else {
+		app.bad++;
+	}
+	if (app.xr == NULL) {
+		[CATransaction begin];
+		[CATransaction setDisableActions:YES];
+		app.picture.contents = (__bridge id)app.surface[i];
+		[CATransaction commit];
+	}
+	app.label.text = [NSString stringWithFormat:@"%@\n\nframe %u: %s in %.1f ms\n%u px inside (largest error %u), %u outside judged, %u wrong\nframes right %u, wrong %u",
+	    app.status, app.frame, done ? "rendered" : "FAILED", ms, inside, worst, outside, wrong, app.good, app.bad];
+	if (app.frame <= 2 || app.frame % 20 == 0) {
+		NSLog(@"metal_tri: frame %u: %s, %.1f ms, %u inside (largest error %u) %u outside judged, %u wrong; right %u wrong %u",
+		    app.frame, done ? "rendered" : "FAILED", ms, inside, worst, outside, wrong, app.good, app.bad);
+	}
+}
+@end
+
+@implementation MTApp
+- (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options
+{
+	NSString *here = NSBundle.mainBundle.bundlePath, *plugin = [here stringByAppendingPathComponent:@"HakiosMetal.bundle"],
+		 *metallib = [here stringByAppendingPathComponent:@"metal_tri.metallib"];
+	if (![NSFileManager.defaultManager fileExistsAtPath:plugin]) {         /* the image's (userland/build.sh METAL=vk) */
+		plugin = @"/redwood/lib/HakiosMetal.bundle";
+		metallib = @"/redwood/share/metal_tri.metallib";
+	}
+	app.n = 512;
+	/* the application's own plug-in, when it has one, rather than the image's that Metal would find (a hand test of a new one) */
+	bool own = ![plugin hasPrefix:@"/redwood/"];
+	app.device = make_device(plugin.UTF8String, !own, !own);
+	NSString *xr = [NSBundle.mainBundle objectForInfoDictionaryKey:@"MTXRBlend"];
+	if (app.device != nil && xr != nil) {
+		app.xr = strdup(xr.UTF8String);
+		app.xr_format = [[NSBundle.mainBundle objectForInfoDictionaryKey:@"MTXRFormat"] isEqual:@"BGR10_XR_sRGB"]
+		    ? MTLPixelFormatBGR10_XR_sRGB : MTLPixelFormatBGR10_XR;
+		app.pipeline = xr_pipeline(app.device, metallib.UTF8String, app.xr, app.xr_format);
+		app.queue = [app.device newCommandQueue];
+		app.xr_words = calloc(app.n, (size_t)app.n * 4);
+	} else if (app.device != nil) {
+		app.pipeline = make_pipeline(app.device, metallib.UTF8String);
+		app.queue = [app.device newCommandQueue];
+		for (int i = 0; i < 2 && app.pipeline != nil; i++) {
+			app.surface[i] = make_surface(app.n, 0);
+			app.target[i] = app.surface[i] ? make_target(app.device, app.n, app.surface[i]) : nil;
+			if (app.target[i] == nil) {
+				app.pipeline = nil;
+			}
+		}
+		app.pixels = calloc(app.n, (size_t)app.n * 4);
+	}
+	app.status = app.pipeline == nil ? @"no Metal device or pipeline: see the log (metal_tri:, HakiosMetal:, native-metal:)"
+	    : app.xr != NULL ? [NSString stringWithFormat:@"device: %@\n%ux%u %s CAMetalLayer drawables, blended %s",
+	    app.device.name, app.n, app.n, app.xr_format == MTLPixelFormatBGR10_XR ? "BGR10_XR" : "BGR10_XR_sRGB", app.xr]
+	    : [NSString stringWithFormat:@"device: %@\n%ux%u BGRA8 IOSurfaces, rendered by Metal, shown as a layer's contents",
+	    app.device.name, app.n, app.n];
+	NSLog(@"metal_tri: %@", app.status);
+	self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+	self.window.rootViewController = [MTView new];
+	[self.window makeKeyAndVisible];
+	return YES;
+}
+@end
+
+int
+main(int argc, char *argv[])
+{
+	setvbuf(stdout, NULL, _IOLBF, 0);
+	signal(SIGSEGV, fault);
+	signal(SIGBUS, fault);
+	signal(SIGABRT, fault);
+	@autoreleasepool {
+		if (argc == 1 && [NSBundle.mainBundle.bundleIdentifier hasPrefix:@"com.hakios.metaltri"]) {
+			return UIApplicationMain(argc, argv, nil, NSStringFromClass([MTApp class]));
+		}
+		const char *bundle_path = "/redwood/lib/HakiosMetal.bundle", *metallib = "/redwood/share/metal_tri.metallib", *out = NULL;
+		unsigned n = 256;
+		bool surface = false, register_it = false;
+		unsigned hold = 0;
+		const char *xr = NULL;
+		bool fetch = false;
+		unsigned row_bytes = 0, frames = 0;
+		bool ycbcr = false, a8 = false, blit = false, render_to = false;
+		int texel_offset = -1;
+		for (int i = 1; i < argc; i++) {
+			if (strcmp(argv[i], "--bundle") == 0 && i + 1 < argc) {
+				bundle_path = argv[++i];
+			} else if (strcmp(argv[i], "--metallib") == 0 && i + 1 < argc) {
+				metallib = argv[++i];
+			} else if (strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
+				n = (unsigned)atoi(argv[++i]);
+			} else if (strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
+				out = argv[++i];
+			} else if (strcmp(argv[i], "--surface") == 0) {
+				surface = true;
+			} else if (strcmp(argv[i], "--register") == 0) {
+				register_it = true;
+			} else if (strcmp(argv[i], "--hold") == 0 && i + 1 < argc) {
+				hold = (unsigned)atoi(argv[++i]);
+			} else if (strcmp(argv[i], "--xr") == 0 && i + 1 < argc) {
+				xr = argv[++i];
+			} else if (strcmp(argv[i], "--fetch") == 0) {
+				fetch = true;
+			} else if (strcmp(argv[i], "--row-bytes") == 0 && i + 1 < argc) {
+				row_bytes = (unsigned)atoi(argv[++i]);
+			} else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
+				frames = (unsigned)atoi(argv[++i]);
+			} else if (strcmp(argv[i], "--ycbcr") == 0) {
+				ycbcr = true;
+			} else if (strcmp(argv[i], "--texel-buffer") == 0 && i + 1 < argc) {
+				texel_offset = atoi(argv[++i]);
+			} else if (strcmp(argv[i], "--a8") == 0) {
+				a8 = true;
+			} else if (strcmp(argv[i], "--blit") == 0) {
+				blit = true;
+			} else if (strcmp(argv[i], "--render") == 0) {
+				render_to = true;
+			} else {
+				fprintf(stderr, "usage: metal_tri [--bundle DIR] [--metallib FILE] [--size N] [--out FILE.ppm] [--surface] "
+				    "[--register] [--hold SECONDS] [--xr none|over|add] [--fetch] [--row-bytes B] [--frames K] [--ycbcr] "
+				    "[--texel-buffer OFFSET [--a8] [--blit] [--render]]\n");
+				return 2;
+			}
+		}
+		if (n < 16 || n > 4096) {
+			n = 256;
+		}
+		if (texel_offset < 0 && row_bytes != 0 && (row_bytes < n * 4 || row_bytes % 16 != 0)) {
+			fprintf(stderr, "metal_tri: --row-bytes %u: at least %u and a multiple of 16\n", row_bytes, n * 4);
+			return 2;
+		}
+		id<MTLDevice> device = make_device(bundle_path, register_it, true);
+		if (device == nil) {
+			return 1;
+		}
+		if (xr != NULL) {
+			bool pass = xr_check(device, metallib, n, xr, surface);
+			printf("metal_tri: %s\n", pass ? "PASS" : "FAIL");
+			return pass ? 0 : 1;
+		}
+		if (texel_offset >= 0) {
+			bool pass = texel_buffer_check(device, metallib, n, (unsigned)texel_offset, row_bytes, a8, frames, blit, render_to);
+			printf("metal_tri: %s\n", pass ? "PASS" : "FAIL");
+			return pass ? 0 : 1;
+		}
+		if (ycbcr) {
+			bool pass = ycbcr_check(device, metallib, n);
+			printf("metal_tri: %s\n", pass ? "PASS" : "FAIL");
+			return pass ? 0 : 1;
+		}
+		if (fetch) {
+			bool pass = fetch_check(device, metallib, n, surface);
+			printf("metal_tri: %s\n", pass ? "PASS" : "FAIL");
+			return pass ? 0 : 1;
+		}
+		id<MTLRenderPipelineState> pipeline = make_pipeline(device, metallib);
+		if (pipeline == nil) {
+			return 1;
+		}
+		IOSurfaceRef ios = surface ? make_surface(n, row_bytes) : NULL;
+		id<MTLTexture> target = (!surface || ios != NULL) ? make_target(device, n, ios) : nil;
+		if (target == nil) {
+			printf("metal_tri: FAIL: no %ux%u BGRA8 %s\n", n, n, surface ? "texture over an IOSurface" : "Shared texture");
+			return 1;
+		}
+		if (ios != NULL && row_bytes != 0) {
+			fill_surface(ios, 0xa5);
+		}
+		id<MTLCommandQueue> queue = [device newCommandQueue];
+		if (!render(queue, pipeline, target, clear_rgb, false)) {
+			return 1;
+		}
+		if (frames != 0) {
+			/* the same draw again, each command buffer waited for: what a frame costs, copies of a shadowed surface included */
+			double total = 0, slowest = 0;
+			for (unsigned f = 0; f < frames; f++) {
+				struct timespec a, b;
+				clock_gettime(CLOCK_MONOTONIC, &a);
+				if (!render(queue, pipeline, target, clear_rgb, true)) {
+					return 1;
+				}
+				clock_gettime(CLOCK_MONOTONIC, &b);
+				double ms = (b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) / 1e6;
+				total += ms;
+				slowest = ms > slowest ? ms : slowest;
+			}
+			printf("ok    %u more frames: %.2f ms each from encoding to completion on average, %.2f ms the slowest\n", frames,
+			    total / frames, slowest);
+		}
+		unsigned char *pixels = calloc(n, (size_t)n * 4);
+		if (surface) {
+			read_surface(ios, pixels, n);
+		} else {
+			[target getBytes:pixels bytesPerRow:(size_t)n * 4 fromRegion:MTLRegionMake2D(0, 0, n, n) mipmapLevel:0];
+		}
+		unsigned inside, outside, wrong = judge(pixels, n, clear_rgb, &inside, &outside, true);
+		bool pass = inside > 0 && wrong == 0;
+		printf("%s triangle: %ux%u %s, %u pixels inside and %u outside judged, %u wrong\n", pass ? "ok   " : "FAIL ", n, n,
+		    surface ? "read from the IOSurface's own memory" : "read with getBytes:", inside, outside, wrong);
+		if (ios != NULL && row_bytes != 0) {
+			/* a render pass over the surface writes its texels and no other byte of it */
+			size_t changed = padding_changed(ios, n, 0xa5), rows = IOSurfaceGetBytesPerRow(ios);
+			printf("%s surface rows %zu bytes apart, %zu bytes in all: %zu bytes between the rows or after the last changed\n",
+			    changed == 0 ? "ok   " : "FAIL ", rows, IOSurfaceGetAllocSize(ios), changed);
+			pass = pass && changed == 0;
+		}
+		if (out != NULL) {
+			FILE *f = fopen(out, "wb");
+			if (f != NULL) {
+				fprintf(f, "P6\n%u %u\n255\n", n, n);
+				for (size_t i = 0; i < (size_t)n * n; i++) {
+					unsigned char rgb[3] = { pixels[i * 4 + 2], pixels[i * 4 + 1], pixels[i * 4] };
+					fwrite(rgb, 1, 3, f);
+				}
+				fclose(f);
+				printf("      picture: %s\n", out);
+			}
+		}
+		free(pixels);
+		if (ios != NULL) {
+			CFRelease(ios);
+		}
+		printf("metal_tri: %s\n", pass ? "PASS" : "FAIL");
+		if (hold != 0) {
+			/* the device and its objects kept, for measuring what an open device costs a process (footprint -p PID) */
+			printf("metal_tri: holding the device for %u s (pid %d)\n", hold, getpid());
+			sleep(hold);
+		}
+		return pass ? 0 : 1;
+	}
+}

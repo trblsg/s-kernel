@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.hakios.gnssd</string>
+	<!-- the GNSS receiver (the BCM4775) for iOS: gnssd answers com.apple.gpsd, where locationd asks for GNSS (Apple's gpsd
+	     job is left out, mkjobs.py), runs the receiver while locationd or the GNSS app wants it, and writes the status
+	     the app shows. Needs the ESW in /redwood/fw (devices/star2lte/firmware/gnss). src/gnssd.m, docs/gnssd.md -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/redwood/bin/gnssd</string>
+	</array>
+	<key>MachServices</key>
+	<dict>
+		<key>com.apple.gpsd</key>
+		<true/>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/dev/console</string>
+	<key>StandardErrorPath</key>
+	<string>/dev/console</string>
+</dict>
+</plist>

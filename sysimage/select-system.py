@@ -67,9 +67,11 @@ SKIP_EXT = ('.weights', '.weights_nonane', '.metallib', '.mov', '.pcm', '.scnz',
 #     mediaserverd aborts in -[_MTLDevice newLibraryWithURL:error:] -- twenty-eight times in one boot.
 # Unconditional, and that does NOT put the phone's interface through our driver: a file being present is
 # not the switch. Whether Apple's code gets a Metal device at all is decided per process by the device
-# array that userland/src/inject.c empties in backboardd (boot-arg camtl=1 leaves it) and
-# userland/src/inject_media.c empties in mediaserverd (mediamtl=1 leaves it), and both default to "no
-# device". So a default boot behaves exactly as it does today and these two files merely sit in the image
+# array that userland/src/inject.c empties in backboardd (boot-arg camtl=1 leaves it; since Phase 9 of
+# docs/metal.md it also leaves the device the METAL=vk plug-in opened for the window server on PanVK,
+# and camtl=0 empties it again) and userland/src/inject_media.c empties in mediaserverd (mediamtl=1
+# leaves it), which defaults to "no device". So a default boot without that plug-in behaves as before
+# and these two files merely sit in the image
 # -- 1,4 MB of an image that lives in RAM -- which is what makes the camtl=1 / mediamtl=1 experiment
 # possible without a second rebuild of system.apfs. The cost is paid once, at build time: a system.apfs
 # rebuild and a 77-second upload.
@@ -102,7 +104,11 @@ KEEP_METALLIB = ('System/Library/Frameworks/QuartzCore.framework/default.metalli
                  # five MPS libraries (neural network, NDArray, matrix, ray intersector, functions)
                  # are another 47 MB and nothing in this port has asked for them yet.
                  'System/Library/Frameworks/MetalPerformanceShaders.framework/Frameworks/MPSCore.framework/default.metallib',
-                 'System/Library/Frameworks/MetalPerformanceShaders.framework/Frameworks/MPSImage.framework/default.metallib')
+                 'System/Library/Frameworks/MetalPerformanceShaders.framework/Frameworks/MPSImage.framework/default.metallib',
+                 # VectorKit's map shaders (2.4 MB of AIR, 309 functions): Maps, MapKit in every application, the
+                 # Camera's and Weather's maps. Its iphoneos.pipelinelib holds only Apple GPU binaries (an empty
+                 # functions file), so without this library VectorKit draws nothing here (docs/metal.md, "Apple apps").
+                 'System/Library/PrivateFrameworks/VectorKit.framework/default.metallib')
 # ... and three machine-learning models ARE wanted, because searchd aborts without them. Spotlight's ranking
 # (SpotlightServices -[... loadCannedModelWithType:error:] -> initSpecificModel:error:) builds its model's
 # path with [[NSBundle bundleForClass:] pathForResource:NAME ofType:@"mlmodelc"] and hands the answer to
@@ -115,6 +121,31 @@ KEEP_METALLIB = ('System/Library/Frameworks/QuartzCore.framework/default.metalli
 # kind (the _mail pair for mail), so all three -- 26 MB. An instruction to extract, not Apple's bytes here.
 KEEP_MODELS = tuple(f'System/Library/PrivateFrameworks/SpotlightServices.framework/{name}.mlmodelc/'
                     for name in ('spotlight_l2', 'spotlight_l2_mail', 'spotlight_l2_recency_mail'))
+# ... and two daemons that live inside their frameworks and are bigger than SMALL, wanted by name. Both were
+# run on the phone from /var (build30, 12 November) for a quarter of an hour: no crash, a second of CPU each,
+# and the lookups they answer stopped.
+#   passd (PassKitCore, 6.6 MB): the Wallet and its library -- com.apple.passd.library and .payment were
+#     14 failed lookups in six minutes (Settings, SpringBoard, destinationd, wifid, coreidvd), none after;
+#     Settings' Wallet pane opens with it.
+#   identityservicesd (IDS, 11.5 MB): the identity service the account stack, iMessage and FaceTime,
+#     Screen Time, Find My and a dozen more ask for once each -- com.apple.identityservicesd.embedded.auth
+#     from 30 different clients a boot, none after.
+# userland/mkjobs.py runs them on demand like the rest (their jobs carry no DENY word).
+KEEP_DAEMONS = ('System/Library/PrivateFrameworks/PassKitCore.framework/passd',
+                'System/Library/PrivateFrameworks/IDS.framework/identityservicesd.app/identityservicesd')
+# ... and the executables of the app extensions that frameworks carry in their PlugIns, whatever their size: an
+# extension is a program of its own (its code is not in the dyld shared cache), and one whose bundle is in the image
+# without its executable is registered with LaunchServices and found by PlugInKit, then cannot be started. Five were
+# over SMALL and missing, and with them the Files app and the document picker:
+#   FileProvider's LocalStorageFileProvider (9.0 MB), the "On My iPhone" provider: fileproviderd had no domain, Files
+#     showed only Recently Deleted, and Safari's download service died on "domain identifier must not be nil";
+#   DocumentManagerUICore's SaveToFiles (5.6 MB), the share sheet's "Save to Files" ("Internal error: the requested
+#     app extension could not be found"), com.apple.DocumentManager.Service (5.6 MB), the out-of-process document
+#     picker of UIDocumentPickerViewController, and RecentsAvocado / RecentsAppPopover (5.6 and 5.5 MB), Files'
+#     widget and its popover.
+# 31 MB together; the 32 MB bound is the one the XPC services have.
+MAX_PLUGIN = 32 << 20
+PLUGIN_EXECUTABLE = re.compile(r'/PlugIns/([^/]+)\.appex/\1$')
 # ... and '.dat' and '.bin' are also what these keep the tables in that the user interface is made with:
 # the layouts of the on-screen keyboard, the emoji, the list of public domain suffixes
 DATA_FRAMEWORKS = tuple(f'System/Library/{name}.framework/' for name in (
@@ -147,6 +178,15 @@ SKIP_PREFIX = ('usr/share/tokenizer/', 'usr/share/firmware/', 'usr/share/mecabra
                'usr/standalone/', 'Library/Audio/', 'Library/Ringtones/',
                HEALTH + 'Assets/FitnessUIAssets.bundle/') + \
     tuple(f'System/Library/{name}/' for name in SKIP_SYSTEM_LIBRARY)
+# ... but these parts of the directories skipped above are wanted all the same, whole (docs/system-selection.md):
+#   the English language assets (84.6 MB): the lexicons and models the keyboard's autocorrection, predictive text
+#     and spell checking work from;
+#   the ringtones and alert tones (17.2 MB): without them Settings > Sounds has none to choose and alarms and
+#     timers have only the default sound;
+#   three small preinstalled MobileAssets (22.2 MB): the game controller database (GameController maps a pad's
+#     buttons with it), the language detector's models, locationd's configuration.
+KEEP_SKIPPED = ('System/Library/LinguisticData/RequiredAssets_en.bundle/', 'Library/Ringtones/') +     tuple(f'System/Library/PreinstalledAssetsV2/RequiredByOs/com_apple_MobileAsset_{name}/'
+          for name in ('GameController_DB1', 'LanguageDetectorAssets', 'CoreLocationConfig'))
 BIG_PROGRAM = 10 << 20           # daemons bigger than this (lskdd, ...) are not on the way to the screen
 # ... but these are wanted all the same: locationd (31 MB), without which nothing in iOS has a location
 # -- Weather and its widget, Maps, the clock's cities' local weather -- and every app that asks for one
@@ -203,6 +243,8 @@ def wanted_file(path, size):
         return False
     if path.startswith(AUDIO):
         return not path.startswith(SKIP_AUDIO) and '.espresso.' not in path
+    if path.startswith(KEEP_SKIPPED):
+        return True
     if path.startswith(SKIP_PREFIX):
         return False
     if path.startswith('System/Library/Fonts/'):
@@ -216,8 +258,10 @@ def wanted_file(path, size):
     if path.startswith(FRAMEWORKS):
         if path in KEEP_METALLIB or (path.endswith('.metallib') and size <= MAX_METALLIB):
             return True
-        if path.startswith(KEEP_MODELS):
+        if path.startswith(KEEP_MODELS) or path in KEEP_DAEMONS:
             return True
+        if PLUGIN_EXECUTABLE.search(path):
+            return size <= MAX_PLUGIN
         if re.search(r'/(XPCServices|Support|Helpers)/', path):
             return size <= 32 << 20 and not path.lower().endswith(('.png', '.car', '.loctable', '.caml'))
         if path.endswith('.car'):
@@ -253,7 +297,8 @@ def main():
             keep = wanted_file(path, size)
         elif stat.S_ISLNK(mode):
             # a symlink costs nothing: keep every one that lives where we take anything at all
-            keep = '/' not in path or path.startswith(WHOLE) and not path.startswith(SKIP_PREFIX)
+            keep = '/' not in path or path.startswith(WHOLE) and (not path.startswith(SKIP_PREFIX) or
+                                                               path.startswith(KEEP_SKIPPED))
         else:
             # (the sound plug-ins' too: Library/Audio is skipped but for AUDIO, and without its en.lproj the
             # virtual audio device's port names came out NULL -- mediaserverd died naming the microphone)

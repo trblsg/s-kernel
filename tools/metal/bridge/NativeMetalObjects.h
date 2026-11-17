@@ -81,6 +81,10 @@ NmbBuffer *nmb_buffer_new_no_copy(NmbDevice *, void *pointer, uint64_t length, u
  * buffer and every command buffer using them are gone). A refused call (NULL) never runs it. */
 NmbBuffer *nmb_buffer_new_no_copy_releasing(NmbDevice *, void *pointer, uint64_t length, uint64_t options,
                                             void (*release)(void *context, void *pointer, uint64_t length), void *context);
+/* Scion: the buffer is the pixels of an IOSurface: seed(context) answers its seed, written(context) (or NULL) announces work this process
+ * submitted that writes its pixels. Two-plane YCbCr textures over it convert again only where the surface changed. Both are called on any
+ * thread until the buffer's import is freed. Once per buffer (false after). */
+bool nmb_buffer_watch_surface(const NmbBuffer *, uint32_t (*seed)(void *context), void (*written)(void *context), void *context);
 void nmb_buffer_release(NmbBuffer *);
 void *nmb_buffer_contents(const NmbBuffer *);
 uint64_t nmb_buffer_length(const NmbBuffer *);
@@ -88,6 +92,7 @@ uint64_t nmb_buffer_gpu_address(const NmbBuffer *);
 
 struct NmbTextureDescriptor {
     uint64_t type, format, width, height, depth, levels, samples, array_length, usage, options;
+    uint64_t swizzle; /* Scion: MTLTextureSwizzleChannels' four bytes, red lowest; 0 the default */
 };
 /* Heaps: type 0 automatic / 1 placement; offset UINT64_MAX asks an automatic heap to place the resource. */
 NmbHeap *nmb_heap_new(NmbDevice *, uint64_t type, uint64_t size, uint64_t options);
@@ -234,10 +239,19 @@ struct NmbPassAttachment {
     uint64_t level, slice, depth_plane, load, store;
     double clear[4]; /* color, or clear[0] depth / stencil */
 };
+/* An attachment's resolveTexture, resolveLevel, resolveSlice and resolveDepthPlane: the single-sample texture a resolving store action
+ * writes; a null texture for none. */
+struct NmbPassResolve {
+    NmbTexture *texture;
+    uint64_t level, slice, depth_plane;
+};
 struct NmbRenderPassDescriptor {
     struct NmbPassAttachment colors[8], depth, stencil;
     uint64_t width, height, array_length, samples;
     NmbBuffer *visibility; /* the pass's visibility result buffer, or null */
+    /* Scion: each attachment's resolve (VectorKit draws the map four times multisampled and resolves it into its drawable, and the
+     * drawable stayed black while no resolve texture reached the runtime) */
+    struct NmbPassResolve color_resolves[8], depth_resolve, stencil_resolve;
 };
 NmbEncoder *nmb_render_encoder_new(NmbCommandBuffer *, const struct NmbRenderPassDescriptor *);
 bool nmb_encoder_end(NmbEncoder *);
@@ -259,6 +273,7 @@ bool nmb_render_set_depth_stencil(NmbEncoder *, NmbDepthStencil *);
 bool nmb_render_set_viewport(NmbEncoder *, const double viewport[6]);
 bool nmb_render_set_scissor(NmbEncoder *, const uint64_t rect[4]);
 bool nmb_render_set_raster(NmbEncoder *, uint64_t cull_mode, uint64_t winding, uint64_t fill_mode);
+bool nmb_render_set_depth_clip_mode(NmbEncoder *, uint64_t mode);
 bool nmb_render_set_stencil_reference(NmbEncoder *, uint32_t front, uint32_t back);
 bool nmb_render_set_blend_color(NmbEncoder *, const float color[4]);
 bool nmb_render_set_depth_bias(NmbEncoder *, float bias, float slope_scale, float clamp);
@@ -281,6 +296,43 @@ bool nmb_blit_texture_to_buffer(NmbEncoder *, NmbTexture *source, uint64_t slice
                                 const uint64_t size[3], NmbBuffer *destination, uint64_t offset, uint64_t bytes_per_row,
                                 uint64_t bytes_per_image);
 bool nmb_blit_generate_mipmaps(NmbEncoder *, NmbTexture *);
+/* Scion: what real applications ask beyond the first set (docs/metal.md, "Real apps"). out[0] size, out[1] alignment. */
+bool nmb_device_heap_texture_size_and_align(const NmbDevice *, const struct NmbTextureDescriptor *, uint64_t out[2]);
+bool nmb_device_heap_buffer_size_and_align(const NmbDevice *, uint64_t length, uint64_t options, uint64_t out[2]);
+/* option: Metal's MTLBlitOption */
+bool nmb_blit_buffer_to_texture_options(NmbEncoder *, NmbBuffer *source, uint64_t offset, uint64_t bytes_per_row, uint64_t bytes_per_image,
+                                        const uint64_t size[3], NmbTexture *destination, uint64_t slice, uint64_t level, const uint64_t origin[3],
+                                        uint64_t option);
+bool nmb_blit_texture_to_buffer_options(NmbEncoder *, NmbTexture *source, uint64_t slice, uint64_t level, const uint64_t origin[3],
+                                        const uint64_t size[3], NmbBuffer *destination, uint64_t offset, uint64_t bytes_per_row,
+                                        uint64_t bytes_per_image, uint64_t option);
+/* kind 0 color attachment INDEX, 1 depth, 2 stencil; action: MTLStoreAction */
+bool nmb_render_set_store_action(NmbEncoder *, uint32_t kind, uint32_t index, uint64_t action);
+/* six values a viewport, four a rectangle */
+bool nmb_render_set_viewports(NmbEncoder *, const double *viewports, size_t count);
+bool nmb_render_set_scissors(NmbEncoder *, const uint64_t *rects, size_t count);
+bool nmb_render_draw_indirect(NmbEncoder *, uint64_t primitive, NmbBuffer *indirect, uint64_t offset);
+bool nmb_render_draw_indexed_indirect(NmbEncoder *, uint64_t primitive, uint64_t index_type, NmbBuffer *indices, uint64_t index_offset,
+                                      NmbBuffer *indirect, uint64_t offset);
+bool nmb_compute_dispatch_indirect(NmbEncoder *, NmbBuffer *indirect, uint64_t offset, const uint64_t per_group[3]);
+/* scope: MTLBarrierScope; after/before: MTLRenderStages (render encoders only) */
+bool nmb_encoder_memory_barrier(NmbEncoder *, uint64_t scope, uint64_t after, uint64_t before);
+/* one of buffer, texture or heap; usage: MTLResourceUsage; stages: MTLRenderStages (render encoders only) */
+bool nmb_encoder_use(NmbEncoder *, NmbBuffer *, NmbTexture *, NmbHeap *, uint64_t usage, uint64_t stages);
+/* stage as nmb_encoder_set_sampler */
+bool nmb_encoder_set_sampler_lod(NmbEncoder *, uint32_t stage, NmbSampler *, float lod_min, float lod_max, uint32_t index);
+/* levels and slices as nmb_texture_new_view's; swizzle as a descriptor's */
+NmbTexture *nmb_texture_new_view_swizzle(NmbTexture *, uint64_t format, uint64_t kind, const uint64_t levels[2], const uint64_t slices[2],
+                                         uint64_t swizzle);
+/* makeAliasable / isAliasable of a heap's resource; a resource outside a heap stays as it is (not aliasable) */
+bool nmb_buffer_make_aliasable(const NmbBuffer *);
+bool nmb_buffer_is_aliasable(const NmbBuffer *);
+bool nmb_texture_make_aliasable(const NmbTexture *);
+bool nmb_texture_is_aliasable(const NmbTexture *);
+/* functionConstantsDictionary: the count, then each (in name order): name, MTLDataType, [[function_constant(N)]] index, required */
+uint32_t nmb_function_constant_count(const NmbFunction *);
+bool nmb_function_constant_at(const NmbFunction *, uint32_t index, char *name, size_t size, uint64_t *type, uint64_t *constant_index,
+                              bool *required);
 #ifdef __cplusplus
 }
 #endif

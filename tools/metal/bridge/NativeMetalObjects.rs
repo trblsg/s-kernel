@@ -11,7 +11,7 @@ use metal2vulkan::bind::SamplerDescriptor;
 use metal2vulkan::metal::state::{DepthStencilDescriptor, StencilDescriptor};
 use metal2vulkan::library::{FunctionConstantValue, FunctionConstantValues};
 use metal2vulkan::metal::{
-    BlendFactor, BlendOperation, ColorWriteMask, CompareFunction, CullMode, DataType, IndexType, PixelFormat, PrimitiveTopologyClass,
+    BlendFactor, BlendOperation, ColorWriteMask, CompareFunction, CullMode, DataType, DepthClipMode, IndexType, PixelFormat, PrimitiveTopologyClass,
     PrimitiveType, RenderStages, SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter, SamplerMipFilter, StencilOperation, TextureType,
     TextureUsage, TriangleFillMode, VertexFormat, VertexStepFunction, Winding,
 };
@@ -23,7 +23,7 @@ use metal2vulkan_runtime::{
     BinaryArchive, BinaryArchiveDescriptor, BlitCommandEncoder, FamilyRow, FeatureRow, GpuFamily, RowState, BlitOption, Buffer, ClearColor, CommandBuffer, CommandQueue, ComputeCommandEncoder,
     ComputePipelineState, Deallocator, DebugMessage, DepthStencilState, Device, DeviceOptions, MessageSeverity, MessageSink, Event, EventRef, Fence, Function, Heap, HeapDescriptor, HeapType, HostMemory, IoSurfacePlane, IoSurfaceYCbCr, Library, LoadAction,
     MetalLevel, Origin, PipelineOption, PipelineOptions, PurgeableState, PrivateCount, PrivateFlag, PrivateProperties, MAX_COLOR_ATTACHMENTS, Region, RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions,
-    SamplerState, ScissorRect, SharedEvent, SharedEventListener, Size, StoreAction, Texture, TextureDescriptor, Viewport, VisibilityResultMode,
+    SamplerState, ScissorRect, SharedEvent, SharedEventListener, Size, StoreAction, SurfaceWatch, Texture, TextureDescriptor, Viewport, VisibilityResultMode,
 };
 use std::cell::RefCell;
 use std::ffi::{c_char, c_void, CStr};
@@ -185,9 +185,20 @@ pub unsafe extern "C" fn nmb_device_open(loader: *const c_char, cache: *const c_
         // A texture over a buffer whose rows lie apart is an image over the bytes, rendered or written too: the window server's padded
         // framebuffers (3048x2032 BGRA8 at 12288-byte rows, int-251) were otherwise copied in and out of a shadow image every pass.
         options.policy.padded_reads = metal2vulkan::device::PaddedReadsPolicy::AliasWrites;
-        // Every texture given a shadow image is announced with why no image aliases its bytes (`shadow.log`).
+        // Framebuffer fetch on a device with neither rasterization-order attachment access nor the pixel interlock (PanVK on the
+        // Mali-G72): input attachments, ordered between draws by a barrier and unordered within one draw (tools/metal/m2v/0005), not
+        // refused. Programs written for Apple's GPUs assume the fetch (CoreAnimation's luma_boost_lph), and a full-screen pass that reads
+        // each pixel once reads Metal's value. The compile layer announces the precision note once per pipeline that takes it.
+        options.policy.framebuffer_fetch = metal2vulkan::device::FramebufferFetchPolicy::AcceptUnordered;
+        // An 8-bit unorm texture's linear sample is the device's filter at the centre of Metal's 1/256 step where the driver is measured
+        // within one code of Metal (PanVK on the Mali-G72: 0.89 of a code, tools/vk/vk_filter_probe.c, tools/metal/m2v/0012), not the exact
+        // emulation, whose four fetches and thousand instructions a sample were half the window server's GPU time a frame on the home screen.
+        // An unmeasured device keeps the emulation.
+        options.policy.unorm8_linear_filter = metal2vulkan::device::Unorm8LinearFilterPolicy::DeviceWithinOneCode;
+        // Every texture given a shadow image is announced with why no image aliases its bytes (`shadow.log`), and every other
+        // degradation once (`degradations.log`).
         options.announce_each.insert(metal2vulkan_runtime::Degradation::ShadowedTexture);
-        let _ = SHADOW_LOG.set(PathBuf::from(cache.to_string_lossy().into_owned()).join("shadow.log"));
+        let _ = NOTICE_DIR.set(PathBuf::from(cache.to_string_lossy().into_owned()));
         Ok(boxed(NmbDevice(Device::system_default_with(&options).map_err(e("device"))?, std::sync::OnceLock::new(), std::sync::Mutex::new(()))))
     })
 }
@@ -206,31 +217,40 @@ fn millis_after(text: &str, marker: &str) -> Option<f64> {
     rest[..end].parse().ok()
 }
 
-// The distinct reasons textures were given shadow images, their numbers masked, each written once to the cache directory's shadow.log
-// with the first such texture's message, at most SHADOW_REASONS of them.
-static SHADOW_LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-static SHADOW_SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-const SHADOW_REASONS: usize = 64;
+// The runtime's degradation notices (`metal2vulkan-degrade-<kind>`), each distinct text with its numbers masked written once into the
+// cache directory, at most NOTICES of them: each reason a texture was given a shadow image (announced at every such texture) to
+// shadow.log, every other kind once to degradations.log. The shadows used to be matched by the bare kind ("shadowed-texture"),
+// which no notice's id is, so the window server's shadowed framebuffers, copied in and out at every frame, went unseen
+// (docs/metal.md, phase 7).
+static NOTICE_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+static NOTICES_SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+const NOTICES: usize = 96;
 
-fn note_shadow(text: &str) {
+fn note_degradation(code: &str, text: &str) {
     let masked: String = text.chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect();
-    let Ok(mut seen) = SHADOW_SEEN.lock() else { return };
-    if seen.len() >= SHADOW_REASONS || seen.contains(&masked) {
+    let Ok(mut seen) = NOTICES_SEEN.lock() else { return };
+    if seen.len() >= NOTICES || seen.contains(&masked) {
         return;
     }
     seen.push(masked);
-    if let Some(path) = SHADOW_LOG.get() {
+    if let Some(dir) = NOTICE_DIR.get() {
         use std::io::Write;
+        let shadow = code == metal2vulkan_runtime::Degradation::ShadowedTexture.code();
+        let path = dir.join(if shadow { "shadow.log" } else { "degradations.log" });
         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(file, "{text}");
+            let _ = if shadow {
+                writeln!(file, "{text}")
+            } else {
+                writeln!(file, "{}: {text}", code.trim_start_matches("metal2vulkan-degrade-"))
+            };
         }
     }
 }
 
 fn observe_message(message: &DebugMessage) {
     use std::sync::atomic::Ordering::Relaxed;
-    if message.id_name == "shadowed-texture" {
-        note_shadow(&message.text);
+    if message.id_name.starts_with("metal2vulkan-degrade-") {
+        note_degradation(&message.id_name, &message.text);
     }
     if message.id_name == "metal2vulkan-pipeline-creation" {
         let made = millis_after(&message.text, " made in ");
@@ -665,6 +685,24 @@ unsafe fn no_copy(device: *mut NmbDevice, pointer: *mut c_void, length: u64, opt
     })
 }
 
+/// Scion: the buffer is the pixels of an IOSurface, which the frontend watches: `seed(context)` answers its seed
+/// (`IOSurfaceGetSeed`), `written(context)` (optional) announces that work this process submitted writes its pixels. A two-plane
+/// YCbCr texture over the buffer then converts its planes again only where the surface changed (the runtime's `surface_watch.rs`).
+/// Once per buffer: false for a later call, which changes nothing.
+///
+/// # Safety
+/// Both calls are safe on any thread with `context` until the buffer's import is freed (its deallocator runs).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nmb_buffer_watch_surface(buffer: *const NmbBuffer, seed: Option<unsafe extern "C" fn(*mut c_void) -> u32>,
+                                                  written: Option<unsafe extern "C" fn(*mut c_void)>, context: *mut c_void) -> bool {
+    guard(false, || {
+        let seed = seed.ok_or("no seed")?;
+        // SAFETY: the caller's contract.
+        let watch = unsafe { SurfaceWatch::new(seed, written, context) };
+        Ok(get(buffer)?.0.watch_surface(watch))
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn nmb_buffer_release(buffer: *mut NmbBuffer) {
     release(buffer)
@@ -772,9 +810,32 @@ pub struct NmbTextureDescriptor {
     pub array_length: u64,
     pub usage: u64,
     pub options: u64,
+    /// Scion: `MTLTextureSwizzleChannels` as its four bytes (red in the low byte); 0 is the default, each channel from itself.
+    pub swizzle: u64,
 }
 
 pub struct NmbTexture(Texture);
+
+/// Scion: a descriptor's or view's `swizzle` word: 0 the default, else `MTLTextureSwizzleChannels`'s four bytes.
+fn swizzle_channels(word: u64) -> Result<metal2vulkan::metal::TextureSwizzleChannels, String> {
+    use metal2vulkan::metal::{TextureSwizzle, TextureSwizzleChannels};
+    if word == 0 {
+        return Ok(TextureSwizzleChannels::DEFAULT);
+    }
+    if word >> 32 != 0 {
+        return Err(format!("swizzle 0x{word:x} is not four channels"));
+    }
+    let channel = |shift: u64| raw::<TextureSwizzle>((word >> shift) & 0xff, "texture swizzle");
+    Ok(TextureSwizzleChannels { red: channel(0)?, green: channel(8)?, blue: channel(16)?, alpha: channel(24)? })
+}
+
+fn swizzle_word(channels: metal2vulkan::metal::TextureSwizzleChannels) -> u64 {
+    if channels == metal2vulkan::metal::TextureSwizzleChannels::DEFAULT {
+        return 0;
+    }
+    [channels.red, channels.green, channels.blue, channels.alpha].iter().enumerate()
+        .map(|(i, c)| (c.as_raw() as u64) << (8 * i)).sum()
+}
 
 fn texture_descriptor(d: *const NmbTextureDescriptor) -> Result<TextureDescriptor, String> {
     let d = get(d)?;
@@ -789,6 +850,7 @@ fn texture_descriptor(d: *const NmbTextureDescriptor) -> Result<TextureDescripto
     out.array_length = d.array_length;
     out.usage = raw::<TextureUsage>(d.usage, "texture usage")?;
     out.resource_options = options(d.options)?;
+    out.swizzle = swizzle_channels(d.swizzle)?;
     Ok(out)
 }
 
@@ -906,6 +968,7 @@ pub extern "C" fn nmb_texture_describe(texture: *const NmbTexture, out: *mut Nmb
             array_length: t.array_length(),
             usage: t.usage().as_raw() as u64,
             options: t.resource_options().raw(),
+            swizzle: swizzle_word(t.swizzle()),
         };
         Ok(())
     })
@@ -1815,10 +1878,26 @@ pub struct NmbRenderPassDescriptor {
     pub array_length: u64,
     pub samples: u64,
     pub visibility: *const NmbBuffer,
+    /// Scion: each attachment's resolve texture, level, slice and depth plane (a null texture for none).
+    pub color_resolves: [NmbPassResolve; 8],
+    pub depth_resolve: NmbPassResolve,
+    pub stencil_resolve: NmbPassResolve,
+}
+
+#[repr(C)]
+pub struct NmbPassResolve {
+    pub texture: *mut NmbTexture,
+    pub level: u64,
+    pub slice: u64,
+    pub depth_plane: u64,
 }
 
 fn texture_of(a: &NmbPassAttachment) -> Result<Option<Texture>, String> {
     if a.texture.is_null() { Ok(None) } else { Ok(Some(get(a.texture)?.0.clone())) }
+}
+
+fn resolve_of(r: &NmbPassResolve) -> Result<Option<Texture>, String> {
+    if r.texture.is_null() { Ok(None) } else { Ok(Some(get(r.texture)?.0.clone())) }
 }
 
 #[unsafe(no_mangle)]
@@ -1827,11 +1906,15 @@ pub extern "C" fn nmb_render_encoder_new(command_buffer: *mut NmbCommandBuffer, 
     guard(std::ptr::null_mut(), || {
         let d = get(descriptor)?;
         let mut pass = RenderPassDescriptor::new();
-        for (slot, a) in pass.color_attachments.iter_mut().zip(d.colors.iter()) {
+        for ((slot, a), r) in pass.color_attachments.iter_mut().zip(d.colors.iter()).zip(d.color_resolves.iter()) {
             slot.texture = texture_of(a)?;
             slot.level = a.level;
             slot.slice = a.slice;
             slot.depth_plane = a.depth_plane;
+            slot.resolve_texture = resolve_of(r)?;
+            slot.resolve_level = r.level;
+            slot.resolve_slice = r.slice;
+            slot.resolve_depth_plane = r.depth_plane;
             slot.load_action = LoadAction::from_raw(a.load).map_err(e("load action"))?;
             slot.store_action = StoreAction::from_raw(a.store).map_err(e("store action"))?;
             slot.clear_color = ClearColor::new(a.clear[0], a.clear[1], a.clear[2], a.clear[3]);
@@ -1841,6 +1924,10 @@ pub extern "C" fn nmb_render_encoder_new(command_buffer: *mut NmbCommandBuffer, 
         depth.level = d.depth.level;
         depth.slice = d.depth.slice;
         depth.depth_plane = d.depth.depth_plane;
+        depth.resolve_texture = resolve_of(&d.depth_resolve)?;
+        depth.resolve_level = d.depth_resolve.level;
+        depth.resolve_slice = d.depth_resolve.slice;
+        depth.resolve_depth_plane = d.depth_resolve.depth_plane;
         depth.load_action = LoadAction::from_raw(d.depth.load).map_err(e("load action"))?;
         depth.store_action = StoreAction::from_raw(d.depth.store).map_err(e("store action"))?;
         depth.clear_depth = d.depth.clear[0];
@@ -1849,6 +1936,10 @@ pub extern "C" fn nmb_render_encoder_new(command_buffer: *mut NmbCommandBuffer, 
         stencil.level = d.stencil.level;
         stencil.slice = d.stencil.slice;
         stencil.depth_plane = d.stencil.depth_plane;
+        stencil.resolve_texture = resolve_of(&d.stencil_resolve)?;
+        stencil.resolve_level = d.stencil_resolve.level;
+        stencil.resolve_slice = d.stencil_resolve.slice;
+        stencil.resolve_depth_plane = d.stencil_resolve.depth_plane;
         stencil.load_action = LoadAction::from_raw(d.stencil.load).map_err(e("load action"))?;
         stencil.store_action = StoreAction::from_raw(d.stencil.store).map_err(e("store action"))?;
         stencil.clear_stencil = d.stencil.clear[0] as u32;
@@ -2081,6 +2172,16 @@ pub extern "C" fn nmb_render_set_raster(encoder: *mut NmbEncoder, cull_mode: u64
     })
 }
 
+/// `setDepthClipMode:`: `Clamp` where the device has `depthClamp`, else refused by the runtime.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_render_set_depth_clip_mode(encoder: *mut NmbEncoder, mode: u64) -> bool {
+    guard(false, || {
+        let mode = raw::<DepthClipMode>(mode, "depth clip mode")?;
+        render(encoder)?.set_depth_clip_mode(mode).map_err(e("depth clip mode"))?;
+        Ok(true)
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn nmb_render_set_stencil_reference(encoder: *mut NmbEncoder, front: u32, back: u32) -> bool {
     guard(false, || {
@@ -2221,6 +2322,297 @@ pub extern "C" fn nmb_blit_texture_to_buffer(encoder: *mut NmbEncoder, source: *
 pub extern "C" fn nmb_blit_generate_mipmaps(encoder: *mut NmbEncoder, texture: *mut NmbTexture) -> bool {
     guard(false, || {
         blit(encoder)?.generate_mipmaps(&get(texture)?.0).map_err(e("mipmaps"))?;
+        Ok(true)
+    })
+}
+
+// ---- Scion: what real applications ask beyond the frontend's first set (docs/metal.md, "Real apps") ----
+
+/// Scion: `heapTextureSizeAndAlignWithDescriptor:`: the size and alignment a placement heap gives a texture of the descriptor,
+/// as the runtime places it (`out[0]` size, `out[1]` alignment). MoltenVK asks it of every image it makes.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_device_heap_texture_size_and_align(device: *const NmbDevice, descriptor: *const NmbTextureDescriptor,
+                                                         out: *mut u64) -> bool {
+    guard(false, || {
+        if out.is_null() {
+            return Err("null out".into());
+        }
+        let answer = get(device)?.0.heap_texture_size_and_align(&texture_descriptor(descriptor)?).map_err(e("heap texture size"))?;
+        // SAFETY: the header's two values.
+        unsafe { std::slice::from_raw_parts_mut(out, 2).copy_from_slice(&[answer.size, answer.align]) };
+        Ok(true)
+    })
+}
+
+/// Scion: `heapBufferSizeAndAlignWithLength:options:` (`out[0]` size, `out[1]` alignment).
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_device_heap_buffer_size_and_align(device: *const NmbDevice, length: u64, options_word: u64, out: *mut u64) -> bool {
+    guard(false, || {
+        if out.is_null() {
+            return Err("null out".into());
+        }
+        let answer = get(device)?.0.heap_buffer_size_and_align(length, options(options_word)?);
+        // SAFETY: the header's two values.
+        unsafe { std::slice::from_raw_parts_mut(out, 2).copy_from_slice(&[answer.size, answer.align]) };
+        Ok(true)
+    })
+}
+
+fn blit_option(value: u64) -> Result<BlitOption, String> {
+    Ok(match value {
+        0 => BlitOption::None,
+        1 => BlitOption::DepthFromDepthStencil,
+        2 => BlitOption::StencilFromDepthStencil,
+        4 => BlitOption::RowLinearPVRTC,
+        _ => return Err(format!("blit option {value} is not one a copy takes")),
+    })
+}
+
+/// Scion: `copyFromBuffer:...toTexture:...options:`, as `nmb_blit_buffer_to_texture` with Metal's `MTLBlitOption`.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn nmb_blit_buffer_to_texture_options(encoder: *mut NmbEncoder, source: *mut NmbBuffer, offset: u64, bytes_per_row: u64,
+                                                     bytes_per_image: u64, extent: *const u64, destination: *mut NmbTexture, slice: u64,
+                                                     level: u64, destination_origin: *const u64, option: u64) -> bool {
+    guard(false, || {
+        blit(encoder)?.copy_from_buffer_to_texture(&get(source)?.0, offset, bytes_per_row, bytes_per_image, size(extent)?,
+                                                   &get(destination)?.0, slice, level, origin(destination_origin)?, blit_option(option)?)
+            .map_err(e("buffer to texture"))?;
+        Ok(true)
+    })
+}
+
+/// Scion: `copyFromTexture:...toBuffer:...options:`, as `nmb_blit_texture_to_buffer` with Metal's `MTLBlitOption`.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn nmb_blit_texture_to_buffer_options(encoder: *mut NmbEncoder, source: *mut NmbTexture, slice: u64, level: u64,
+                                                     source_origin: *const u64, extent: *const u64, destination: *mut NmbBuffer,
+                                                     offset: u64, bytes_per_row: u64, bytes_per_image: u64, option: u64) -> bool {
+    guard(false, || {
+        blit(encoder)?.copy_from_texture_to_buffer(&get(source)?.0, slice, level, origin(source_origin)?, size(extent)?,
+                                                   &get(destination)?.0, offset, bytes_per_row, bytes_per_image, blit_option(option)?)
+            .map_err(e("texture to buffer"))?;
+        Ok(true)
+    })
+}
+
+/// Scion: `setColorStoreAction:atIndex:` (kind 0), `setDepthStoreAction:` (1), `setStencilStoreAction:` (2): a store action the
+/// pass descriptor left `Unknown` (MoltenVK leaves them so and states them at the end of the pass).
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_render_set_store_action(encoder: *mut NmbEncoder, kind: u32, index: u32, action: u64) -> bool {
+    guard(false, || {
+        let action = StoreAction::from_raw(action).map_err(e("store action"))?;
+        let r = render(encoder)?;
+        match kind {
+            0 => r.set_color_store_action(action, index),
+            1 => r.set_depth_store_action(action),
+            2 => r.set_stencil_store_action(action),
+            _ => return Err(format!("store action kind {kind}")),
+        }
+        .map_err(e("store action"))?;
+        Ok(true)
+    })
+}
+
+/// Scion: `setViewports:count:`, six values a viewport (as `nmb_render_set_viewport`).
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_render_set_viewports(encoder: *mut NmbEncoder, values: *const f64, count: usize) -> bool {
+    guard(false, || {
+        if values.is_null() || count == 0 {
+            return Err("no viewports".into());
+        }
+        // SAFETY: the header's six values a viewport.
+        let v = unsafe { std::slice::from_raw_parts(values, count * 6) };
+        let list: Vec<Viewport> = v.chunks_exact(6).map(|v| Viewport::new(v[0], v[1], v[2], v[3], v[4], v[5])).collect();
+        render(encoder)?.set_viewports(&list).map_err(e("viewports"))?;
+        Ok(true)
+    })
+}
+
+/// Scion: `setScissorRects:count:`, four values a rectangle (as `nmb_render_set_scissor`).
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_render_set_scissors(encoder: *mut NmbEncoder, values: *const u64, count: usize) -> bool {
+    guard(false, || {
+        if values.is_null() || count == 0 {
+            return Err("no scissor rectangles".into());
+        }
+        // SAFETY: the header's four values a rectangle.
+        let r = unsafe { std::slice::from_raw_parts(values, count * 4) };
+        let list: Vec<ScissorRect> = r.chunks_exact(4).map(|r| ScissorRect::new(r[0], r[1], r[2], r[3])).collect();
+        render(encoder)?.set_scissor_rects(&list).map_err(e("scissor rectangles"))?;
+        Ok(true)
+    })
+}
+
+/// Scion: `drawPrimitives:indirectBuffer:indirectBufferOffset:`.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_render_draw_indirect(encoder: *mut NmbEncoder, primitive: u64, indirect: *mut NmbBuffer, offset: u64) -> bool {
+    guard(false, || {
+        render(encoder)?.draw_primitives_indirect(raw::<PrimitiveType>(primitive, "primitive")?, &get(indirect)?.0, offset)
+            .map_err(e("indirect draw"))?;
+        Ok(true)
+    })
+}
+
+/// Scion: `drawIndexedPrimitives:indexType:indexBuffer:indexBufferOffset:indirectBuffer:indirectBufferOffset:`.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_render_draw_indexed_indirect(encoder: *mut NmbEncoder, primitive: u64, index_type: u64, indices: *mut NmbBuffer,
+                                                   index_offset: u64, indirect: *mut NmbBuffer, offset: u64) -> bool {
+    guard(false, || {
+        render(encoder)?.draw_indexed_primitives_indirect(raw::<PrimitiveType>(primitive, "primitive")?,
+                                                          raw::<IndexType>(index_type, "index type")?, &get(indices)?.0, index_offset,
+                                                          &get(indirect)?.0, offset).map_err(e("indexed indirect draw"))?;
+        Ok(true)
+    })
+}
+
+/// Scion: `dispatchThreadgroupsWithIndirectBuffer:indirectBufferOffset:threadsPerThreadgroup:`.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_compute_dispatch_indirect(encoder: *mut NmbEncoder, indirect: *mut NmbBuffer, offset: u64, per_group: *const u64)
+                                                -> bool {
+    guard(false, || {
+        compute(encoder)?.dispatch_threadgroups_indirect(&get(indirect)?.0, offset, size(per_group)?).map_err(e("indirect dispatch"))?;
+        Ok(true)
+    })
+}
+
+/// Scion: `memoryBarrierWithScope:` (compute) and `memoryBarrierWithScope:afterStages:beforeStages:` (render; the stages are not
+/// read for compute).
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_encoder_memory_barrier(encoder: *mut NmbEncoder, scope: u64, after: u64, before: u64) -> bool {
+    guard(false, || {
+        let scope = raw::<metal2vulkan::metal::BarrierScope>(scope, "barrier scope")?;
+        match get_mut(encoder)? {
+            NmbEncoder::Compute(c) => c.memory_barrier_with_scope(scope),
+            NmbEncoder::Render(r) => r.memory_barrier_with_scope(scope, raw::<RenderStages>(after, "render stages")?,
+                                                                  raw::<RenderStages>(before, "render stages")?),
+            NmbEncoder::Blit(_) => return Err("not a compute or render encoder".into()),
+        }
+        Ok(true)
+    })
+}
+
+/// Scion: `useResource:usage:` (compute) and `useResource:usage:stages:` (render), of a buffer or a texture; `useHeap:` and
+/// `useHeap:stages:` with `heap`. Exactly one of the three is not null.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_encoder_use(encoder: *mut NmbEncoder, buffer: *mut NmbBuffer, texture: *mut NmbTexture, heap: *mut NmbHeap,
+                                  usage: u64, stages: u64) -> bool {
+    guard(false, || {
+        use metal2vulkan_runtime::ResourceRef;
+        let usage = raw::<metal2vulkan::metal::ResourceUsage>(usage, "resource usage")?;
+        let resource = match (optional(buffer)?, optional(texture)?) {
+            (Some(b), None) => Some(ResourceRef::Buffer(&b.0)),
+            (None, Some(t)) => Some(ResourceRef::Texture(&t.0)),
+            (None, None) => None,
+            _ => return Err("a buffer and a texture at once".into()),
+        };
+        let heap = optional(heap)?.map(|h| &h.0);
+        match (get_mut(encoder)?, resource, heap) {
+            (NmbEncoder::Compute(c), Some(r), None) => c.use_resource(r, usage),
+            (NmbEncoder::Compute(c), None, Some(h)) => c.use_heap(h),
+            (NmbEncoder::Render(r), Some(x), None) => r.use_resource(x, usage, raw::<RenderStages>(stages, "render stages")?),
+            (NmbEncoder::Render(r), None, Some(h)) => r.use_heap(h, raw::<RenderStages>(stages, "render stages")?),
+            _ => return Err("one resource or heap, on a compute or render encoder".into()),
+        }
+        .map_err(e("use resource"))?;
+        Ok(true)
+    })
+}
+
+/// Scion: `set{Vertex,Fragment,}SamplerState:lodMinClamp:lodMaxClamp:atIndex:` (stage as `nmb_encoder_set_sampler`).
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_encoder_set_sampler_lod(encoder: *mut NmbEncoder, stage: u32, sampler: *mut NmbSampler, min: f32, max: f32,
+                                              index: u32) -> bool {
+    guard(false, || {
+        let sampler = optional(sampler)?.map(|s| &s.0);
+        let (mins, maxs) = ([min], [max]);
+        match (get_mut(encoder)?, stage) {
+            (NmbEncoder::Compute(c), COMPUTE) => c.set_sampler_state_with_lod_clamps(sampler, min, max, index),
+            (NmbEncoder::Render(r), VERTEX) => r.set_vertex_sampler_states(&[sampler], Some((&mins[..], &maxs[..])), index),
+            (NmbEncoder::Render(r), FRAGMENT) => r.set_fragment_sampler_states(&[sampler], Some((&mins[..], &maxs[..])), index),
+            _ => return Err(bad_stage(stage)),
+        }
+        .map_err(e("set sampler with clamps"))?;
+        Ok(true)
+    })
+}
+
+/// Scion: `newTextureViewWithPixelFormat:textureType:levels:slices:swizzle:` (`swizzle` as a descriptor's).
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_texture_new_view_swizzle(texture: *mut NmbTexture, format: u64, kind: u64, levels: *const u64, slices: *const u64,
+                                               swizzle: u64) -> *mut NmbTexture {
+    guard(std::ptr::null_mut(), || {
+        let t = &get(texture)?.0;
+        if levels.is_null() || slices.is_null() {
+            return Err("null levels or slices".into());
+        }
+        // SAFETY: the header's two words each.
+        let (l, s) = unsafe { (std::slice::from_raw_parts(levels, 2), std::slice::from_raw_parts(slices, 2)) };
+        let ranges = (l[0]..l[0].checked_add(l[1]).ok_or("levels overflow")?, s[0]..s[0].checked_add(s[1]).ok_or("slices overflow")?);
+        let view = t.new_texture_view_with_swizzle(raw::<PixelFormat>(format, "pixel format")?, raw::<TextureType>(kind, "texture type")?,
+                                                   ranges.0, ranges.1, swizzle_channels(swizzle)?);
+        Ok(boxed(NmbTexture(view.map_err(e("texture view"))?)))
+    })
+}
+
+/// Scion: `makeAliasable` of a heap's buffer (one outside a heap stays as it is, as Metal leaves it).
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_buffer_make_aliasable(buffer: *const NmbBuffer) -> bool {
+    guard(false, || {
+        get(buffer)?.0.make_aliasable().map_err(e("make aliasable"))?;
+        Ok(true)
+    })
+}
+
+/// Scion: `isAliasable` of a buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_buffer_is_aliasable(buffer: *const NmbBuffer) -> bool {
+    guard(false, || Ok(get(buffer)?.0.is_aliasable()))
+}
+
+/// Scion: `makeAliasable` of a heap's texture (or a texture over a heap's buffer).
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_texture_make_aliasable(texture: *const NmbTexture) -> bool {
+    guard(false, || {
+        get(texture)?.0.make_aliasable().map_err(e("make aliasable"))?;
+        Ok(true)
+    })
+}
+
+/// Scion: `isAliasable` of a texture.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_texture_is_aliasable(texture: *const NmbTexture) -> bool {
+    guard(false, || Ok(get(texture)?.0.is_aliasable()))
+}
+
+/// Scion: `functionConstantsDictionary`: how many function constants the function declares (none for a function made with constant
+/// values, as Metal answers).
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_function_constant_count(function: *const NmbFunction) -> u32 {
+    guard(0, || Ok(get(function)?.0.function_constants_dictionary().map_err(e("function constants"))?.len() as u32))
+}
+
+/// Scion: the `index`th of them, in name order: its name into `name` (`size` bytes, cut and terminated), its `MTLDataType`, its
+/// `[[function_constant(N)]]` index and whether it is required.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_function_constant_at(function: *const NmbFunction, index: u32, name: *mut c_char, size: usize, data_type: *mut u64,
+                                           constant_index: *mut u64, required: *mut bool) -> bool {
+    guard(false, || {
+        let constants = get(function)?.0.function_constants_dictionary().map_err(e("function constants"))?;
+        let constant = constants.values().nth(index as usize).ok_or("no such function constant")?;
+        copy_out(constant.name(), name, size);
+        // SAFETY: the header's out words, each null or writable.
+        unsafe {
+            if let Some(t) = data_type.as_mut() {
+                *t = constant.data_type().as_raw() as u64;
+            }
+            if let Some(i) = constant_index.as_mut() {
+                *i = constant.index() as u64;
+            }
+            if let Some(r) = required.as_mut() {
+                *r = constant.is_required();
+            }
+        }
         Ok(true)
     })
 }

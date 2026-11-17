@@ -40,6 +40,12 @@
  *            by 4 again in the SPI, about 5.5 MHz; Samsung runs it up to 25 MHz). 255 leaves it as found.
  *   shub_chub_on=1       at step 2, power the CHUB domain on if step 1 found it off, using the PMU's chub_on sequence
  *            from Samsung's flexpmu tables. Default: stop.
+ *   shub_ap_awake=0      do not tell the hub that the AP is awake (default 1: WAKEUP and RESUME after the setup, as
+ *                        Samsung's sensor HAL and resume path do; a hub that thinks the AP asleep keeps parts down)
+ *   shub_mag=N           the magnetometer's PDC matrix of the S9+'s board (Samsung's ssp-mag-array): 1 the SM-G965F
+ *                        (eur_open_26), 2 the Korean SM-G965N (kor_26); 0 (default): none sent
+ *   shub_cold=0          leave LDO37 on at a warm start (default 1: off for 100 ms, so a hub that stopped answering
+ *                        starts again from cold)
  *   shub_keep=0          power the hub off again (NSTDBY low) when the steps end or one fails. Default 1: leave it
  *            running, which the sensors need.
  *   shub_log=1           log the first bytes of every SPI frame (very loud). The first 40 frames are always logged.
@@ -190,6 +196,7 @@
 #define HELLO_POLLS             100
 #define NSTDBY_LOW_MS           20
 #define AFTER_POWER_MS          50
+#define LDO_OFF_MS              100     /* LDO37 off at a warm start, for the chip to start from cold */
 #define AUTOBAUD_BYTES          36
 #define AUTOBAUD_MS             100
 #define SYNC_TRIES              6
@@ -221,6 +228,9 @@ static struct hakios_exynos_spi bus = {
 
 static vm_offset_t pmu, cmu_top, cmu_chub, gpio_chub, alive, peric0;
 static uint32_t steps, keep = 1, log_frames, div_ratio = 15, chub_on_ok;
+static uint32_t cold_start = 1;                 /* shub_cold: LDO37 off and on at a warm start */
+static uint32_t ap_awake = 1;                   /* shub_ap_awake: WAKEUP and RESUME after the setup */
+static uint32_t mag_board;                      /* shub_mag: 1 G965F, 2 G965N: which PDC matrix */
 static uint32_t want_sensors = 0x2b3, period_ms = 20, req_rpc = SHUB_RPC_SENSOR_REQ, req_len = 1;
 static uint32_t acc_position = ACC_POSITION_S9; /* hakios_ssp_init(): by HAKIOS_DEVICE, or shub_acc_pos= */
 static bool acc_cal_given, gyro_cal_given;      /* shub_acc_cal=, shub_gyro_cal= */
@@ -431,6 +441,17 @@ power_on(void)
 		if (!hakios_exynos_spi_map(&bus, say)) {
 			return false;
 		}
+	}
+	/* A warm restart leaves LDO37 on and the chip running whatever it last ran: a hub that has stopped answering (an
+	 * assert in its ROM) stays that way through NSTDBY, which is only standby. Its supply off and on again starts it
+	 * from cold, as a power-up does (shub_cold=0: not). */
+	if (cold_start && hakios_acpm_pmic_read(HAKIOS_ACPM_PMIC_PMIC, LDO37_CTRL, &ldo) == 0 && (ldo & LDO_ON) == LDO_ON) {
+		pin_output(peric0, BANK_GPG0, PIN_NSTDBY, false);
+		(void)hakios_acpm_pmic_update(HAKIOS_ACPM_PMIC_PMIC, LDO37_CTRL, LDO_ON, 0);
+		sleep_ms(LDO_OFF_MS);
+		(void)hakios_acpm_pmic_update(HAKIOS_ACPM_PMIC_PMIC, LDO37_CTRL, LDO_ON, LDO_ON);
+		say("shub: 2: LDO37 off for %u ms and on again: the chip starts from cold (shub_cold)\n", LDO_OFF_MS);
+		sleep_ms(20);
 	}
 	if (hakios_acpm_pmic_read(HAKIOS_ACPM_PMIC_PMIC, LDO37_CTRL, &ldo) == 0 && (ldo & LDO_ON) != LDO_ON) {
 		uint8_t back = 0;
@@ -1651,6 +1672,90 @@ post_sample(const struct shub_sample *s)
 	lck_mtx_unlock(&shub_lock);
 }
 
+/*
+ * The rate each sensor is read at, as user space asks for it (write() below): what iOS's clients of the sensor want,
+ * so that the hub does not stream the accelerometer, the gyroscope and the magnetometer at 50 Hz to a backboardd
+ * that throws the samples away (12 November: backboardd at 12% of a core with the screen off, doing just that).
+ * RATE_BOOT is the boot's rate (shub_ms, or 200 ms for light, proximity and pressure); 0 is off. run() carries the
+ * changes out between its reads (apply_rates()); the last close puts every sensor back to the boot's rate, so a
+ * reader that dies leaves nothing switched off.
+ */
+#ifndef HAKIOS_SENSOR_RATE_OFF
+struct hakios_sensor_rate {             /* one write() record; the same in userland/src/hakios.sensors.h */
+	uint32_t type;                  /* HAKIOS_SENSOR_* */
+	uint32_t period_ms;             /* HAKIOS_SENSOR_RATE_OFF, HAKIOS_SENSOR_RATE_BOOT, or 5-1000 */
+};
+#define HAKIOS_SENSOR_RATE_OFF  0
+#define HAKIOS_SENSOR_RATE_BOOT 0xffffffffu
+#endif
+#define RATE_MS_LEAST           5
+#define RATE_MS_MOST            1000
+
+static uint32_t rate_ms[SSP_SENSORS];           /* 0 = off, HAKIOS_SENSOR_RATE_BOOT = the boot's; under shub_lock */
+static volatile uint64_t rate_pending;          /* the sensors whose rate_ms run() has still to carry out */
+static bool rates_made;
+
+/* Samsung's number of the sensor behind a HAKIOS_SENSOR_* type; -1 if none */
+static int
+ssp_id_of(uint32_t type)
+{
+	switch (type) {
+	case HAKIOS_SENSOR_ACCEL: return SSP_ACCEL;
+	case HAKIOS_SENSOR_GYRO: return SSP_GYRO;
+	case HAKIOS_SENSOR_MAG: return SSP_MAG;
+	case HAKIOS_SENSOR_PRESSURE: return SSP_PRESSURE;
+	case HAKIOS_SENSOR_LIGHT: return SSP_LIGHT;
+	case HAKIOS_SENSOR_PROXIMITY: return SSP_PROXIMITY;
+	default: return -1;
+	}
+}
+
+/* every sensor back to the boot's rate (called with shub_lock held) */
+static void
+rates_to_boot_locked(void)
+{
+	for (uint32_t id = 0; id < SSP_SENSORS; id++) {
+		if (rates_made && rate_ms[id] != HAKIOS_SENSOR_RATE_BOOT) {
+			rate_pending |= 1ull << id;
+		}
+		rate_ms[id] = HAKIOS_SENSOR_RATE_BOOT;
+	}
+	rates_made = true;
+}
+
+/*
+ * write(): struct hakios_sensor_rate records, each the period a sensor is to be read at from now on. A record of an
+ * unknown type or of a period outside 5-1000 ms (other than off and the boot's) fails the write with EINVAL; the
+ * records before it stand.
+ */
+static int
+sensors_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
+{
+	while (uio_resid(uio) >= (user_ssize_t)sizeof(struct hakios_sensor_rate)) {
+		struct hakios_sensor_rate r;
+		int id, error = uiomove((caddr_t)&r, sizeof(r), uio);
+
+		if (error != 0) {
+			return error;
+		}
+		id = ssp_id_of(r.type);
+		if (id < 0 || (r.period_ms != HAKIOS_SENSOR_RATE_OFF && r.period_ms != HAKIOS_SENSOR_RATE_BOOT &&
+		    (r.period_ms < RATE_MS_LEAST || r.period_ms > RATE_MS_MOST))) {
+			return EINVAL;
+		}
+		lck_mtx_lock(&shub_lock);
+		if (!rates_made) {
+			rates_to_boot_locked();
+		}
+		if (rate_ms[id] != r.period_ms) {
+			rate_ms[id] = r.period_ms;
+			rate_pending |= 1ull << id;
+		}
+		lck_mtx_unlock(&shub_lock);
+	}
+	return uio_resid(uio) == 0 ? 0 : EINVAL;
+}
+
 static int
 sensors_open(__unused dev_t dev, __unused int flags, __unused int devtype, __unused proc_t p)
 {
@@ -1667,6 +1772,9 @@ sensors_close(__unused dev_t dev, __unused int flags, __unused int devtype, __un
 	lck_mtx_lock(&shub_lock);
 	if (q_readers > 0) {
 		q_readers--;
+	}
+	if (q_readers == 0 && rates_made) {
+		rates_to_boot_locked();
 	}
 	lck_mtx_unlock(&shub_lock);
 	return 0;
@@ -2064,28 +2172,119 @@ make_gnss_device(void)
 
 static volatile uint64_t console_want_on, console_want_off;
 static volatile bool console_cmd_pending;
+/*
+ * What Samsung's driver tells the hub after its own setup that ours had not (initialize_mcu(), ssp_late_resume() and
+ * the sensor HAL's notices, Apollo drivers/sensorhub/brcm): the board's thermistor thresholds, the magnetometer's PDC
+ * matrix of the board, and that the AP is awake. Values from Samsung's star2lte device trees.
+ */
+static const uint8_t mag_matrix_g965f[27] = { 0xc6, 0x52, 0x7a, 0xd0, 0x93, 0x80, 0xff, 0x29, 0xd1, 0x37, 0xe9, 0x30, 0x68,
+	                                      0x1e, 0xff, 0xaa, 0xff, 0xbd, 0x02, 0xfc, 0xbd, 0xfc, 0x7c, 0xb1, 0x0a, 0x97,
+	                                      0x94 };
+static const uint8_t mag_matrix_g965n[27] = { 0x97, 0x57, 0xf2, 0xd6, 0xd5, 0x7c, 0x00, 0xf7, 0xd4, 0x37, 0xc2, 0x4b, 0x34,
+	                                      0xe2, 0xff, 0x83, 0x00, 0xf1, 0x1d, 0x3e, 0xbf, 0x01, 0x61, 0x6f, 0x09, 0x2f,
+	                                      0xdc };
+
+static void
+send_board_setup(void)
+{
+	uint8_t b[27];
+
+	if (strcmp(HAKIOS_DEVICE, "star2lte") == 0) {
+		/* ssp-thermi-up[18] 0x03eb and ssp-thermi-sub[18] 0x03ec, the same in both S9+ trees; thermistor.c sends them as is */
+		b[0] = 0xeb;
+		b[1] = 0x03;
+		b[2] = 0xec;
+		b[3] = 0x03;
+		say("shub: 6: the thermistor thresholds (up 0x03eb, sub 0x03ec): %s\n",
+		    ssp_cmd(SSP_SET_THERMISTOR, SSP_AP2HUB_WRITE, 0, b, 4) ? "taken" : "NOT taken");
+		if (mag_board == 1 || mag_board == 2) {
+			/* only with a magnetometer found, as set_pdc_matrix() (uSensorState & 0x04) */
+			memcpy(b, mag_board == 1 ? mag_matrix_g965f : mag_matrix_g965n, sizeof(b));
+			say("shub: 6: the magnetometer's matrix of the %s: %s\n", mag_board == 1 ? "SM-G965F" : "SM-G965N",
+			    !(ssp.found & 0x04) ? "no magnetometer found, not sent" :
+			    ssp_cmd(SSP_SET_MAG_MATRIX, SSP_AP2HUB_WRITE, 0, b, sizeof(b)) ? "taken" : "NOT taken");
+		}
+	}
+	if (ap_awake) {
+		bool w = ssp_cmd(SSP_AP_STATUS_WAKEUP, SSP_AP2HUB_WRITE, 0, NULL, 0);
+		bool r = ssp_cmd(SSP_AP_STATUS_RESUME, SSP_AP2HUB_WRITE, 0, NULL, 0);
+
+		say("shub: 6: the AP is awake: WAKEUP %s, RESUME %s\n", w ? "taken" : "NOT taken", r ? "taken" : "NOT taken");
+	}
+}
+
 static char console_cmd[64];
 static void console_do(void);
+
+/* the rate step 6 reads a sensor at: shub_ms, but 200 ms for light, proximity and pressure */
+static uint32_t
+boot_ms(uint8_t id)
+{
+	return id == SSP_LIGHT || id == SSP_PROXIMITY || id == SSP_PRESSURE ? 200 : period_ms;
+}
+
+/*
+ * Carry out the rates user space asked for (sensors_write()): off is the hub's SENSOR_REMOVE, a new period of a sensor
+ * that is on its CHANGE_DELAY (as Samsung's driver does; REMOVE and ADD if the hub does not take it), on is ADD. Only
+ * the sensors step 6 enabled (shub_sensors and found) are touched.
+ */
+static void
+apply_rates(void)
+{
+	uint64_t pending;
+	uint32_t want[SSP_SENSORS];
+
+	lck_mtx_lock(&shub_lock);
+	pending = rate_pending;
+	rate_pending = 0;
+	memcpy(want, rate_ms, sizeof(want));
+	lck_mtx_unlock(&shub_lock);
+	for (uint8_t id = 0; pending != 0 && id < SSP_SENSORS; id++) {
+		uint32_t ms;
+		uint8_t b[10] = { id };
+
+		if (!(pending & (1ull << id))) {
+			continue;
+		}
+		pending &= ~(1ull << id);
+		if (id >= 32 || !(want_sensors & (1u << id)) || !(ssp.found & (1ull << id))) {
+			continue;
+		}
+		ms = want[id] == HAKIOS_SENSOR_RATE_BOOT ? boot_ms(id) : want[id];
+		if (ms == 0) {
+			if ((ssp.enabled & (1ull << id)) && ssp_cmd(SSP_SENSOR_REMOVE, SSP_AP2HUB_WRITE, 0, b, 5)) {
+				ssp.enabled &= ~(1ull << id);
+			}
+			say("shub: sensor %u off (asked by user space)%s\n", id, (ssp.enabled & (1ull << id)) ? ": NOT taken" : "");
+			continue;
+		}
+		if (ssp.enabled & (1ull << id)) {
+			shub_put32(b + 1, ms);
+			if (ssp_cmd(SSP_CHANGE_DELAY, SSP_AP2HUB_WRITE, 0, b, sizeof(b))) {
+				say("shub: sensor %u every %u ms (asked by user space)\n", id, ms);
+				continue;
+			}
+			if (ssp_cmd(SSP_SENSOR_REMOVE, SSP_AP2HUB_WRITE, 0, b, 5)) {
+				ssp.enabled &= ~(1ull << id);
+			}
+		}
+		say("shub: sensor %u every %u ms (asked by user space): %s\n", id, ms, sensor_on(id, ms) ? "on" : "NOT taken");
+	}
+}
 
 static void
 run(void)
 {
-	static const struct { uint8_t id; uint32_t ms; } slow[] = { { SSP_LIGHT, 200 }, { SSP_PROXIMITY, 200 },
-		                                                   { SSP_PRESSURE, 200 } };
 	uint32_t frames_at_time = 0;
 	uint64_t said_ns = now_ns();
 
 	send_calibration();
+	send_board_setup();
 	for (uint8_t id = 0; id < SSP_SENSORS; id++) {
-		uint32_t ms = period_ms;
+		uint32_t ms = boot_ms(id);
 
 		if (id >= 32 || !(want_sensors & (1u << id)) || !(ssp.found & (1ull << id))) {
 			continue;
-		}
-		for (unsigned i = 0; i < sizeof(slow) / sizeof(slow[0]); i++) {
-			if (slow[i].id == id) {
-				ms = slow[i].ms;
-			}
 		}
 		say("shub: 6: sensor %u on, every %u ms: %s\n", id, ms, sensor_on(id, ms) ? "taken" : "NOT taken");
 	}
@@ -2109,6 +2308,9 @@ run(void)
 					say("shub: sensor %u off\n", id);
 				}
 			}
+		}
+		if (rate_pending) {
+			apply_rates();
 		}
 		if (console_cmd_pending) {
 			console_do();
@@ -2390,6 +2592,9 @@ hakios_ssp_init(void)
 		n = 6;
 	}
 	PE_parse_boot_argn("shub_keep", &keep, sizeof(keep));
+	PE_parse_boot_argn("shub_cold", &cold_start, sizeof(cold_start));
+	PE_parse_boot_argn("shub_ap_awake", &ap_awake, sizeof(ap_awake));
+	PE_parse_boot_argn("shub_mag", &mag_board, sizeof(mag_board));
 	PE_parse_boot_argn("shub_log", &log_frames, sizeof(log_frames));
 	PE_parse_boot_argn("shub_div", &div_ratio, sizeof(div_ratio));
 	PE_parse_boot_argn("shub_chub_on", &chub_on_ok, sizeof(chub_on_ok));

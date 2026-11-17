@@ -103,6 +103,14 @@
 #                                   (lib/HakiosMetal.icd). Plus bin/m2v_test and share/m2v_test.metallib: the same checks as on a
 #                                   Mac, on the guest's driver (RC_JOBS=rc.jobs.metalvk). Still behind boot-arg metal=N like the
 #                                   other plug-in; with no driver at that path there is simply no device. docs/metal-plan.md.
+#                                   The bundle's executable links none of it: HakiosMetal.bundle/HakiosMetalVK.dylib (the
+#                                   frontend) and through it the runtime and the driver are loaded at the device's first use.
+#                                   Also bin/metal_tri, share/metal_tri.metallib and MetalTri.app (a triangle through the Metal
+#                                   API, src/metalvk/metal_tri.m) and bin/metal_libcheck (a library's functions through
+#                                   pipelines), which open the plug-in themselves, shown the device by
+#                                   lib/HakiosMetal.clients: no boot-arg needed. M2V_DIR=DIR takes a libmetal2vulkan.dylib
+#                                   already built (mk-metal2vulkan.sh ios, which also runs on Linux). On the S9:
+#                                   PANVK_DIR=... METAL=vk METAL_ICD=/redwood/lib/libvulkan_panfrost.dylib (docs/metal.md).
 #                      TURNIP=1     with Turnip, Mesa's Vulkan driver for the Adreno (tools/mk-turnip.sh), as
 #                                   lib/libvulkan_freedreno.dylib (11 MB), and bin/vk_turnip_test, which runs it once round
 #                                   (src/vk_turnip_test.c; RC_JOBS=rc.jobs.vkturnip): the first piece of a Metal on Vulkan
@@ -217,7 +225,8 @@ INJECT=${INJECT-"/redwood/lib/libhakios.dylib backboardd containermanagerd conta
 /redwood/lib/libhakios.sb.dylib SpringBoard MobilePhone InCallService
 /redwood/lib/libhakios.media.dylib mediaserverd
 /redwood/lib/libhakios.app.dylib Sileo
-/redwood/lib/libhakios.tweaks.dylib Preferences"}
+/redwood/lib/libhakios.tweaks.dylib Preferences
+/redwood/lib/libhakios.locationd.dylib locationd"}
 [ -n "$BT" ] && INJECT="$INJECT
 /redwood/lib/libhakios.bluetool.dylib BlueTool
 /redwood/lib/libhakios.bluetoothd.dylib bluetoothd"
@@ -335,6 +344,9 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		{ ${LDID:-ldid} -Ssrc/passcoded.entitlements obj/passcoded 2>/dev/null ||
 		  codesign -f -s - --entitlements src/passcoded.entitlements obj/passcoded 2>/dev/null ||
 		  echo "build.sh: no ldid or codesign: passcoded is unsigned, and with keystore_entcheck=2 it cannot change the passcode"; }
+		# the stand-in for CommCenter's client services, com.apple.commcenter.xpc and .coretelephony.xpc: "no SIM, no
+		# service" for CoreTelephony's clients (src/telephonyd.m, com.hakios.telephonyd.plist, docs/telephonyd.md)
+		$DYN -fobjc-arc -framework Foundation -framework CoreTelephony -o obj/telephonyd src/telephonyd.m
 		$DYN -framework CoreFoundation -framework AudioToolbox -framework AVFoundation -lobjc -o obj/sound_test src/sound_test.c
 		$DYN -framework CoreFoundation -lMobileGestalt -o obj/mg_test src/mg_test.c
 		$DYN -framework CoreFoundation -framework AVFoundation -lobjc -o obj/torch_test src/torch_test.c
@@ -407,6 +419,16 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 			-o obj/HakiosTriangle src/triangle_app.m &&
 			{ ${LDID:-ldid} -Ssrc/triangle_app.entitlements obj/HakiosTriangle 2>/dev/null ||
 			  echo "build.sh: no ldid: HakiosTriangle is unsigned, which still runs (AMFI here accepts everything) but holds no entitlements"; }
+		# The GNSS receiver's live status for a person walking about with the phone: state and fix,
+		# a sky plot, C/N0 per satellite, position and accuracy, Start / Pause (src/gps_app.m).
+		# It reads gnssd's status file and posts gnssd's notifications, nothing else. ARC; the
+		# bundle is assembled beside HakiosTriangle's below. Signed like the triangle (and with
+		# tools/machosign.py where ldid is missing, as gnssd is) for an application's entitlements.
+		$DYN -fobjc-arc -framework Foundation -framework UIKit -framework CoreGraphics \
+			-o obj/HakiosGPS src/gps_app.m &&
+			{ ${LDID:-ldid} -Ssrc/gps_app.entitlements obj/HakiosGPS 2>/dev/null ||
+			  python3 ../tools/machosign.py obj/HakiosGPS src/gps_app.entitlements com.hakios.gps ||
+			  echo "build.sh: no ldid: HakiosGPS is unsigned, which still runs but holds no entitlements"; }
 		# what the device ANSWERS when an application asks what it supports
 		# (src/metal_caps.m). It takes the device from MTLCreateSystemDefaultDevice() so
 		# that the ivars behind Apple's inherited answers are filled by the registration
@@ -454,6 +476,13 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		# the GNSS bring-up's raw RPCs, SSP transactions and hub memory reads through /dev/hakios-gnss
 		# (src/gnsstool.c, docs/gnss.md)
 		$DYN -o obj/gnsstool src/gnsstool.c
+		# the GNSS receiver for iOS (src/gnssd.m, src/gnss_chip.c, docs/gnssd.md): the chip's bring-up, its fixes to
+		# locationd as com.apple.gpsd, and the status the GNSS app shows. Signed for locationd's simulation interface (its
+		# fallback, -L sim): by ldid, or by ../tools/machosign.py
+		$DYN -fobjc-arc -framework Foundation -framework CoreLocation -o obj/gnssd src/gnssd.m src/gnss_chip.c &&
+			{ ${LDID:-ldid} -Ssrc/gnssd.entitlements obj/gnssd 2>/dev/null ||
+			  python3 ../tools/machosign.py obj/gnssd src/gnssd.entitlements com.hakios.gnssd ||
+			  echo "build.sh: no ldid: gnssd is unsigned, and locationd will refuse its fixes"; }
 		# our library for inside stock Darwin programs (the jobs in INJECT are started with it)
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.dylib -framework CoreFoundation -framework IOKit -lobjc \
 			-o obj/libhakios.dylib src/inject.c
@@ -469,6 +498,9 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		# ... and inside BlueTool, so that it runs the Galaxy S9's Bluetooth scripts (BT=1, src/inject_bluetool.c)
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.bluetool.dylib -framework CoreFoundation -lMobileGestalt \
 			-o obj/libhakios.bluetool.dylib src/inject_bluetool.c
+		# ... and inside locationd, so that its GNSS device is gpsd's, which gnssd serves (src/inject_locationd.c)
+		$DYN -dynamiclib -install_name /redwood/lib/libhakios.locationd.dylib \
+			-o obj/libhakios.locationd.dylib src/inject_locationd.c
 		# ... and inside bluetoothd, so that its iAP PTY cannot stop its stack (BT=1, src/inject_bluetoothd.c)
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.bluetoothd.dylib \
 			-o obj/libhakios.bluetoothd.dylib src/inject_bluetoothd.c
@@ -522,16 +554,41 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 			# again when it is missing or tools/metal/ has changed since (its pins, the bridge, the shaders: the same hash
 			# tools/metal/mk-metal2vulkan.sh writes beside it). ARC and C++17 for AdrenoMetal's frontend; -fuse-cxa-atexit
 			# undoes the kernel's -fno-use-cxa-atexit that xnu-clang++ adds, as tools/mk-mesa.sh does.
-			V=../xnu-deps/build/metal2vulkan/out/ios
-			[ -f $V/libmetal2vulkan.dylib ] && [ "$(cat $V/built-from-tree 2>/dev/null)" = "$(cat ../tools/metal/mk-metal2vulkan.sh \
-				../tools/metal/bridge/* ../tools/metal/*.metal ../tools/metal/m2v_test.c ../tools/metal/m2v/*.patch 2>/dev/null |
-				sha256sum)" ] || ../tools/metal/mk-metal2vulkan.sh ios
+			# M2V_DIR=DIR takes a library already built (tools/metal/mk-metal2vulkan.sh ios's out/ios, anywhere) as it is.
+			V=${M2V_DIR:-../xnu-deps/build/metal2vulkan/out/ios}
+			if [ -n "${M2V_DIR:-}" ]; then
+				[ -f $V/libmetal2vulkan.dylib ] || { echo "build.sh: M2V_DIR=$V has no libmetal2vulkan.dylib" >&2; exit 1; }
+			else
+				[ -f $V/libmetal2vulkan.dylib ] && [ "$(cat $V/built-from-tree 2>/dev/null)" = "$(cat ../tools/metal/mk-metal2vulkan.sh \
+					../tools/metal/bridge/* ../tools/metal/*.metal ../tools/metal/m2v_test.c ../tools/metal/m2v/*.patch 2>/dev/null |
+					sha256sum)" ] || ../tools/metal/mk-metal2vulkan.sh ios
+			fi
 			$DYN -c -o obj/hakios_metal_shown.o src/hakios_metal_shown.c
-			xnu-clang++ -arch arm64 -isysroot ${THEOS:-$HOME/theos}/sdks/iPhoneOS16.5.sdk -O1 -fuse-cxa-atexit -std=c++17 -fobjc-arc \
-				-I../tools/metal -Isrc/metalvk -bundle -framework Foundation -framework Metal -framework IOSurface -framework IOKit \
-				-framework CoreFoundation -lobjc -o obj/HakiosMetal src/metalvk/HakiosMetalVK.mm \
-				src/metalvk/NativeBridgeMetalFrontend.mm obj/hakios_metal_shown.o $V/libmetal2vulkan.dylib
-			cp $V/libmetal2vulkan.dylib $V/m2v_test $V/m2v_test.metallib obj/
+			# the bundle's executable: the device class and who is shown it, nothing of the runtime's (no ARC: it keeps its device
+			# by hand); then HakiosMetalVK.dylib, the Metal API and the opening of the Vulkan device, which it loads at first use
+			MVKXX="xnu-clang++ -arch arm64 -isysroot ${THEOS:-$HOME/theos}/sdks/iPhoneOS16.5.sdk -O1 -fuse-cxa-atexit -std=c++17 -stdlib=libc++"
+			$MVKXX -fno-objc-arc -bundle -framework Foundation -framework Metal -framework IOKit -framework CoreFoundation -lobjc \
+				-o obj/HakiosMetal src/metalvk/HakiosMetalVK.mm obj/hakios_metal_shown.o
+			$MVKXX -fobjc-arc -I../tools/metal -Isrc/metalvk -dynamiclib -install_name /redwood/lib/HakiosMetal.bundle/HakiosMetalVK.dylib \
+				-framework Foundation -framework Metal -framework IOSurface -framework IOKit -framework CoreFoundation -lobjc \
+				-o obj/HakiosMetalVK.dylib src/metalvk/HakiosMetalVKOpen.mm src/metalvk/NativeBridgeMetalFrontend.mm \
+				obj/hakios_metal_shown.o $V/libmetal2vulkan.dylib
+			cp $V/libmetal2vulkan.dylib obj/
+			# m2v_test and its metallib only where Xcode made them (not on Linux)
+			[ -f $V/m2v_test ] && [ -f $V/m2v_test.metallib ] && cp $V/m2v_test $V/m2v_test.metallib obj/
+			# metal_tri: a triangle through the Metal API on this plug-in, checked pixel by pixel; also MetalTri.app (below). Its
+			# shaders are hand-written AIR (tools/metal/air), assembled by llvm-as and put in a library by tools/metal/mkmetallib.py.
+			$DYN -fobjc-arc -framework Foundation -framework UIKit -framework QuartzCore -framework Metal -framework IOSurface \
+				-framework IOKit -lobjc -o obj/metal_tri src/metalvk/metal_tri.m
+			# metal_libcheck: whether every function of a system library (NanoUniverse's, SiriUICore's) becomes the GPU's code
+			$DYN -fobjc-arc -framework Foundation -framework Metal -framework IOKit -lobjc -o obj/metal_libcheck \
+				src/metalvk/metal_libcheck.m
+			${LLVM_AS:-llvm-as} -o obj/tri_vertex.bc ../tools/metal/air/tri_vertex.ll
+			${LLVM_AS:-llvm-as} -o obj/tri_fragment.bc ../tools/metal/air/tri_fragment.ll
+			${LLVM_AS:-llvm-as} -o obj/tri_fetch.bc ../tools/metal/air/tri_fetch.ll
+			${LLVM_AS:-llvm-as} -o obj/tri_ycbcr.bc ../tools/metal/air/tri_ycbcr.ll
+			python3 ../tools/metal/mkmetallib.py obj/metal_tri.metallib tri_vertex:vertex:obj/tri_vertex.bc \
+				tri_fragment:fragment:obj/tri_fragment.bc tri_fetch:fragment:obj/tri_fetch.bc tri_ycbcr:fragment:obj/tri_ycbcr.bc
 			echo "build.sh: HakiosMetal is Metal on Vulkan (libmetal2vulkan.dylib, $(cat $V/built-from))"
 		elif [ "${METAL_PLUGIN:-}" = ca ]; then
 			# METAL_PLUGIN=ca: the plug-in that serves CoreAnimation's window server (src/HakiosMetalCA.m, vcvkk's with
@@ -618,6 +675,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/selftest ] && cp obj/selftest root/bin/
 	[ -f obj/jb_seed ] && cp obj/jb_seed root/bin/
 	[ -f obj/passcoded ] && cp obj/passcoded root/bin/
+	[ -f obj/telephonyd ] && cp obj/telephonyd root/bin/
 	[ -f obj/cputop ] && cp obj/cputop root/bin/
 	[ -f obj/var_sync ] && cp obj/var_sync root/bin/
 	[ -f obj/devname ] && cp obj/devname root/bin/
@@ -642,6 +700,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/wifipw_test ] && cp obj/wifipw_test root/bin/
 	[ -f obj/loctool ] && cp obj/loctool root/bin/
 	[ -f obj/gnsstool ] && cp obj/gnsstool root/bin/
+	[ -f obj/gnssd ] && cp obj/gnssd root/bin/
 	[ -f obj/aes_test ] && cp obj/aes_test root/bin/
 	[ -f obj/sound_test ] && cp obj/sound_test root/bin/
 	[ -f obj/torch_test ] && cp obj/torch_test root/bin/
@@ -705,6 +764,44 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		# and this application asks the system for nothing that needs one.
 		echo "  HakiosTriangle.app: $(du -sk obj/HakiosTriangle.app | cut -f1) KB for /Applications"
 	fi
+	# HakiosGPS.app (src/gps_app.m), the same way. Its icon is a small sky plot: two elevation
+	# rings and three satellites on a night-blue square, no alpha.
+	if [ -f obj/HakiosGPS ]; then
+		rm -rf obj/HakiosGPS.app
+		mkdir -p obj/HakiosGPS.app
+		cp obj/HakiosGPS obj/HakiosGPS.app/
+		cp src/gps_app.plist obj/HakiosGPS.app/Info.plist
+		printf 'APPL????' > obj/HakiosGPS.app/PkgInfo
+		python3 - obj/HakiosGPS.app <<-'PY'
+		import math, struct, sys, zlib
+		out = sys.argv[1]
+		dots = ((0.30, 0.32, (77, 163, 255)), (0.70, 0.40, (52, 199, 89)), (0.58, 0.74, (255, 165, 61)))
+		for size, scale in ((120, 2), (180, 3)):
+		    rows = bytearray()
+		    for y in range(size):
+		        rows.append(0)
+		        for x in range(size):
+		            u, v = (x + 0.5) / size, (y + 0.5) / size
+		            r = math.hypot(u - 0.5, v - 0.5)
+		            px = (16, 26, 46)
+		            if abs(r - 0.40) < 0.018 or abs(r - 0.20) < 0.012:
+		                px = (150, 170, 200)
+		            elif r < 0.40 and (abs(u - 0.5) < 0.006 or abs(v - 0.5) < 0.006):
+		                px = (70, 85, 110)
+		            for du, dv, c in dots:
+		                if math.hypot(u - du, v - dv) < 0.07:
+		                    px = c
+		            rows += bytes(px)
+		    def chunk(kind, body):
+		        return (struct.pack('>I', len(body)) + kind + body +
+		                struct.pack('>I', zlib.crc32(kind + body)))
+		    png = (b'\x89PNG\r\n\x1a\n' +
+		           chunk(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 2, 0, 0, 0)) +
+		           chunk(b'IDAT', zlib.compress(bytes(rows), 9)) + chunk(b'IEND', b''))
+		    open('%s/AppIcon60x60@%dx.png' % (out, scale), 'wb').write(png)
+		PY
+		echo "  HakiosGPS.app: $(du -sk obj/HakiosGPS.app | cut -f1) KB for /Applications"
+	fi
 	# /dev and /private/var exist so that this image can also be the root on its own:
 	# devfs is mounted on /dev, and init puts a ramfs on /private/var
 	mkdir -p root/dev root/private/var
@@ -713,6 +810,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/libhakios.media.dylib ] && cp obj/libhakios.media.dylib root/lib/     # (as with cpu_test)
 	[ -f obj/libhakios.app.dylib ] && cp obj/libhakios.app.dylib root/lib/
 	[ -f obj/libhakios.tweaks.dylib ] && cp obj/libhakios.tweaks.dylib root/lib/
+	[ -f obj/libhakios.locationd.dylib ] && cp obj/libhakios.locationd.dylib root/lib/
 	if [ -n "$BT" ]; then
 		[ -f obj/libhakios.bluetool.dylib ] && cp obj/libhakios.bluetool.dylib root/lib/
 		[ -f obj/libhakios.bluetoothd.dylib ] && cp obj/libhakios.bluetoothd.dylib root/lib/
@@ -730,13 +828,29 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		mkdir -p root/lib/HakiosMetal.bundle
 		cp obj/HakiosMetal root/lib/HakiosMetal.bundle/
 		cp src/HakiosMetal.plist root/lib/HakiosMetal.bundle/Info.plist
+		# METAL=vk: the half the bundle loads when a device is first used (src/metalvk/HakiosMetalVK.mm)
+		if [ "$METAL" = vk ]; then cp obj/HakiosMetalVK.dylib root/lib/HakiosMetal.bundle/; fi
 	fi
 	# METAL=vk: the runtime the plug-in links, the guest's test of it, and the Vulkan driver it opens if not the default
 	if [ -f obj/libmetal2vulkan.dylib ]; then
 		cp obj/libmetal2vulkan.dylib root/lib/
-		cp obj/m2v_test root/bin/
-		cp obj/m2v_test.metallib root/share/
+		mkdir -p root/share
+		if [ -f obj/m2v_test ]; then
+			cp obj/m2v_test root/bin/
+			cp obj/m2v_test.metallib root/share/
+		fi
 		[ -z "$METAL_ICD" ] || echo "$METAL_ICD" > root/lib/HakiosMetal.icd
+		# metal_tri and MetalTri.app open the plug-in themselves (no boot-arg): this file shows it the device
+		# (src/hakios_metal_shown.c); with boot-arg metal=N the level decides for every other process as before
+		printf 'metal_tri\nmetal_libcheck\n' > root/lib/HakiosMetal.clients
+		cp obj/metal_tri obj/metal_libcheck root/bin/
+		cp obj/metal_tri.metallib root/share/
+		rm -rf obj/MetalTri.app
+		mkdir -p obj/MetalTri.app
+		cp obj/metal_tri obj/MetalTri.app/
+		cp src/metalvk/metal_tri.plist obj/MetalTri.app/Info.plist
+		printf 'APPL????' > obj/MetalTri.app/PkgInfo
+		echo "build.sh: METAL=vk: metal_tri, share/metal_tri.metallib, MetalTri.app for /Applications (SYSTEM=1)"
 	fi
 	if [ -n "${TURNIP:-}" ]; then
 		cp obj/libvulkan_freedreno.dylib root/lib/
@@ -837,6 +951,10 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	# sshd from the prefix, when there is a key of ours to let in (com.hakios.sshd.plist; SHARE=1: never)
 	if [ -z "$SHARE" ] && [ -f ../ssh/authorized_keys ]; then cp com.hakios.sshd.plist root/LaunchDaemons/; else rm -f root/LaunchDaemons/com.hakios.sshd.plist; fi
 	[ ! -f root/bin/selftest ] || cp com.hakios.selftest.plist root/LaunchDaemons/
+	# the GNSS receiver's fixes to locationd (src/gnssd.m, docs/gnssd.md)
+	[ ! -f root/bin/gnssd ] || cp com.hakios.gnssd.plist root/LaunchDaemons/
+	# CoreTelephony's server, saying "no SIM" (src/telephonyd.m, docs/telephonyd.md)
+	[ ! -f root/bin/telephonyd ] || cp com.hakios.telephonyd.plist root/LaunchDaemons/
 	[ -z "$JB_KEPT_ONLY" ] || : > root/etc/jb.kept-only     # init: no graft on a memory filesystem (src/init.c)
 	VOLUME=""
 	[ -n "$FLASHBOOT" ] && [ -f $DARWIN/rootfs.slt ] && VOLUME="--root-volume $DARWIN/rootfs.slt"
@@ -1092,6 +1210,9 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	# where the kernel mounts the Darwin root container off the phone's flash (boot-arg apfs_volume=):
 	# Darwin has no /System/Volumes, and nothing can make a directory in this image once it is built
 	mkdir -p sysroot/System/Volumes/Darwin
+	# which system image this is: on a kept /private/var, init has lsd build its database again when it changes
+	# (src/init.c, forget_launchservices_on_new_image: every image is 20F66, so LaunchServices never sees one change)
+	cat /proc/sys/kernel/random/uuid > sysroot/.scion-system-stamp
 	# the applications Darwin installs on its first boot are system applications here (see select-system.py)
 	if [ -d sysroot/private/var/staged_system_apps ]; then
 		mv sysroot/private/var/staged_system_apps/* sysroot/Applications/
@@ -1170,6 +1291,15 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 		cp -a obj/HakiosTriangle.app sysroot/Applications/
 		echo "  HakiosTriangle.app in /Applications (com.hakios.triangle, scheme hakiostriangle:)"
 	fi
+	if [ -d obj/HakiosGPS.app ]; then
+		cp -a obj/HakiosGPS.app sysroot/Applications/
+		echo "  HakiosGPS.app in /Applications (com.hakios.gps, scheme hakiosgps:)"
+	fi
+	# METAL=vk: a triangle drawn by Metal on the Mali (src/metalvk/metal_tri.m), only in an image built with it
+	if [ "$METAL" = vk ] && [ -d obj/MetalTri.app ]; then
+		cp -a obj/MetalTri.app sysroot/Applications/
+		echo "  MetalTri.app in /Applications (com.hakios.metaltri)"
+	fi
 	# Applications from outside this tree: every .app in ../apps, which is kept out of the
 	# repository the way ../fw-* and ../jb are, so that nothing of somebody else's package can
 	# reach it. They go into /Applications beside the port's own on exactly the same terms --
@@ -1185,6 +1315,11 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 		echo "${app##*/}" >> sysroot/Applications/.extra-apps
 		echo "  ${app##*/} in /Applications ($(du -sm "$app" | cut -f1) MB from ../apps)"
 	done
+	# ... and the port's own applications put there above: LaunchServices does not walk /Applications again on a kept
+	# /private/var, so a new one (or a new build of one) is registered by jb_seed the same way
+	for app in HakiosTriangle.app HakiosGPS.app MetalTri.app; do
+		[ -d "sysroot/Applications/$app" ] && echo "$app" >> sysroot/Applications/.extra-apps
+	done
 	# our audio device, where the audio server looks for such plug-ins (and for no others: Apple's are left out)
 	mkdir -p sysroot/System/Library/Audio/Plug-Ins/HAL
 	ln -s /redwood/lib/HakiosAudio.driver sysroot/System/Library/Audio/Plug-Ins/HAL/HakiosAudio.driver
@@ -1195,6 +1330,9 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	[ -d root/lib/HakiosMetal.bundle ] && ln -sfn /redwood/lib/HakiosMetal.bundle sysroot/System/Library/Extensions/HakiosMetal.bundle
 	# METAL_ICD's file is read "beside the bundle", which is either directory depending on the path the bundle was loaded by
 	if [ -f root/lib/HakiosMetal.icd ]; then ln -sfn /redwood/lib/HakiosMetal.icd sysroot/System/Library/Extensions/HakiosMetal.icd; fi
+	if [ -f root/lib/HakiosMetal.clients ]; then
+		ln -sfn /redwood/lib/HakiosMetal.clients sysroot/System/Library/Extensions/HakiosMetal.clients
+	fi
 	# the OS cryptex: on a device a separate volume grafted at /System/Cryptexes/OS. It holds the dyld
 	# shared cache (dyld looks there first) and a few libraries and resources outside the cache.
 	mkdir -p sysroot/System/Cryptexes

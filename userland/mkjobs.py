@@ -85,6 +85,10 @@ import sys
 # Stubbing the first driver is the kind of work HakiosBattery already is, but the second is an Apple
 # baseband on PCIe, and this phone's modem is on the SoC and speaks QMI to a Qualcomm subsystem -- so what
 # is behind the driver is missing too, not just the driver.
+# Its two client services are answered all the same, by com.hakios.telephonyd (src/telephonyd.m, docs/telephonyd.md):
+# com.apple.commcenter.xpc and com.apple.commcenter.coretelephony.xpc, with "no SIM, no service". Without them
+# SpringBoard rebuilt its CTServerConnection about once a second while the display was on, resetting the idle
+# timer each time, and the screen never turned itself off.
 # cloudd and appstored are IN, and getting there was the most instructive thing in this file.
 # They looked like daemons that cost the home screen: with them the boot reached 76-78 processes against
 # 119 and not one widget or poster started, and on the phone it was worse still -- 42 processes against
@@ -245,7 +249,11 @@ DENY = ('watchdog', 'CommCenter', 'wifi', 'WiFi', 'bluetooth', 'BTServer', 'soft
         # Darwin userland 16 keeps its power log -- com.apple.powerlog.plxpclogger.xpc and the rest -- that Settings > Battery
         # waits for; it now runs through a session.)
         'homed', 'routined', 'com.apple.dmd', 'syncdefaultsd', 'photoanalysisd', 'avconferenced',
-        'com.apple.atc')
+        'com.apple.atc',
+        # Apple's gpsd: its Mach service, com.apple.gpsd, is where locationd asks for GNSS, and here it is our
+        # com.hakios.gnssd that answers it (src/gnssd.m, docs/gnssd.md): two jobs cannot claim one service, and Apple's
+        # drives GNSS hardware of Apple's own (GnssHalCommUart/Spi, the AOP's passthrough) that this phone has not got.
+        'com.apple.gpsd')
 
 # vmd is the voicemail daemon. Something in the phone stack starts it on demand, and with
 # CommCenter denied (above) it spins asking for com.apple.commcenter.coretelephony.xpc: 102% of a

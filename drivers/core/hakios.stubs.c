@@ -139,6 +139,10 @@ const char *hakios_exynos_camera_shot(__unused uint32_t n, __unused int pattern)
 #ifndef HAKIOS_EXYNOS_TEE
 void hakios_exynos_tee_init(void) {}
 #endif
+#ifndef HAKIOS_SHANNON
+void hakios_shannon_init(void);
+void hakios_shannon_init(void) {}
+#endif
 #ifndef HAKIOS_EXYNOS_IRIS
 void hakios_exynos_iris_init(void) {}
 void hakios_exynos_iris_quiesce(void) {}
@@ -263,6 +267,13 @@ int hakios_scanout_carve(__unused uint64_t bytes, __unused uint64_t *phys) { ret
 void hakios_scanout_uncarve(__unused uint64_t phys) {}
 int hakios_scanout_carved(__unused uint64_t phys) { return 0; }
 int hakios_scanout_show(__unused uint64_t phys, __unused uint32_t rowbytes) { return -1; }
+int hakios_scanout_planes(uint64_t upper, uint32_t upper_rowbytes, uint64_t lower, uint32_t lower_rowbytes, uint32_t x,
+    uint32_t y, uint32_t w, uint32_t h);
+int hakios_scanout_planes(__unused uint64_t upper, __unused uint32_t upper_rowbytes, __unused uint64_t lower,
+    __unused uint32_t lower_rowbytes, __unused uint32_t x, __unused uint32_t y, __unused uint32_t w, __unused uint32_t h)
+{
+	return -1;
+}
 #endif
 
 #ifndef HAKIOS_USB_GADGET

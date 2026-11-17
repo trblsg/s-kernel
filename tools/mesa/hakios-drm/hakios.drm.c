@@ -29,16 +29,22 @@
 #include <unistd.h>
 
 #include <IOKit/IOKitLib.h>
+#include <mach/mach.h>
 
 #define HAKIOS_DRM_DEVICES 1           /* (xf86drm.h: the device list is this file's to give) */
 #include "xf86drm.h"
 #include "drm-uapi/msm_drm.h"
 #include "drm-uapi/panfrost_drm.h"
 
-#define HAKIOS_GPU_USER_MEMORY 0x7d            /* the Adreno service's too: pages of this process as a buffer */
+#define HAKIOS_GPU_USER_MEMORY 0x7d            /* the Adreno service's: pages of this process as a buffer */
+#define HAKIOS_MALI_USER_MEMORY 0x7b           /* HakiosMali's, the same request (its 0x7d is a wait) */
 #define HAKIOS_GPU_SURFACE     0x7e            /* the request that is not Linux's (both services) */
 #define HAKIOS_GPU_DESCRIBE    0xffffffffu     /* ... asked only what the buffer would be like */
 #define HAKIOS_MALI_WAIT       0x7d            /* HakiosMali's own: wait for a job by its number */
+#define HAKIOS_MALI_SYNC       0x7a            /* HakiosMali's own: a range of a buffer's lines cleaned and invalidated */
+#define HAKIOS_MALI_WRITTEN    0x79            /* HakiosMali's own: a surface's pixels written by work this process submitted */
+#define HAKIOS_MALI_PARAM_WRITTEN 0x7900       /* HakiosMali's parameter: 1 where bo_handles may carry HAKIOS_DRM_BO_WRITTEN */
+#define HAKIOS_MALI_PARAM_SAMPLED 0x7901       /* ... and 1 where they may carry HAKIOS_DRM_BO_SAMPLED */
 
 /* The kernel's services, by the names of the Linux drivers they stand in for. */
 static const struct service {
@@ -162,7 +168,10 @@ call(unsigned number, void *data, size_t size)
 }
 
 static int submit(struct drm_panfrost_submit *request);
+static void forget_mapping(uint32_t handle);
+static void forget_surface_handle(uint32_t handle);
 static int wait_buffer(struct drm_panfrost_wait_bo *request);
+static bool pan_syncobj_ioctl(unsigned number, void *arg, int *error);
 
 int
 drmIoctl(int fd, unsigned long request, void *arg)
@@ -175,7 +184,13 @@ drmIoctl(int fd, unsigned long request, void *arg)
 		error = submit(arg);
 	} else if (opened == PANFROST && number == DRM_COMMAND_BASE + DRM_PANFROST_WAIT_BO) {
 		error = wait_buffer(arg);
+	} else if (opened == PANFROST && pan_syncobj_ioctl(number, arg, &error)) {
+		/* (done there) */
 	} else {
+		if (number == (DRM_IOCTL_GEM_CLOSE & 0xff)) {
+			forget_mapping(((struct drm_gem_close *)arg)->handle);
+			forget_surface_handle(((struct drm_gem_close *)arg)->handle);
+		}
 		error = call(number, arg, IOCPARM_LEN(request));
 	}
 	if (error != 0) {
@@ -256,11 +271,52 @@ drmCloseBufferHandle(int fd, uint32_t handle)
 	return drmIoctl(fd, DRM_IOCTL_GEM_CLOSE, &request);
 }
 
+/*
+ * A buffer's mapping is one per process here: IOKit gives a task that maps the same memory again the
+ * mapping it already has, where Linux's mmap() makes a new one each time. So a buffer mapped twice
+ * (PanVK maps a VkBuffer that covers its whole VkDeviceMemory as well as the memory itself) is one
+ * mapping with two users, counted here, and it goes when the last of them unmaps it. Unmapping it at
+ * the first left the second user's unmap over a hole: a VM guard exception (kGUARD_EXC_DEALLOC_GAP),
+ * fatal in applications and app extensions, on every device PanVK opened (docs/metal.md, build 45).
+ */
+static struct mapped {
+	uint32_t handle, users;
+	mach_vm_address_t address;
+} *maps;
+static uint32_t map_count;
+static pthread_mutex_t map_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* (with map_lock held) the entry of HANDLE, or NULL */
+static struct mapped *
+mapped_of(uint32_t handle)
+{
+	for (uint32_t i = 0; i < map_count; i++) {
+		if (maps[i].users != 0 && maps[i].handle == handle) {
+			return &maps[i];
+		}
+	}
+	return NULL;
+}
+
+/* a buffer closed (GEM_CLOSE): its mapping goes with its memory, and its handle may come back for another */
+static void
+forget_mapping(uint32_t handle)
+{
+	struct mapped *m;
+
+	pthread_mutex_lock(&map_lock);
+	if ((m = mapped_of(handle)) != NULL) {
+		m->users = 0;
+	}
+	pthread_mutex_unlock(&map_lock);
+}
+
 void *
 hakios_drm_map(int fd, uint32_t handle, uint64_t size)
 {
 	mach_vm_address_t address = 0;
 	mach_vm_size_t mapped = 0;
+	struct mapped *m;
 
 	(void)fd;
 	(void)size;
@@ -268,24 +324,59 @@ hakios_drm_map(int fd, uint32_t handle, uint64_t size)
 		void *memory = noop_map(handle);
 		return memory != NULL ? memory : (void *)-1;
 	}
+	pthread_mutex_lock(&map_lock);
+	if ((m = mapped_of(handle)) != NULL) {
+		m->users++;
+		pthread_mutex_unlock(&map_lock);
+		return (void *)(uintptr_t)m->address;
+	}
 	/*
 	 * Linux gives freedreno and panfrost their buffers write-combined, with no cache of this
 	 * processor's between the program and the memory the GPU sees. So do the kernel's drivers
 	 * here: the memory is made that way, and this mapping is as the memory is.
 	 */
 	if (IOConnectMapMemory64(connection, handle, mach_task_self(), &address, &mapped, kIOMapAnywhere) != 0) {
+		pthread_mutex_unlock(&map_lock);
 		return (void *)-1;              /* mmap()'s MAP_FAILED */
 	}
+	for (m = maps; m != NULL && m < maps + map_count && m->users != 0; m++) {
+	}
+	if (m == NULL || m == maps + map_count) {
+		struct mapped *grown = realloc(maps, (map_count + 64) * sizeof(*grown));
+
+		if (grown == NULL) {
+			IOConnectUnmapMemory64(connection, handle, mach_task_self(), address);
+			pthread_mutex_unlock(&map_lock);
+			return (void *)-1;
+		}
+		memset(grown + map_count, 0, 64 * sizeof(*grown));
+		m = grown + map_count;
+		maps = grown;
+		map_count += 64;
+	}
+	*m = (struct mapped){ handle, 1, address };
+	pthread_mutex_unlock(&map_lock);
 	return (void *)(uintptr_t)address;
 }
 
 void
 hakios_drm_unmap(int fd, uint32_t handle, void *address)
 {
+	struct mapped *m;
+
 	(void)fd;
 	if (hakios_drm_noop()) {
 		return;                 /* (the memory goes with the buffer: GEM_CLOSE) */
 	}
+	pthread_mutex_lock(&map_lock);
+	if ((m = mapped_of(handle)) != NULL) {
+		if (--m->users != 0) {
+			pthread_mutex_unlock(&map_lock);
+			return;         /* (another user still has it) */
+		}
+		address = (void *)(uintptr_t)m->address;   /* (the user may hold a pointer into it, not its start) */
+	}
+	pthread_mutex_unlock(&map_lock);
 	IOConnectUnmapMemory64(connection, handle, mach_task_self(), (mach_vm_address_t)(uintptr_t)address);
 }
 
@@ -304,6 +395,49 @@ hakios_drm_surface(int fd, struct hakios_drm_surface *surface)
 	return 0;
 }
 
+/*
+ * The kernel's buffers of IOSurfaces in this process (drmPrimeFDToHandle), by the surface's ID, for
+ * hakios_drm_surface_written(): the latest buffer of each surface, until it is closed.
+ */
+#define SURFACE_HANDLES 1024
+static struct { uint32_t surface, handle; } surface_handles[SURFACE_HANDLES];
+static unsigned surface_handles_next;
+static pthread_mutex_t surface_handles_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void
+note_surface_handle(uint32_t surface, uint32_t handle)
+{
+	unsigned i, free_slot = SURFACE_HANDLES;
+
+	pthread_mutex_lock(&surface_handles_lock);
+	for (i = 0; i < SURFACE_HANDLES; i++) {
+		if (surface_handles[i].surface == surface) {
+			break;
+		}
+		if (surface_handles[i].surface == 0 && free_slot == SURFACE_HANDLES) {
+			free_slot = i;
+		}
+	}
+	if (i == SURFACE_HANDLES) {
+		i = free_slot != SURFACE_HANDLES ? free_slot : surface_handles_next++ % SURFACE_HANDLES;
+	}
+	surface_handles[i].surface = surface;
+	surface_handles[i].handle = handle;
+	pthread_mutex_unlock(&surface_handles_lock);
+}
+
+static void
+forget_surface_handle(uint32_t handle)
+{
+	pthread_mutex_lock(&surface_handles_lock);
+	for (unsigned i = 0; i < SURFACE_HANDLES; i++) {
+		if (surface_handles[i].surface != 0 && surface_handles[i].handle == handle) {
+			surface_handles[i].surface = 0;
+		}
+	}
+	pthread_mutex_unlock(&surface_handles_lock);
+}
+
 int
 drmPrimeFDToHandle(int fd, int surface, uint32_t *handle)
 {
@@ -316,6 +450,38 @@ drmPrimeFDToHandle(int fd, int surface, uint32_t *handle)
 		return -1;
 	}
 	*handle = request.handle;
+	if (surface != 0) {
+		note_surface_handle((uint32_t)surface, request.handle);
+	}
+	return 0;
+}
+
+__attribute__((visibility("default")))     /* (called by the Metal frontend, outside the driver) */
+int
+hakios_drm_surface_written(uint32_t surface)
+{
+	struct { uint32_t handle, surface; } request = { 0, surface };   /* struct mali_written */
+	int error = ENOENT;
+
+	if (opened != PANFROST) {
+		errno = ENOSYS;
+		return -1;
+	}
+	pthread_mutex_lock(&surface_handles_lock);
+	for (unsigned i = 0; surface != 0 && i < SURFACE_HANDLES; i++) {
+		if (surface_handles[i].surface == surface) {
+			request.handle = surface_handles[i].handle;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&surface_handles_lock);
+	if (request.handle != 0) {
+		error = call(HAKIOS_MALI_WRITTEN, &request, sizeof(request));
+	}
+	if (error != 0) {
+		errno = error;
+		return -1;
+	}
 	return 0;
 }
 
@@ -336,6 +502,7 @@ none(void)
  */
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t submitted;              /* the last job number the kernel gave (to this process) */
+static pthread_cond_t pan_given = PTHREAD_COND_INITIALIZER;     /* a sync object was given a job or signalled */
 static uint64_t finished;               /* a job known to be done, and with it every one before it */
 
 /*
@@ -396,12 +563,65 @@ static uint64_t *pan_syncobj(uint32_t handle);
  * wait for before the job (in_syncs) are looked at neither here nor by the kernel: they can only
  * stand for jobs given before this one, which the queue has run by the time this one begins.
  */
+/*
+ * Whether the kernel takes HAKIOS_DRM_BO_WRITTEN on a submission's handles, and HAKIOS_DRM_BO_SAMPLED (asked once each): one
+ * that does not would find no buffer of such a handle, so the bit is taken off for it.
+ */
+static bool
+handle_bit_taken(uint64_t parameter, int *taken)
+{
+	if (*taken < 0) {
+		struct drm_panfrost_get_param param = { .param = parameter };
+
+		*taken = call(DRM_COMMAND_BASE + DRM_PANFROST_GET_PARAM, &param, sizeof(param)) == 0 && param.value == 1;
+	}
+	return *taken;
+}
+
+static bool
+written_handles(void)
+{
+	static int taken = -1;
+
+	return handle_bit_taken(HAKIOS_MALI_PARAM_WRITTEN, &taken);
+}
+
+static bool
+sampled_handles(void)
+{
+	static int taken = -1;
+
+	return handle_bit_taken(HAKIOS_MALI_PARAM_SAMPLED, &taken);
+}
+
 static int
 submit(struct drm_panfrost_submit *request)
 {
-	uint64_t chain = request->jc, seq, *fence;
-	int error = call(DRM_COMMAND_BASE + DRM_PANFROST_SUBMIT, request, sizeof(*request));
+	uint64_t chain = request->jc, handles = request->bo_handles, seq, *fence;
+	uint32_t *given = (uint32_t *)(uintptr_t)request->bo_handles, *plain = NULL;
+	int error;
 
+	for (uint32_t i = 0; i < request->bo_handle_count; i++) {
+		uint32_t untaken = ((given[i] & HAKIOS_DRM_BO_WRITTEN) && !written_handles() ? HAKIOS_DRM_BO_WRITTEN : 0) |
+		    ((given[i] & HAKIOS_DRM_BO_SAMPLED) && !sampled_handles() ? HAKIOS_DRM_BO_SAMPLED : 0);
+
+		if (untaken != 0) {
+			uint32_t strip = (written_handles() ? 0 : HAKIOS_DRM_BO_WRITTEN) | (sampled_handles() ? 0 : HAKIOS_DRM_BO_SAMPLED);
+
+			plain = malloc(request->bo_handle_count * sizeof(*plain));
+			if (plain == NULL) {
+				return ENOMEM;
+			}
+			for (uint32_t k = 0; k < request->bo_handle_count; k++) {
+				plain[k] = given[k] & ~strip;
+			}
+			request->bo_handles = (uintptr_t)plain;
+			break;
+		}
+	}
+	error = call(DRM_COMMAND_BASE + DRM_PANFROST_SUBMIT, request, sizeof(*request));
+	request->bo_handles = handles;
+	free(plain);
 	if (error != 0) {
 		return error;
 	}
@@ -411,6 +631,7 @@ submit(struct drm_panfrost_submit *request)
 	submitted = seq > submitted ? seq : submitted;
 	if (request->out_sync != 0 && (fence = pan_syncobj(request->out_sync)) != NULL) {
 		*fence = seq;
+		pthread_cond_broadcast(&pan_given);
 	}
 	pthread_mutex_unlock(&lock);
 	return 0;
@@ -439,12 +660,24 @@ wait_buffer(struct drm_panfrost_wait_bo *request)
 /*
  * Linux's fences that a program holds by a handle. Here, for panfrost, each is the number of the
  * job it waits for, kept in this process: the kernel has no fences, it has numbers. 0 is no job,
- * nothing to wait for -- a sync object made signalled, and one made without a fence (Linux would
- * refuse to wait on that, which panfrost never asks). Waiting for several is waiting for the
- * highest of their numbers (all of them) or the lowest (any), since the jobs end in order.
- * freedreno waits by requests of its own and has none of these, as before (ENOSYS).
+ * nothing to wait for: a sync object made signalled, or signalled by the CPU. SYNCOBJ_UNSUBMITTED is
+ * one without a fence yet (made unsignalled, or reset), which no job has been given since.
+ * Waiting for several is waiting for the highest of their numbers (all of them) or the lowest (any),
+ * since the jobs end in order. freedreno waits by requests of its own and has none of these, as
+ * before (ENOSYS).
+ *
+ * A sync object without a fence is waited for as Linux does with DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT:
+ * until a submission gives it a job (or the CPU signals it), then for that job. Vulkan's common code
+ * waits that way for every fence and semaphore (vk_drm_syncobj.c), and it has to: with timelines
+ * emulated (vk_sync_timeline, there being no DRM_CAP_SYNCOBJ_TIMELINE here) the queue submits from a
+ * thread of its own, so vkQueueSubmit can return before the fence's job is given, and a wait that
+ * took the fence for done returned before the GPU had run anything (docs/metal.md, 14 November: a
+ * Metal texture read back with -getBytes: had lines of zeroes, read before its copy had run).
+ * Without that flag, which panfrost's OpenGL ES never gives, such a sync object counts as signalled,
+ * as before; Linux would refuse the wait (EINVAL).
  */
-#define SYNCOBJ_FREE    UINT64_MAX
+#define SYNCOBJ_FREE            UINT64_MAX
+#define SYNCOBJ_UNSUBMITTED     (UINT64_MAX - 1)
 static uint64_t *pan_syncobjs;              /* handle n is pan_syncobjs[n - 1]: its job, or SYNCOBJ_FREE */
 static uint32_t pan_syncobj_count;
 
@@ -464,7 +697,6 @@ pan_drmSyncobjCreate(int fd, uint32_t flags, uint32_t *handle)
 	uint32_t i;
 
 	(void)fd;
-	(void)flags;            /* (signalled or without a fence: no job either way) */
 	if (opened != PANFROST) {
 		return none();
 	}
@@ -486,7 +718,7 @@ pan_drmSyncobjCreate(int fd, uint32_t flags, uint32_t *handle)
 		pan_syncobjs = grown;
 		pan_syncobj_count = count;
 	}
-	pan_syncobjs[i] = 0;
+	pan_syncobjs[i] = (flags & DRM_SYNCOBJ_CREATE_SIGNALED) ? 0 : SYNCOBJ_UNSUBMITTED;
 	*handle = i + 1;
 	pthread_mutex_unlock(&lock);
 	return 0;
@@ -525,21 +757,23 @@ pan_drmSyncobjReset(int fd, const uint32_t *handles, uint32_t count)
 	pthread_mutex_lock(&lock);
 	for (uint32_t i = 0; i < count; i++) {
 		if ((fence = pan_syncobj(handles[i])) != NULL) {
-			*fence = 0;
+			*fence = SYNCOBJ_UNSUBMITTED;
 		}
 	}
 	pthread_mutex_unlock(&lock);
 	return 0;
 }
 
-/* As libdrm's: 0, or minus an errno (ETIME: not done by the deadline, a moment of Mesa's clock). */
+/* As libdrm's: 0, or minus an errno, which errno is too (ETIME: not done by the deadline, a moment of Mesa's clock). */
 int
 pan_drmSyncobjWait(int fd, uint32_t *handles, unsigned count, int64_t timeout_nsec, unsigned flags,
     uint32_t *first_signaled)
 {
 	bool all = (flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL) != 0;
-	uint64_t seq = 0, *fence;
-	unsigned first = 0;
+	bool for_submit = (flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT) != 0;
+	uint64_t seq = 0, job, *fence;
+	unsigned first = 0, given;
+	int64_t left;
 	int error;
 
 	(void)fd;
@@ -547,25 +781,108 @@ pan_drmSyncobjWait(int fd, uint32_t *handles, unsigned count, int64_t timeout_ns
 		return -ENOSYS;
 	}
 	pthread_mutex_lock(&lock);
-	for (unsigned i = 0; i < count; i++) {
-		if ((fence = pan_syncobj(handles[i])) == NULL) {
-			pthread_mutex_unlock(&lock);
-			return -EINVAL;
+	for (;;) {
+		given = 0;
+		for (unsigned i = 0; i < count; i++) {
+			if ((fence = pan_syncobj(handles[i])) == NULL) {
+				pthread_mutex_unlock(&lock);
+				errno = EINVAL;
+				return -EINVAL;
+			}
+			given += *fence != SYNCOBJ_UNSUBMITTED;
 		}
-		if (i == 0 || (all ? *fence > seq : *fence < seq)) {
-			seq = *fence;
+		/* every one has a job (all), or one has (any); without the flag, none has to */
+		if (!for_submit || given == count || (!all && given != 0)) {
+			break;
+		}
+		if ((left = left_ns(timeout_nsec)) == 0) {
+			pthread_mutex_unlock(&lock);
+			errno = ETIME;
+			return -ETIME;
+		}
+		struct timespec slice = { 0, left < 10000000 ? left : 10000000 };
+		pthread_cond_timedwait_relative_np(&pan_given, &lock, &slice);
+	}
+	for (unsigned i = 0, chosen = 0; i < count; i++) {
+		job = *pan_syncobj(handles[i]);
+		if (job == SYNCOBJ_UNSUBMITTED) {
+			if (for_submit) {
+				continue;       /* (any: another one has a job) */
+			}
+			job = 0;
+		}
+		if (!chosen++ || (all ? job > seq : job < seq)) {
+			seq = job;
 			first = i;
 		}
 	}
 	pthread_mutex_unlock(&lock);
 	error = wait_job(seq, timeout_nsec);
 	if (error != 0) {
-		return error == ETIMEDOUT ? -ETIME : -error;
+		errno = error == ETIMEDOUT ? ETIME : error;
+		return -errno;
 	}
 	if (first_signaled != NULL) {
 		*first_signaled = first;
 	}
 	return 0;
+}
+
+/*
+ * PanVK's JM backend makes some of its sync object calls as ioctls of their own, not through libdrm's
+ * functions (panvk_vX_queue.c: a submission's fence handed to the semaphores it signals, through a
+ * sync file; panvk_vX_event.c: VkEvents). Those are the same sync objects as above, kept in this
+ * process; the kernel has none. True when NUMBER is one of them, with what it gave in ERROR (0 or
+ * an errno). Panfrost's OpenGL ES uses libdrm's functions only.
+ */
+int pan_drmSyncobjSignal(int fd, const uint32_t *handles, uint32_t count);
+
+static bool
+pan_syncobj_ioctl(unsigned number, void *arg, int *error)
+{
+	int result;
+
+	errno = 0;
+	if (number == (DRM_IOCTL_SYNCOBJ_CREATE & 0xff)) {
+		struct drm_syncobj_create *create = arg;
+
+		result = pan_drmSyncobjCreate(-1, create->flags, &create->handle);
+	} else if (number == (DRM_IOCTL_SYNCOBJ_DESTROY & 0xff)) {
+		result = pan_drmSyncobjDestroy(-1, ((struct drm_syncobj_destroy *)arg)->handle);
+	} else if (number == (DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD & 0xff)) {
+		struct drm_syncobj_handle *handle = arg;
+
+		if (!(handle->flags & DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE)) {
+			*error = ENOSYS;        /* (a sync object as a descriptor of its own: none here) */
+			return true;
+		}
+		result = pan_drmSyncobjExportSyncFile(-1, handle->handle, &handle->fd);
+	} else if (number == (DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE & 0xff)) {
+		struct drm_syncobj_handle *handle = arg;
+
+		if (!(handle->flags & DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE)) {
+			*error = ENOSYS;
+			return true;
+		}
+		result = pan_drmSyncobjImportSyncFile(-1, handle->handle, handle->fd);
+	} else if (number == (DRM_IOCTL_SYNCOBJ_WAIT & 0xff)) {
+		struct drm_syncobj_wait *wait = arg;
+
+		result = pan_drmSyncobjWait(-1, (uint32_t *)(uintptr_t)wait->handles, wait->count_handles, wait->timeout_nsec,
+		    wait->flags, &wait->first_signaled);
+	} else if (number == (DRM_IOCTL_SYNCOBJ_RESET & 0xff)) {
+		struct drm_syncobj_array *array = arg;
+
+		result = pan_drmSyncobjReset(-1, (const uint32_t *)(uintptr_t)array->handles, array->count_handles);
+	} else if (number == (DRM_IOCTL_SYNCOBJ_SIGNAL & 0xff)) {
+		struct drm_syncobj_array *array = arg;
+
+		result = pan_drmSyncobjSignal(-1, (const uint32_t *)(uintptr_t)array->handles, array->count_handles);
+	} else {
+		return false;
+	}
+	*error = result == 0 ? 0 : errno != 0 ? errno : EINVAL;
+	return true;
 }
 
 /*
@@ -612,7 +929,7 @@ pan_drmSyncobjExportSyncFile(int fd, uint32_t handle, int *sync_file_fd)
 	}
 	sync_files[sync_file_next % SYNC_FILES].used = true;
 	sync_files[sync_file_next % SYNC_FILES].fd = file;
-	sync_files[sync_file_next % SYNC_FILES].seq = *fence;
+	sync_files[sync_file_next % SYNC_FILES].seq = *fence != SYNCOBJ_UNSUBMITTED ? *fence : 0;
 	sync_file_next++;
 	pthread_mutex_unlock(&lock);
 	*sync_file_fd = file;
@@ -641,6 +958,7 @@ pan_drmSyncobjImportSyncFile(int fd, uint32_t handle, int sync_file_fd)
 		}
 	}
 	*fence = seq;
+	pthread_cond_broadcast(&pan_given);
 	pthread_mutex_unlock(&lock);
 	return 0;
 }
@@ -1056,7 +1374,7 @@ int
 hakios_drm_user_memory(int fd, const void *address, uint64_t size, uint32_t *handle)
 {
 	struct { uint64_t address, size; uint32_t handle, flags; } request = { (uintptr_t)address, size, 0, 0 };
-	int error = call(HAKIOS_GPU_USER_MEMORY, &request, sizeof(request));
+	int error = call(opened == PANFROST ? HAKIOS_MALI_USER_MEMORY : HAKIOS_GPU_USER_MEMORY, &request, sizeof(request));
 
 	(void)fd;
 	if (error != 0) {
@@ -1065,6 +1383,63 @@ hakios_drm_user_memory(int fd, const void *address, uint64_t size, uint32_t *han
 	}
 	*handle = request.handle;
 	return 0;
+}
+
+/*
+ * Bytes `offset` to `offset + size` of buffer `handle` cleaned and invalidated in the processors' caches, to the point of
+ * coherency (HakiosMali's request 0x7a): a buffer of this process's own pages (hakios_drm_user_memory) is cached memory,
+ * which the Mali does not see through those caches. The kernel does it at the instruction's own cost; this process
+ * cannot (its DC CIVAC traps with the Exynos M3s up, xnu patch 1511, and sys_dcache_flush() is a DSB alone). ENOSYS
+ * from a kernel without the request; the Adreno's service has none.
+ */
+int
+hakios_drm_sync(int fd, uint32_t handle, uint64_t offset, uint64_t size)
+{
+	struct { uint32_t handle, flags; uint64_t offset, size; } request = { handle, 0, offset, size };
+	int error = opened == PANFROST ? call(HAKIOS_MALI_SYNC, &request, sizeof(request)) : ENOSYS;
+
+	(void)fd;
+	if (error != 0) {
+		errno = error;
+		return -1;
+	}
+	return 0;
+}
+
+/*
+ * Whether no processor can write the pages at `address` (`size` bytes) from now on, so that their lines, once cleaned, stay
+ * clean: every region over them is mapped here only (private, its memory held by nothing else: one reference), and read-only
+ * for good (its maximum protection lacks VM_PROT_WRITE, which can only be lowered). A mapping made from one of them (vm_remap,
+ * a memory entry) is read-only for good as well; a copy made writable (VM_PROT_COPY) is other pages. The window server's
+ * largest no-copy buffers are such pages (CoreAnimation's decoded images: 9 MB, 6.9 MB and 1.7 MB on the home screen), whose
+ * 18 MB were cleaned at every frame (docs/metal.md, phase 9). Anything else, shared or writable anywhere, is not.
+ */
+int
+hakios_drm_host_pages_sealed(const void *address, uint64_t size)
+{
+	vm_address_t at = (vm_address_t)address, end = at + size;
+
+	while (at < end) {
+		vm_address_t base = at, extBase = at;
+		vm_size_t length = 0, extLength = 0;
+		vm_region_basic_info_data_64_t basic;
+		vm_region_extended_info_data_t extended;
+		mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64, extCount = VM_REGION_EXTENDED_INFO_COUNT;
+		mach_port_t object = MACH_PORT_NULL, extObject = MACH_PORT_NULL;
+
+		if (vm_region_64(mach_task_self(), &base, &length, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&basic, &count,
+		    &object) != KERN_SUCCESS || base > at ||
+		    vm_region_64(mach_task_self(), &extBase, &extLength, VM_REGION_EXTENDED_INFO, (vm_region_info_t)&extended,
+		    &extCount, &extObject) != KERN_SUCCESS || extBase != base) {
+			return 0;
+		}
+		if (basic.shared || (basic.max_protection & VM_PROT_WRITE) || extended.share_mode != SM_PRIVATE ||
+		    extended.ref_count != 1) {
+			return 0;
+		}
+		at = base + length;
+	}
+	return 1;
 }
 
 /*
@@ -1124,6 +1499,7 @@ pan_drmSyncobjSignal(int fd, const uint32_t *handles, uint32_t count)
 	for (uint32_t i = 0; i < count; i++) {
 		*pan_syncobj(handles[i]) = 0;
 	}
+	pthread_cond_broadcast(&pan_given);
 	pthread_mutex_unlock(&lock);
 	return 0;
 }

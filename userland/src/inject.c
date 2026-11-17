@@ -503,7 +503,7 @@ my_function_uniform(void *context, unsigned index, size_t components, size_t cou
 	orig_function_uniform(context, index, components, count, values);
 }
 
-/* ---- backboardd: the window server stays on OpenGL ES ------------------------------------------ */
+/* ---- backboardd: the window server on Metal or on OpenGL ES ------------------------------------- */
 
 /*
  * With the Metal properties on the accelerator service (boot-arg metal=1) MTLCreateSystemDefaultDevice()
@@ -536,9 +536,19 @@ my_function_uniform(void *context, unsigned index, size_t components, size_t cou
  * already paying. The device is retained and never released on purpose: what our driver's -dealloc
  * would do to a GPU this same process is drawing on through Mesa is not measured.
  *
- * Boot-arg camtl=1 leaves the device where it is, for the boot that means to put CoreAnimation on the
- * Metal road deliberately -- which needs QuartzCore's default.metallib in the image first, or this
- * same assertion comes back.
+ * That was every boot until the Metal-on-Vulkan plug-in could serve the window server. Now the device
+ * stays where it is in two cases, and is taken out in every other:
+ *
+ *   camtl=1   any device, for the boot that means to put CoreAnimation on the Metal road deliberately
+ *             (which needs QuartzCore's default.metallib in the image, or the assertion above comes back);
+ *   no camtl= a device the METAL=vk plug-in opened for the window server, which answers YES to
+ *             -hakiosOpenedForWindowServer (src/metalvk/HakiosMetalVK.mm): that plug-in shows backboardd
+ *             the device by default when its driver is PanVK (src/hakios_metal_shown.c) and opens it at
+ *             once, so a device that is here is one that works, and CoreAnimation draws with Metal.
+ *
+ * With camtl=0 there is none: the window server keeps OpenGL ES (the plug-in does not show it the device
+ * either). A line "-backboardd" in /private/var/db/HakiosMetal.clients does the same from the window
+ * server's next start, without a boot (the plug-in reads it).
  */
 #define MTL_DEVICE_ARRAY        0x1e1efe9a0UL   /* Metal's static NSMutableArray *_deviceArray */
 #define CA_DETECT_DISPLAYS      0x1884da264UL   /* -[CAWindowServer _detectDisplays] */
@@ -546,6 +556,7 @@ my_function_uniform(void *context, unsigned index, size_t components, size_t cou
 extern id objc_retain(id object);
 
 static void (*orig_detect_displays)(id server, SEL selector);
+static int metal_by_default;    /* no camtl= on the line: the plug-in's device for the window server is kept */
 
 static void
 keep_metal_from_core_animation(void)
@@ -564,6 +575,18 @@ keep_metal_from_core_animation(void)
 	if ((device = create()) == NULL) {
 		say("hakios: metal: no device in this process; CoreAnimation keeps OpenGL ES by itself\n");
 		return;
+	}
+	if (metal_by_default) {
+		SEL opened = sel_registerName("hakiosOpenedForWindowServer");
+
+		if (((BOOL (*)(id, SEL, SEL))objc_msgSend)(device, sel_registerName("respondsToSelector:"), opened) &&
+		    ((BOOL (*)(id, SEL))objc_msgSend)(device, opened)) {
+			say("hakios: metal: the window server draws with Metal (%s, opened by the plug-in; camtl=0, or "
+			    "-backboardd in /private/var/db/HakiosMetal.clients, keeps OpenGL ES)\n", object_getClassName(device));
+			return;
+		}
+		say("hakios: metal: %s was not opened for the window server by the Metal-on-Vulkan plug-in: "
+		    "taken out (camtl=1 would leave it)\n", object_getClassName(device));
 	}
 	if ((array = *slot) == NULL) {
 		say("hakios: metal: a device, but nothing at %#lx; the device list is NOT emptied\n",
@@ -602,19 +625,30 @@ my_detect_displays(id server, SEL selector)
 }
 
 static void
-window_server_keeps_opengl_es(void)
+window_server_chooses_its_renderer(void)
 {
 	char arguments[1024] = "";
 	size_t size = sizeof(arguments) - 1;
+	const char *camtl = NULL;
 	Class cls;
 	Method method;
 	IMP original;
 
-	if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0 && strstr(arguments, "camtl=1") != NULL) {
+	if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0) {
+		/* the word camtl=, not the end of another argument's name */
+		const char *at = strstr(arguments, "camtl=");
+
+		while (at != NULL && at != arguments && at[-1] != ' ') {
+			at = strstr(at + 6, "camtl=");
+		}
+		camtl = at != NULL ? at + 6 : NULL;
+	}
+	if (camtl != NULL && atoi(camtl) != 0) {
 		say("hakios: camtl=1: CoreAnimation may have the Metal device (it needs "
 		    "QuartzCore.framework/default.metallib in the image)\n");
 		return;
 	}
+	metal_by_default = camtl == NULL;
 	cls = objc_getClass("CAWindowServer");
 	method = cls ? class_getInstanceMethod(cls, sel_registerName("_detectDisplays")) : NULL;
 	original = method ? method_getImplementation(method) : NULL;
@@ -630,7 +664,7 @@ window_server_keeps_opengl_es(void)
 static void
 window_server_fixes(void)
 {
-	window_server_keeps_opengl_es();
+	window_server_chooses_its_renderer();
 	orig_is_ready = replace_virtual("is_ready", VSLOT(VT_APPLE_CLCD_DISPLAY, 0xb0), 0x1882f0908UL, my_is_ready);
 	orig_ignore_update_p = replace_virtual("ignore_update_p", VSLOT(VT_APPLE_CLCD_DISPLAY, 0x138), 0x1882e0c90UL,
 	    my_ignore_update_p);
@@ -791,7 +825,11 @@ struct service {
 	volatile bool judged;           /* backboardd has decided about it: it set "TouchDetectionMode" */
 	IOHIDEventRef last;             /* a sensor's last event, for copyEvent (CoreBrightness asks for the light's) */
 	uint32_t last_type;
+	volatile int64_t interval_us;   /* a sensor's: the event server's "ReportInterval" (us); -1 until it sets one */
+	uint64_t sent_us;               /* a sensor's: when its last event went out */
 };
+
+static void sensor_rates_changed(void);
 
 /* touch_fault=1: the touch screen first made answers no "PrimaryUsagePage" (tests the remake) */
 static bool touch_fault;
@@ -848,6 +886,19 @@ service_set_property(__unused void *target, void *refcon, __unused IOHIDServiceC
 	/* backboardd sets this on the digitizer it takes for its main screen, as it takes it */
 	if (key != NULL && CFEqual(key, CFSTR("QuantizationDPI"))) {
 		((struct service *)refcon)->taken = true;
+	}
+	/*
+	 * A sensor's report interval: the shortest any client of the event server wants (us), 0 when no client wants
+	 * the sensor at all. sensors_thread() sends no more often than that, and the hub is asked for that rate.
+	 */
+	if (key != NULL && value != NULL && CFEqual(key, CFSTR("ReportInterval")) && CFGetTypeID(value) == CFNumberGetTypeID()) {
+		int64_t us = -1;
+
+		CFNumberGetValue(value, kCFNumberSInt64Type, &us);
+		if (us >= 0 && us != ((struct service *)refcon)->interval_us) {
+			((struct service *)refcon)->interval_us = us;
+			sensor_rates_changed();
+		}
 	}
 	if (key != NULL && value != NULL && CFEqual(key, CFSTR("TouchDetectionMode")) && CFGetTypeID(value) == CFNumberGetTypeID()) {
 		int mode = 0;
@@ -906,6 +957,8 @@ make_service_with(IOHIDEventSystemClientRef client, const char *product, int pag
 {
 	struct service *made = calloc(1, sizeof(*made));
 	IOHIDServiceClientRef service = NULL;
+
+	made->interval_us = -1;
 	CFMutableDictionaryRef properties = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
 	    &kCFTypeDictionaryValueCallBacks);
 	CFMutableDictionaryRef pair = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
@@ -1160,11 +1213,12 @@ extern void IOHIDEventSetFloatValue(IOHIDEventRef event, uint32_t field, double 
 #define GYRO_DPS_PER_COUNT      (1.0 / 16400)   /* to rad/s below */
 #define MAG_UT_PER_COUNT        0.015
 
+static volatile int proximity_near;     /* sensors_thread()'s: the proximity sensor covered (tap_to_wake()) */
 static IOHIDEventSystemClientRef hid_client;    /* input_thread()'s, once the touch screen is made */
 
 static struct {
 	IOHIDServiceClientRef accel, light, proximity, gyro, compass;
-	struct service *light_made;
+	struct service *light_made, *accel_made, *gyro_made, *compass_made;
 } sensor;
 
 /* the orientation, worked out here and handed to backboardd through CMDeviceOrientationManager */
@@ -1267,6 +1321,7 @@ my_start_orientation(__unused id self, __unused SEL selector, id queue, void (^h
 	now = orientation;
 	pthread_mutex_unlock(&orientation_lock);
 	say("hakios: sensors: backboardd asks for the orientation (now %d)\n", now);
+	sensor_rates_changed();
 	if (now != 0) {
 		orientation_changed(now);
 	}
@@ -1285,6 +1340,7 @@ my_stop_orientation(__unused id self, __unused SEL selector)
 		orientation_queue = nil;
 	}
 	pthread_mutex_unlock(&orientation_lock);
+	sensor_rates_changed();
 }
 
 static id
@@ -1371,6 +1427,104 @@ orientation_from(double x, double y, double z, uint64_t now_us)
 	}
 }
 
+/*
+ * The rates. The hub read the accelerometer, the gyroscope and the magnetometer every 20 ms from boot to shutdown, and
+ * every sample became a HID event in backboardd whether or not anybody wanted it: 150 events a second, backboardd at
+ * 12% of a core with the screen off (12 November). iOS says what it wants: the event server sets each service's
+ * "ReportInterval" to the shortest interval its clients asked for, 0 when none wants the sensor. So:
+ *   - a sensor's events go out no more often than its interval, and not at all at 0 (sensors_thread(), sensor_due());
+ *   - the hub is asked for that rate (write() to /dev/hakios-sensors, sys/hakios.sensors.h): 5 ms to 1 s, or off;
+ *   - the accelerometer stays on at ORIENTATION_MS at least while backboardd follows the orientation (the
+ *     CMDeviceOrientationManager handler of orientation_fixes()), which reads the raw samples, not the events;
+ *   - until the event server has set an interval, the hub keeps its boot rate.
+ * Light, proximity and pressure stay at the boot's 200 ms: tap to wake and the calls' screen need the proximity.
+ * A kernel without the write (before 13 November) refuses it; the events are still thinned here.
+ */
+#define ORIENTATION_MS          40
+
+static int sensors_device = -1;
+static pthread_mutex_t rates_lock = PTHREAD_MUTEX_INITIALIZER;
+
+#define RATE_OFF        HAKIOS_SENSOR_RATE_OFF
+#define RATE_BOOT       HAKIOS_SENSOR_RATE_BOOT
+
+/* the hub's period for a sensor whose service has this interval (us; -1: none set yet) */
+static uint32_t
+period_for(int64_t interval_us)
+{
+	if (interval_us < 0) {
+		return RATE_BOOT;
+	}
+	if (interval_us == 0) {
+		return RATE_OFF;
+	}
+	return interval_us < 5000 ? 5 : interval_us > 1000000 ? 1000 : (uint32_t)(interval_us / 1000);
+}
+
+static void
+sensor_rates_changed(void)
+{
+	static uint32_t asked[4] = { RATE_BOOT, RATE_BOOT, RATE_BOOT, RATE_BOOT };
+	static const char *names[4] = { "", "accelerometer", "gyroscope", "magnetometer" };
+	static bool refused;
+	struct service *made[4] = { NULL, sensor.accel_made, sensor.gyro_made, sensor.compass_made };
+	bool following;
+
+	pthread_mutex_lock(&orientation_lock);
+	following = orientation_handler != NULL;
+	pthread_mutex_unlock(&orientation_lock);
+	pthread_mutex_lock(&rates_lock);
+	for (uint32_t type = HAKIOS_SENSOR_ACCEL; type <= HAKIOS_SENSOR_MAG; type++) {
+		int64_t us = made[type] ? made[type]->interval_us : -1;
+		uint32_t ms = period_for(us);
+		struct hakios_sensor_rate r;
+
+		if (type == HAKIOS_SENSOR_ACCEL && following && (ms == RATE_OFF || (ms != RATE_BOOT && ms > ORIENTATION_MS))) {
+			ms = ORIENTATION_MS;
+		}
+		if (ms == asked[type]) {
+			continue;
+		}
+		asked[type] = ms;
+		r.type = type;
+		r.period_ms = ms;
+		if (ms == RATE_OFF) {
+			say("hakios: sensors: the %s: no client wants it: off\n", names[type]);
+		} else if (ms == RATE_BOOT) {
+			say("hakios: sensors: the %s: the boot's rate\n", names[type]);
+		} else {
+			say("hakios: sensors: the %s: every %u ms (clients %lld us%s)\n", names[type], ms, (long long)us,
+			    type == HAKIOS_SENSOR_ACCEL && following ? ", the orientation followed" : "");
+		}
+		if (sensors_device >= 0 && !refused && write(sensors_device, &r, sizeof(r)) != (ssize_t)sizeof(r)) {
+			refused = true;
+			say("hakios: sensors: the kernel takes no rates (%s): the hub keeps its own, the events are thinned here\n",
+			    strerror(errno));
+		}
+	}
+	pthread_mutex_unlock(&rates_lock);
+}
+
+/* whether a sensor's sample is to become an event: its service wants one, and the last went out its interval ago */
+static bool
+sensor_due(struct service *made, uint64_t now_us)
+{
+	int64_t us;
+
+	if (made == NULL || (us = made->interval_us) < 0) {
+		return true;
+	}
+	if (us == 0) {
+		return false;
+	}
+	/* (a tenth of the interval early is on time: the hub's period and this clock are not the same) */
+	if (now_us - made->sent_us + (uint64_t)us / 10 < (uint64_t)us) {
+		return false;
+	}
+	made->sent_us = now_us;
+	return true;
+}
+
 /* the services, on the touch screen's client; ambient light first, for CoreBrightness's start */
 static void
 make_sensor_services(void)
@@ -1383,17 +1537,18 @@ make_sensor_services(void)
 	sensor.light = make_service_with(hid_client, "HakiOS ambient light sensor", HID_PAGE_APPLE_VENDOR,
 	    HID_USAGE_AMBIENT_LIGHT, false, NULL, &sensor.light_made);
 	sensor.accel = make_service_with(hid_client, "HakiOS accelerometer", HID_PAGE_APPLE_VENDOR, HID_USAGE_ACCELEROMETER,
-	    false, NULL, NULL);
+	    false, NULL, &sensor.accel_made);
 	sensor.proximity = make_service_with(hid_client, "HakiOS proximity sensor", HID_PAGE_APPLE_VENDOR,
 	    HID_USAGE_PROXIMITY, false, proximity, NULL);
 	sensor.gyro = make_service_with(hid_client, "HakiOS gyroscope", HID_PAGE_APPLE_VENDOR, HID_USAGE_GYRO, false, NULL,
-	    NULL);
+	    &sensor.gyro_made);
 	sensor.compass = make_service_with(hid_client, "HakiOS magnetometer", HID_PAGE_APPLE_VENDOR, HID_USAGE_COMPASS, false,
-	    NULL, NULL);
+	    NULL, &sensor.compass_made);
 	say("hakios: sensors: services: light %p, accelerometer %p, proximity %p, gyroscope %p, magnetometer %p\n",
 	    (void *)sensor.light, (void *)sensor.accel, (void *)sensor.proximity, (void *)sensor.gyro, (void *)sensor.compass);
 	CFRelease(one);
 	CFRelease(proximity);
+	sensor_rates_changed();
 }
 
 static void *
@@ -1425,14 +1580,14 @@ sensors_thread(void *arg)
 			double x = -s.v[0] * k, y = -s.v[1] * k, z = -s.v[2] * k;  /* Android's sign to iOS's */
 
 			orientation_from(x, y, z, now_us);
-			if (sensor.accel != NULL) {
+			if (sensor.accel != NULL && sensor_due(sensor.accel_made, now_us)) {
 				sensor_send(sensor.accel, NULL, IOHIDEventCreateAccelerometerEvent(NULL, s.time, x, y, z, 0),
 				    HID_EVENT_ACCELEROMETER);
 			}
 			break;
 		}
 		case HAKIOS_SENSOR_GYRO:
-			if (sensor.gyro != NULL) {
+			if (sensor.gyro != NULL && sensor_due(sensor.gyro_made, now_us)) {
 				double k = GYRO_DPS_PER_COUNT * M_PI / 180;
 
 				sensor_send(sensor.gyro, NULL, IOHIDEventCreateGyroEvent(NULL, s.time, s.v[0] * k, s.v[1] * k,
@@ -1440,7 +1595,7 @@ sensors_thread(void *arg)
 			}
 			break;
 		case HAKIOS_SENSOR_MAG:
-			if (sensor.compass != NULL) {
+			if (sensor.compass != NULL && sensor_due(sensor.compass_made, now_us)) {
 				sensor_send(sensor.compass, NULL, IOHIDEventCreateCompassEvent(NULL, s.time, s.v[0] * MAG_UT_PER_COUNT,
 				    s.v[1] * MAG_UT_PER_COUNT, s.v[2] * MAG_UT_PER_COUNT, 0), 21);
 			}
@@ -1463,6 +1618,7 @@ sensors_thread(void *arg)
 		case HAKIOS_SENSOR_PROXIMITY:
 			if (sensor.proximity != NULL && (s.v[0] != 0) != near) {
 				near = s.v[0] != 0;
+				proximity_near = near;
 				say("hakios: sensors: proximity %s\n", near ? "near" : "far");
 				sensor_send(sensor.proximity, NULL, IOHIDEventCreateProximtyEvent(NULL, s.time, near ?
 				    PROXIMITY_RECEIVER : 0, 0), HID_EVENT_PROXIMITY);
@@ -1481,15 +1637,80 @@ static void
 sensors_start(void)
 {
 	pthread_t thread;
-	int device = open(HAKIOS_SENSORS_DEVICE, O_RDONLY);
+	int device = open(HAKIOS_SENSORS_DEVICE, O_RDWR);
 
-	if (device < 0) {
+	if (device < 0 && (device = open(HAKIOS_SENSORS_DEVICE, O_RDONLY)) < 0) {
 		return;
 	}
+	sensors_device = device;
 	orientation_fixes();
 	if (pthread_create(&thread, NULL, sensors_thread, (void *)(intptr_t)device) == 0) {
 		pthread_detach(thread);
 	}
+}
+
+/*
+ * Tap to wake. While the display is off the window server asks the touch screen for TOUCH_MODE_WAKE (Settings >
+ * Accessibility > Touch > Tap to Wake), and Apple's multitouch controller then reports a TAP: one finger, down and up
+ * again quickly, close to where it landed. The S6SY761 has no such gesture of its own here and reports every contact,
+ * so the tap is recognised here, and only a tap presses the lock button (what wakes the display; SpringBoard then
+ * shows the lock screen). Until 13 November any finger landing woke it: a palm, the phone picked up or put down, a
+ * cable pushed in while holding the phone, cloth in a pocket -- each a wake "for no reason" (build33: the lock screen
+ * lit at 00:17:38 by a "Lock" press 0.3 ms long with no side-button press under it, the touch count up by one).
+ * Not a tap, and so no wake:
+ *   - a second finger at any time during it;
+ *   - held longer than TAP_MOST_MS, or moved more than TAP_TRAVEL from where it landed (a sixteenth of the screen);
+ *   - the proximity sensor covered when it lands (in a pocket, face down on something): as iOS's own pocket check.
+ * Every finger that went down while the display was off is kept from the window server until it is lifted, whatever
+ * happens to the display meanwhile (no "moved" or "up" for a "down" it never had).
+ */
+#define TAP_MOST_MS             350
+#define TAP_TRAVEL              4096    /* of 65535 */
+
+static bool
+tap_to_wake(IOHIDServiceClientRef buttons, const struct hakios_touch *t)
+{
+	static unsigned held;                   /* fingers down since the display was off: theirs until lifted */
+	static bool candidate;                  /* the one finger down may still be a tap */
+	static uint32_t finger, x0, y0;
+	static uint64_t down_us;
+	unsigned bit = 1u << (t->finger & 31);
+	bool wake = (touch_mode & 0xff) == TOUCH_MODE_WAKE && buttons != NULL;
+
+	if (t->type == HAKIOS_TOUCH_DOWN) {
+		if (!wake && held == 0) {
+			return false;
+		}
+		/* a second finger, or a finger landing while one of before is still down: no tap */
+		candidate = wake && held == 0 && !proximity_near;
+		held |= bit;
+		finger = t->finger, x0 = t->x, y0 = t->y, down_us = micros(t->time);
+		return true;
+	}
+	if ((held & bit) == 0) {
+		return false;
+	}
+	if (candidate && t->finger == finger) {
+		uint32_t dx = t->x > x0 ? t->x - x0 : x0 - t->x, dy = t->y > y0 ? t->y - y0 : y0 - t->y;
+
+		if (dx > TAP_TRAVEL || dy > TAP_TRAVEL || micros(t->time) - down_us > TAP_MOST_MS * 1000ull) {
+			candidate = false;
+		}
+	}
+	if (t->type == HAKIOS_TOUCH_UP) {
+		held &= ~bit;
+		if (candidate && held == 0 && wake) {
+			struct hakios_touch press = { .time = t->time, .type = HAKIOS_BUTTON_DOWN, .finger = HAKIOS_BUTTON_LOCK };
+
+			send_button(buttons, &press);
+			press.type = HAKIOS_BUTTON_UP;
+			send_button(buttons, &press);
+		}
+		if (held == 0) {
+			candidate = false;
+		}
+	}
+	return true;
 }
 
 static void *
@@ -1500,7 +1721,7 @@ input_thread(__unused void *arg)
 	IOHIDServiceClientRef screen = NULL, buttons = NULL;
 	struct service *screen_made = NULL;
 	struct hakios_touch t;
-	unsigned count = 0, waking = 0;         /* waking: the fingers whose touch went into waking the display */
+	unsigned count = 0;
 	int device;
 
 	pthread_setname_np("redwood input");
@@ -1559,21 +1780,8 @@ input_thread(__unused void *arg)
 			if (buttons != NULL) {
 				send_button(buttons, &t);
 			}
-		} else if (t.type == HAKIOS_TOUCH_DOWN && (touch_mode & 0xff) == TOUCH_MODE_WAKE && buttons != NULL) {
-			/*
-			 * The display is off and a tap is to wake it. The lock button is what wakes it here:
-			 * press it for the finger, and keep the rest of this touch to ourselves.
-			 */
-			struct hakios_touch press = { .time = t.time, .type = HAKIOS_BUTTON_DOWN, .finger = HAKIOS_BUTTON_LOCK };
-
-			send_button(buttons, &press);
-			press.type = HAKIOS_BUTTON_UP;
-			send_button(buttons, &press);
-			waking |= 1u << (t.finger & 31);
-		} else if (waking & (1u << (t.finger & 31))) {
-			if (t.type == HAKIOS_TOUCH_UP) {
-				waking &= ~(1u << (t.finger & 31));
-			}
+		} else if (tap_to_wake(buttons, &t)) {
+			/* (a touch made while the display was off: never the window server's) */
 		} else {
 			send_touch(screen, &t);
 			if (touch_latency) {

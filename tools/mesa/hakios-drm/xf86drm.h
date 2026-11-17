@@ -107,8 +107,36 @@ int hakios_drm_surface(int fd, struct hakios_drm_surface *surface);
  * tools/m2v), for Turnip's VK_EXT_external_memory_host, which is given only the address: its ID, 0 if nobody said. */
 void hakios_drm_host_surface(const void *base, uint64_t size, uint32_t surface);
 uint32_t hakios_drm_host_surface_at(const void *base, uint64_t size);
-/* Not libdrm's: pages of this process (whole ones) as a buffer, Linux's userptr (the kernel's request 0x7d) */
+/* Not libdrm's: pages of this process (whole ones) as a buffer, Linux's userptr (HakiosGPU's request 0x7d, HakiosMali's 0x7b) */
 int hakios_drm_user_memory(int fd, const void *address, uint64_t size, uint32_t *handle);
+/* Not libdrm's: a range of a buffer's lines cleaned and invalidated by the kernel (HakiosMali's request 0x7a), for such a
+ * buffer of the process's own cached pages; -1 with errno ENOSYS where the kernel has no such request */
+int hakios_drm_sync(int fd, uint32_t handle, uint64_t offset, uint64_t size);
+/* Not libdrm's: 1 if no processor can write the pages at ADDRESS (SIZE bytes) from now on: each is mapped only here, in
+ * memory nothing else holds, and read-only for good (its maximum protection); their lines then need cleaning only once */
+int hakios_drm_host_pages_sealed(const void *address, uint64_t size);
+/*
+ * Not libdrm's: work this process submitted writes the pixels of IOSurface SURFACE, whose buffer the kernel made
+ * (drmPrimeFDToHandle): its seed changes, as at a device's write (HakiosMali's request 0x79), for readers in other processes
+ * that keep what they made of the pixels. Called once the work is queued (the Metal frontend, for metal2vulkan's
+ * surface_watch.rs). 0, or -1 with errno: ENOENT where no buffer of this process is the surface's, ENOSYS where the kernel
+ * has no such request.
+ */
+int hakios_drm_surface_written(uint32_t surface);
+/*
+ * Not libdrm's: a handle of a submission's bo_handles that a job chain writes may carry this bit (Mesa's panfrost knows
+ * which, tools/mesa/panfrost-written-bos.patch): the kernel then changes a surface's seed once the chain is queued. Taken
+ * off here where the kernel does not take it (its parameter 0x7900).
+ */
+#define HAKIOS_DRM_BO_WRITTEN   (1u << 31)
+/*
+ * Not libdrm's: a handle of a submission's bo_handles that a job chain may only read may carry this bit (PanVK names every
+ * IOSurface it imported so, tools/mesa/panvk/panvk-sampled-surfaces.patch): the kernel cleans what a processor wrote into
+ * the surface before the job, as for any surface named, and keeps the buffer until the job is done, but does not have
+ * the display wait for the job to show the surface. Taken off here where the kernel does not take it (its parameter
+ * 0x7901): the handle is then named as any other.
+ */
+#define HAKIOS_DRM_BO_SAMPLED   (1u << 30)
 
 #ifdef __cplusplus
 }
