@@ -836,6 +836,10 @@ pan_drmSyncobjWait(int fd, uint32_t *handles, unsigned count, int64_t timeout_ns
  * an errno). Panfrost's OpenGL ES uses libdrm's functions only.
  */
 int pan_drmSyncobjSignal(int fd, const uint32_t *handles, uint32_t count);
+/* the same sync objects a fence goes out as a sync file and comes back in (defined with them below,
+ * at pan_drmSyncobjExportSyncFile; declared here because the ioctls above use them first) */
+int pan_drmSyncobjExportSyncFile(int fd, uint32_t handle, int *sync_file_fd);
+int pan_drmSyncobjImportSyncFile(int fd, uint32_t handle, int sync_file_fd);
 
 static bool
 pan_syncobj_ioctl(unsigned number, void *arg, int *error)
