@@ -144,6 +144,7 @@ cam_s9_ae_frames	k
 cam_s9_af	k
 cam_s9_always	k
 cam_s9_bayer	k
+cam_s9_cached	k
 cam_s9_dgain	k
 cam_s9_exp	k
 cam_s9_gain	k
@@ -160,6 +161,10 @@ cam_s9_rear_probe	k
 cam_s9_rear_tp	k
 cam_s9_rear_turn	k
 cam_s9_sat	k
+cam_s9_selfread	k
+cam_s9_selfread_focus	k
+cam_s9_selfread_x	k
+cam_s9_selfread_y	k
 cam_s9_stride	k
 cam_s9_tele	k
 cam_s9_tele_bayer	k
