@@ -211,9 +211,10 @@ check_tables(void)
 	    ha8_row_of_level(8) != 2 || ha8_row_of_level(255) != HA8_ROWS - 1) {
 		fail("row of level", ha8_row_of_level(1), ha8_row_of_level(8));
 	}
-	if (ha8_panel_of(0x910444, false) != &ha8_panels[1] || ha8_panel_of(0x910443, false) != &ha8_panels[0] ||
-	    ha8_panel_of(0x910453, false) != &ha8_panels[0] || ha8_panel_of(0, false) != &ha8_panels[0] ||
-	    ha8_panel_of(0, true) != &ha8_panels[2]) {
+	if (ha8_panel_of(0x910444) != &ha8_panels[1] || ha8_panel_of(0x910443) != &ha8_panels[0] ||
+	    ha8_panel_of_device(0x910444, false) != &ha8_panels[1] || ha8_panel_of_device(0x910443, false) != &ha8_panels[0] ||
+	    ha8_panel_of_device(0x910453, false) != &ha8_panels[0] || ha8_panel_of_device(0, false) != &ha8_panels[0] ||
+	    ha8_panel_of_device(0, true) != &ha8_panels[2]) {
 		fail("panel of ID", 0, 0);
 	}
 }
