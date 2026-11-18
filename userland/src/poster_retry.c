@@ -24,9 +24,10 @@
  * themselves. It does that at most three times, and does nothing at all where the posters are already up, which
  * is every boot of a phone with the cores to spare.
  *
- * Boot-arg poster_retry=0 turns it off. poster_retry=2 also restarts chronod, WidgetKit's host, once, when the
- * rush is over, so that every widget asks its extension for a timeline again (its first requests met the same
- * five seconds); off by default, because it has not been seen to be needed.
+ * Boot-arg poster_retry=0 turns recovery off; 1 (the default) recovers wallpaper only.
+ * poster_retry=2 restarts chronod only if PosterBoard's posters failed to survive boot;
+ * poster_retry=3 forces one chronod restart even if the wallpaper is fine, for widget debugging.
+ * The unconditional restart is opt-in: it can re-launch CPU-heavy widget extensions.
  *
  *   usage: poster_retry [SECONDS]      give up after SECONDS (default 900)
  */
@@ -148,16 +149,21 @@ main(int argc, char **argv)
 		if (waited < not_before || (load() >= QUIET && waited < quiet_by)) {
 			continue;
 		}
-		if (mode == 2 && !chronod_done) {
+		count = posters(list, sizeof(list));
+		/* Do not disturb healthy widgets just because a poster check was scheduled. */
+		if ((mode == 3 || (mode == 2 && count < 2)) && !chronod_done) {
 			int chronod = find("chronod");
 
 			chronod_done = 1;
 			if (chronod != 0) {
-				printf("poster_retry: chronod[%d] restarted, for the widgets' timelines (poster_retry=2)\n", chronod);
+				printf("poster_retry: chronod[%d] restarted for widget timelines (poster_retry=%d, posters=%d)\n",
+				    chronod, mode, count);
 				stop(chronod, "chronod");
 			}
+		} else if (mode == 2 && count >= 2) {
+			printf("poster_retry: chronod left running (%d posters up, poster_retry=2)\n", count);
 		}
-		if ((count = posters(list, sizeof(list))) >= 2) {
+		if (count >= 2) {
 			printf("poster_retry: PosterBoard[%d]'s posters are up after %d s (load %.2f):%s%s\n", board, waited,
 			    load(), list, tries ? "" : "; nothing to do");
 			return 0;

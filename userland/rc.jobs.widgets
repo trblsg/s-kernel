@@ -48,7 +48,7 @@
 # HOW TO READ THE ANSWER:
 #   - chronod has no tree for a widget, or its log says the timeline request timed out or the
 #     extension went away: the widget is blank because no timeline came, not because of drawing. The
-#     cure is time (poster_retry=2 restarts chronod once the rush is over; more cores)
+#     cure is time (poster_retry=3 forces chronod to restart once the rush is over; mode 2 only does so if posters were lost; more cores)
 #   - chronod has the widget's tree but the layers that should carry text or images have no contents:
 #     the view is there and was not drawn; read chronod's log for RenderBox and Metal
 #   - chronod's layers have contents and the screen is still white: the picture is lost between the
