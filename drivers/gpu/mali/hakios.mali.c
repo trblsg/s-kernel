@@ -1516,12 +1516,14 @@ mali_job_interrupt(__unused void *context, uint32_t intid)
 	uint32_t raw = rd(mali, JOB_INT_RAWSTAT);
 
 	/*
-	 * A line with no bit set is a stale one: the worker has already cleared the job, and there is nothing to mask. It
-	 * happens when the previous job's handler runs after that job's wait returned; waking the next wait for it would make
-	 * the next job look done. Count it and leave the line as it is.
+	 * A line with no bit set is a stale one: the worker has already cleared the job. It happens when the previous job's
+	 * handler runs after that job's wait returned; waking the next wait for it would make the next job look done. Mask it
+	 * anyway: if the level is still asserted with nothing to clear, leaving it on would be a storm. The worker unmasks
+	 * after the next job's bits are cleared, so at most one job falls back to the 200 us watchdog.
 	 */
 	if (raw == 0) {
 		__atomic_add_fetch(&mali_irq_empty, 1, __ATOMIC_RELAXED);
+		gic_v3_spi_mask(intid);
 		return;
 	}
 	if (!__atomic_load_n(&mali_irq_armed, __ATOMIC_ACQUIRE)) {
