@@ -7,9 +7,9 @@
  * WHAT THE CP IS, AS THE AP SEES IT (the phone's device tree and Samsung's kernel, read as data)
  *   its memory     146 MB of the phone's DRAM at 0xF0000000 (the device tree's reserved "modem_if"), outside XNU's
  *                  RAM. The CP sees it at 0x40000000. The image's own table (below) divides it:
- *                    0x0000000  the table of contents, 512 bytes; then BOOT at 0x200 and MAIN at 0x10000, NV at
- *                               0x4900000 (the boot loader's own layout: Samsung's shm_ipc reads the image's memory
- *                               map at 0x200 + 0xA0)
+ *                    0x0000000  BOOT, then MAIN at 0x10000, NV at 0x4900000 (the boot loader's layout: cbd loads
+ *                               each part at address & 0x3fffffff and never sends the table of contents; the image's
+ *                               memory map is at BOOT + 0xA0)
  *                    0x7900000  VSS, the voice processor's, 7 MB
  *                    0x8000000  IPC, 5 MB: the memory both sides talk through
  *                    0x8500000  ZMC, 11 MB: downlink packets' buffers (not used here)
@@ -17,8 +17,8 @@
  *   its image      the phone's RADIO partition, read only, used exactly as it is. It starts with a table of
  *                  contents of 32-byte entries (name[12], offset in the partition, address for the CP, size, CRC-32,
  *                  number): TOC, BOOT, MAIN, VSS, NV, OFFSET. Each entry goes to (its address - BOOT's address) in the
- *                  CP's memory, except BOOT itself, which goes right after the table of contents at 0x200 as the boot
- *                  loader leaves it (the table's first entry, 512 bytes, stays at 0). NV has no bytes in RADIO: it is
+ *                  CP's memory; the table of contents itself is not copied (cbd never sends it: BOOT at 0, MAIN at
+ *                  0x10000, VSS at 0x7900000). NV has no bytes in RADIO: it is
  *                  the place of the phone's own non-volatile data
  *                  (Android's boot daemon copies /efs/nv_data.bin there). This driver never writes the EFS partition
  *                  and never mounts it. With cp_nv=2 (the owner's decision of 13 Nov 2026) it READS /nv_data.bin out
@@ -64,9 +64,10 @@
  *      the first words of the CP's memory as the boot loader left it, RADIO's table of contents.
  *   2  that, and the image loaded and checked: the CP's power domain started if it never was (CP_CTRL_NS bit 1,
  *      CP_CTRL_S bit 3), the memory opened (mode 2), the boot region cleared of whatever the loader left in it,
- *      RADIO's table of contents, BOOT, MAIN and VSS copied to the boot loader's layout (TOC at 0, BOOT at 0x200,
- *      MAIN at 0x10000) and compared with the table's CRCs, the NV place filled (zeros, or the builder's file with
- *      cp_nv=1), then the secure world's check (mode 0). Its answer is logged; if it is not 0 the same check is made
+ *      BOOT, MAIN and VSS copied to the boot loader's layout (BOOT at 0, MAIN at 0x10000, VSS at 0x7900000; the
+ *      table of contents is not copied) and compared with the table's CRCs, the NV place filled (zeros, or the
+ *      builder's file with cp_nv=1), then the secure world's check (mode 0). Its answer is logged; if it is not 0
+ *      the same check is made
  *      once more without the memory's address (the log shows whether the address is what is refused), and the
  *      driver stops there: the image is not locked by EL3 and the CP is not started.
  *   3  that, and the CP started: the mailbox cleared, the AP's state word set, AP2CP_CFG written, the CP's state
@@ -145,6 +146,8 @@
  *   cp_ds=N      the dual SIM field told to the modem (0)
  *   cp_wait=N    seconds the started modem is watched before it is put back in reset (20; 25 with the link)
  *   cp_delay=N   seconds after the boot before the modem's driver does anything (30), so that its lines are in the log
+ *   cp_bl=1      read the boot loader's BOTA0-2 partitions once, read-only, and log where the EL3 monitor's CP
+ *                handler and messages might be (offsets and a few words around each hit; nothing is written)
  *
  * WHERE IT MAY RUN. The CP's memory is fixed by the boot chain at 0xF0000000. On a tree whose loader puts XNU itself
  * there this driver must not load anything: it checks that no page of the 146 MB is XNU's and that the kernel is not in
@@ -354,6 +357,7 @@ static struct {
 	uint8_t mseq;
 	uint32_t frames[NRINGS], rfs_requests, fmt_messages, phone_starts;
 	uint32_t rev, ds, wait_s, delay_s, nv_file, vss_on;
+	uint32_t bl_scan;               /* cp_bl=1: read BOTA0-2 once, read-only */
 	uint32_t more[NRINGS];          /* bytes still to come of a frame longer than one buffer */
 	bool multi[NRINGS];             /* the frames now coming on a ring are the rest of a message already seen */
 	uint32_t rfs_more;              /* bytes of a file request still to come in later frames */
@@ -788,44 +792,15 @@ cp_power_first(void)
 }
 
 /*
- * Where the boot loader puts an entry. MAIN, VSS and NV go to the address the table gives (minus BOOT's,
- * 0x40000000). BOOT does not: the boot loader keeps RADIO's table of contents, 512 bytes, at the CP memory's
- * start and puts BOOT right after it, at its own offset in the partition (0x200), not at 0x40000000. Samsung's
- * 9820 shm_ipc reads the image's memory map at BOOT's offset + 0xA0 for exactly that layout, and the secure world
- * reads it there too (the check is given the memory's address, 0xF0000000).
+ * Where the boot loader puts an entry: cbd's m_offset, (address & 0x3fffffff), which here is the address minus
+ * BOOT's (0x40000000): BOOT at 0, MAIN at 0x10000, VSS at 0x7900000, NV at 0x4900000. RADIO's table of contents
+ * is never sent, so nothing is put at 0 before BOOT. (Build 41 kept the table at 0 and put BOOT at 0x200 and the
+ * secure check answered the same 0x82001010: this is cbd's layout, not the check's answer.)
  */
 static uint32_t
 entry_off(const struct toc_entry *e)
 {
-	if (e == cp.boot) {
-		return e->offset;
-	}
 	return e->address - cp.boot->address;
-}
-
-/* RADIO's table of contents: 512 bytes at the CP memory's start, as the boot loader leaves it (first entry's size) */
-static bool
-copy_toc(void)
-{
-	const struct toc_entry *e = &cp.toc[0];
-	uint8_t *dst = (uint8_t *)cp.mem;
-	const volatile uint32_t *m = (const volatile uint32_t *)(void *)cp.mem;
-	uint64_t t0 = now_ms();
-	int error;
-
-	if (e->offset != 0 || e->size == 0 || e->size > CP_IPC_OFFSET || cp.boot == NULL || cp.boot->offset < e->size) {
-		say("cp: the table of contents is not where this driver expects it (RADIO %#x, %u bytes): nothing is loaded\n",
-		    e->offset, e->size);
-		return false;
-	}
-	error = hakios_ufs_read_partition("RADIO", e->offset, dst, e->size, NULL);
-	if (error != 0) {
-		say("cp: the table of contents could not be read (error %d)\n", error);
-		return false;
-	}
-	say("cp: TOC: %u bytes of RADIO at %#x copied to the CP's memory at 0 in %llu ms; read back, its first words %#x "
-	    "%#x %#x %#x\n", e->size, e->offset, now_ms() - t0, m[0], m[1], m[2], m[3]);
-	return true;
 }
 
 static bool
@@ -851,6 +826,132 @@ copy_entry(const struct toc_entry *e)
 	    "the table's %#x: %s\n", e->name, e->size, e->offset, at, now_ms() - t0, crc, e->crc,
 	    crc == e->crc ? "THE SAME" : "DIFFERENT");
 	return crc == e->crc;
+}
+
+/*
+ * cp_bl=1: a read-only look through the boot loader's partitions (BOTA0-2) for the secure monitor's CP check.
+ * Nothing is written and no partition is mapped: every byte comes through hakios_ufs_read_partition(), the reader
+ * the image uses. The patterns are the CP SMC number and the SSS numbers beside the answer, in a 32-bit
+ * constant's byte order, and the strings its messages carry. Logged: how many of each, where the first one is,
+ * and 16 bytes around it (never more of the partition).
+ */
+static const uint8_t bl_smc_cp[4] = { 0x00, 0x07, 0x00, 0x82 };
+static const uint8_t bl_sss_clk[4] = { 0x11, 0x10, 0x00, 0x82 };
+static const uint8_t bl_answer[4] = { 0x10, 0x10, 0x00, 0x82 };
+static const struct {
+	const char *what;
+	const uint8_t *pat;
+	uint32_t len;
+} bl_patterns[] = {
+	{ "SMC_CP 0x82000700", bl_smc_cp, sizeof(bl_smc_cp) },
+	{ "SMC_SSS_CLK 0x82001011", bl_sss_clk, sizeof(bl_sss_clk) },
+	{ "0x82001010", bl_answer, sizeof(bl_answer) },
+	{ "\"el3_mon\"", (const uint8_t *)"el3_mon", 7 },
+	{ "\"CP_CPU\"", (const uint8_t *)"CP_CPU", 6 },
+	{ "\"CP_INVALID_CP_BASE\"", (const uint8_t *)"CP_INVALID_CP_BASE", 18 },
+	{ "\"CP not working\"", (const uint8_t *)"CP not working", 14 },
+	{ "\"CryptoManager\"", (const uint8_t *)"CryptoManager", 13 },
+};
+#define NBLPATTERNS     (sizeof(bl_patterns) / sizeof(bl_patterns[0]))
+#define BL_CHUNK        (64u << 10)
+
+static int
+bl_find(const uint8_t *buf, uint32_t len, const uint8_t *pat, uint32_t plen, uint32_t from)
+{
+	for (uint32_t i = from; i + plen <= len; i++) {
+		if (memcmp(buf + i, pat, plen) == 0) {
+			return (int)i;
+		}
+	}
+	return -1;
+}
+
+static void
+scan_bootloader(const char *name)
+{
+	uint8_t *buf;
+	uint64_t size = 0, t0 = now_ms();
+	uint32_t hits[NBLPATTERNS], first[NBLPATTERNS];
+	bool have[NBLPATTERNS];
+	uint32_t step = BL_CHUNK - 32;          /* 32 bytes of overlap: a hit on a chunk's edge is still seen once */
+	int error;
+
+	bzero(hits, sizeof(hits));
+	bzero(have, sizeof(have));
+	error = hakios_ufs_read_partition(name, 0, NULL, 0, &size);
+	if (error != 0 || size == 0) {
+		say("cp: cp_bl=1: %s cannot be read (error %d, %llu bytes)\n", name, error, size);
+		return;
+	}
+	buf = kalloc_data(BL_CHUNK, Z_WAITOK);
+	if (buf == NULL) {
+		say("cp: cp_bl=1: %s: no %u KB to read it into\n", name, BL_CHUNK >> 10);
+		return;
+	}
+	for (uint64_t at = 0; at < size; at += step) {
+		uint32_t n = (uint32_t)MIN(size - at, (uint64_t)BL_CHUNK);
+
+		error = hakios_ufs_read_partition(name, at, buf, n, NULL);
+		if (error != 0) {
+			say("cp: cp_bl=1: %s at %#llx could not be read (error %d): stopped there\n", name, at, error);
+			break;
+		}
+		for (uint32_t p = 0; p < NBLPATTERNS; p++) {
+			for (uint32_t from = 0;;) {
+				int i = bl_find(buf, n, bl_patterns[p].pat, bl_patterns[p].len, from);
+
+				if (i < 0) {
+					break;
+				}
+				/* (a hit wholly inside the overlap was counted when the previous chunk was scanned) */
+				if (at != 0 && (uint32_t)i + bl_patterns[p].len <= 32) {
+					from = (uint32_t)i + 1;
+					continue;
+				}
+				if (hits[p] == 0) {
+					first[p] = (uint32_t)(at + (uint32_t)i);
+					have[p] = true;
+				}
+				if (hits[p] != 0xffffffffu) {
+					hits[p]++;
+				}
+				from = (uint32_t)i + 1;
+			}
+		}
+	}
+	say("cp: cp_bl=1: %s (%llu bytes) read only and scanned in %llu ms\n", name, size, now_ms() - t0);
+	for (uint32_t p = 0; p < NBLPATTERNS; p++) {
+		say("cp: cp_bl=1: %s: %s: %u hit(s)\n", name, bl_patterns[p].what, hits[p]);
+	}
+	for (uint32_t p = 0; p < NBLPATTERNS; p++) {
+		uint8_t around[16];
+		uint32_t w[4];
+		uint64_t at;
+
+		if (!have[p]) {
+			continue;
+		}
+		at = first[p] < 8 ? 0 : (first[p] & ~3ull) - 8;
+		if (at + sizeof(around) > size) {
+			continue;
+		}
+		if (hakios_ufs_read_partition(name, at, around, sizeof(around), NULL) == 0) {
+			memcpy(w, around, sizeof(w));
+			say("cp: cp_bl=1: %s: first %s at %#llx, 16 bytes around it: %08x %08x %08x %08x\n", name,
+			    bl_patterns[p].what, first[p], w[0], w[1], w[2], w[3]);
+		}
+	}
+	kfree_data(buf, BL_CHUNK);
+}
+
+static void
+scan_bootloaders(void)
+{
+	static const char *const names[] = { "BOTA0", "BOTA1", "BOTA2" };
+
+	for (uint32_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		scan_bootloader(names[i]);
+	}
 }
 
 /* cp_nv=2: EFS read through hakios_ufs_read_partition, which only reads (bsd/dev/herolte_ufs.c) */
@@ -996,7 +1097,7 @@ load_and_check(void)
 	/* (Samsung's daemon goes on whatever this answers: "CP not working" is what a CP that never ran gives) */
 
 	clear_boot_region();
-	if (!copy_toc() || !copy_entry(cp.boot) || !copy_entry(cp.main)) {
+	if (!copy_entry(cp.boot) || !copy_entry(cp.main)) {
 		say("cp: the image in the CP's memory is not the image in RADIO: the secure world is not asked, nothing started\n");
 		return false;
 	}
@@ -1011,12 +1112,11 @@ load_and_check(void)
 	if (!fill_nv()) {
 		return false;
 	}
-	/* the two places the secure world reads when it is given the memory's address: the table of contents' first
-	 * entry at 0 ("TOC") and, inside BOOT at its offset in the partition, the image's memory map ("MEMn") */
+	/* the two places the secure world reads when it is given the memory's address: the CP memory's first word
+	 * (BOOT's, at 0) and the image's memory map ("MEMn") at BOOT + 0xA0 */
 	boot_at = entry_off(cp.boot);
 	map_at = boot_at + 0xa0;
-	say("cp: the CP's memory after the load: at 0 %#x %#x %#x %#x (the table of contents: \"TOC\" is 0x434f54)\n",
-	    m[0], m[1], m[2], m[3]);
+	say("cp: the CP's memory after the load: at 0 (BOOT) %#x %#x %#x %#x\n", m[0], m[1], m[2], m[3]);
 	say("cp: the CP's memory after the load: at %#x (BOOT) %#x %#x %#x %#x; at %#x (its memory map) %#x %#x %#x %#x\n",
 	    boot_at, m[boot_at / 4], m[boot_at / 4 + 1], m[boot_at / 4 + 2], m[boot_at / 4 + 3], map_at, m[map_at / 4],
 	    m[map_at / 4 + 1], m[map_at / 4 + 2], m[map_at / 4 + 3]);
@@ -2746,6 +2846,9 @@ cp_thread(__unused void *arg, __unused wait_result_t result)
 		set_state(101);
 		return;
 	}
+	if (cp.bl_scan) {
+		scan_bootloaders();
+	}
 	set_state(1);
 	if (cp.stage < 2) {
 		say("cp: stage 1 done: looked, nothing changed\n");
@@ -2983,6 +3086,7 @@ hakios_shannon_init(void)
 	PE_parse_boot_argn("cp_wait", &cp.wait_s, sizeof(cp.wait_s));
 	PE_parse_boot_argn("cp_delay", &cp.delay_s, sizeof(cp.delay_s));
 	PE_parse_boot_argn("cp_sim", &cp.sim_probe, sizeof(cp.sim_probe));
+	PE_parse_boot_argn("cp_bl", &cp.bl_scan, sizeof(cp.bl_scan));
 	if (PE_parse_boot_argn("cp_apn", cp.apn, sizeof(cp.apn))) {
 		cp.apn[sizeof(cp.apn) - 1] = 0;
 		for (uint32_t i = 0; cp.apn[i] != 0; i++) {

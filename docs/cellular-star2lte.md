@@ -11,12 +11,34 @@ generation. Running Apple's CommCenter on top of it is not realistic. The way to
 modem and publishes `kern.hakios.cellular_*`, and the status bar reads them. A small CommCenter stand-in can come later,
 to answer CoreTelephony. Where the work stands is the next section.
 
+## Status, 18 November 2026
+
+The driver's arguments are now `cp=N` (the `shannon=` names in the sections below are the earlier builds, kept as
+history). On the phone it runs with `cp=7 cp_nv=2 cp_if=1 cp_rfs=1 cp_delay=40`, baked into the image.
+
+- **Stage 2 still stops at EL3's check.** The 18 November run (`g30006199`) cleared the boot region (45 ms), copied
+  BOOT/MAIN/VSS with CRCs equal to RADIO's, read `/nv_data.bin` from EFS (1,048,576 bytes, CRC-32 `4bf7…`), got `0xb`
+  from mode 2, and got **`0x82001010`** from mode 0 | `0xF0000000` with x1=2, x2=x3=0; mode 0 alone answered `0x13`.
+  The driver then stopped and put the CP back in reset. It did not read AP2CP_CFG.
+- **The TOC layout is not the answer.** That run had RADIO's TOC at 0 and BOOT at 0x200 (commit `c2c34f41`); the build
+  40 run had BOOT at +0. Both answered `0x82001010`. The driver now returns to cbd's layout (BOOT at +0; the TOC is
+  never sent) because that is what the CP's reset vector expects, not because it is expected to change the check.
+- **The check bypass is gone for good.** `cp_check=0` is removed: with the CP started after a refused check, reading
+  AP2CP_CFG (`0x14820000`) is a kernel data abort (ESR `0x96000410`, FAR `0x10014820000`). Stage 3 runs only after a 0.
+- **Next diagnostic: `cp_bl=1`.** A read-only scan of BOTA0-2 through `hakios_ufs_read_partition()` looks for
+  `0x82000700`, `0x82001011`, `0x82001010` and the strings the monitor's CP path would carry (`el3_mon`, `CP_CPU`,
+  `CP_INVALID_CP_BASE`, `CP not working`, `CryptoManager`), logging each hit's offset and 16 bytes around it.
+  Nothing is written and no bootloader partition is mapped.
+- **Still the working hypotheses:** EL3 expects the `0xC2000401` registration Samsung's EL2 (uH/RKP) makes, or the
+  security engine (SSS) is not in the state the verify needs. The scan is meant to show which code path answers, not
+  to prove either.
+
 ## Status, 13 November 2026 (end of day; definitive)
 
 The driver is `drivers/modem/hakios.shannon.c` (`CONFIG_HAKIOS_SHANNON`: on for star2lte, off in common). **It is inert
-without `shannon=`**: `hakios_shannon_init()` returns before mapping, reading or starting anything, and the release build
+without `cp=N`**: `hakios_shannon_init()` returns before mapping, reading or starting anything, and the release build
 boots without the argument. Nothing in this work writes to flash. It reads the phone's own RADIO partition, and EFS only
-with `shannon_nv=1`.
+with `cp_nv=2` (and the builder's file with `cp_nv=1`).
 
 ### What works on the phone
 
@@ -41,23 +63,24 @@ TWRP: build 39 found the CP cold again.
   (uH/RKP) makes. EL3's verify may depend on Samsung's EL2.
 - **Suspect 2: the security engine.** 0x82001010 neighbours the SSS IDs 0x82001011 (clock) and 0x82001012, so it may be
   the security engine's status: a clock or power domain off.
-- **Next diagnostic, never run.** 170b5a8 is committed and ready. It logs x0-x3 of the SSS clock calls and of the
-  request, retries once with interrupts on, and zeroes the boot region first. It was not flashed today, so build 41 is
-  the next phone run: `shannon=2`.
+- **Next diagnostic: the monitor's own code.** `cp_bl=1` reads BOTA0-2 once, read-only, and logs where the CP SMC
+  number, the SSS numbers and the monitor's CP strings are (see the status section). It was written on 18 November and
+  has not run yet.
 
 ### Next steps, in order
 
 1. **Get the verify past EL3.**
-   - Run 170b5a8 (`shannon=2`).
-   - If the answer is still 0x82001010, check the SSS clock and power domain at the call (Apollo `clk-exynos9810.c`,
-     PMUCAL).
-   - Read what the phone's EL3 expects from the `0xC2000401` handshake. Read the bootloader partition read-only; do not
-     flash it.
+   - The run is `cp=2 cp_bl=1` on the current image: stage 2 plus the read-only BOTA0-2 scan.
+   - The answer did not change. Check the SSS clock and power domain at the call (Apollo `clk-exynos9810.c`,
+     PMUCAL): the clock calls answered 0, which says the SMC path is open but not that the engine is powered.
+   - Read what the phone's EL3 expects from the `0xC2000401` handshake. Read the bootloader partitions read-only with
+     `cp_bl=1`; do not flash them.
    - Decide between a Carbon change (it forwards or provides what EL3 needs) and letting Samsung's EL2 start. This is
-     boot-chain work, not driver work.
-   - Fallbacks to try once: `shannon_toc=1` (TOC at +0, BOOT at +0x200) and `shannon_base=0`.
-2. **Step 3 (written, never run): `shannon=3`.**
-   - MODEM_ON (AP status word, AP2CP_CFG = 1, only once RESET_SEQUENCER_STATUS is 5) and BOOT_ON (CP status within 2 s).
+     boot-chain work, not driver work; do not start it without the owner's confirmation.
+   - The old `shannon_toc=1`/`shannon_base=0` fallbacks are gone: the driver copies nothing at 0 before BOOT, and the
+     base is passed in the mode whenever the image carries its memory table.
+2. **Step 3 (written, never run): `cp=3`.**
+   - MODEM_ON (AP status word, AP2CP_CFG = 1 only after a 0 check and once RESET_SEQUENCER_STATUS is 5) and BOOT_ON (CP status within 2 s).
    - DL_START (legacy IPC map at 0xF8000000 reset, magic 0x424F4F54, AP status 1).
    - The UDL handshake (0x900d → 0xa00d, 0x9f00 → 0xaf00 as SIPC5 frames `FC D7 08 00` + word in the RAW queues).
    - Then 60 s of the CP mailbox (PHONE_START, INIT_START).
@@ -79,19 +102,26 @@ TWRP: build 39 found the CP cold again.
 
 | Argument | Effect |
 |---|---|
-| `shannon=1` | Read only: CP_CTRL via the read SMC, PMU CP words, mailbox INTMR0, RADIO TOC and memory map |
-| `shannon=2` | cal_cp_init, SMC(2,0,0), BOOT/MAIN/VSS/NV loaded, secure SMC; CP not started |
-| `shannon=3` | Step 2, then MODEM_ON, BOOT_ON, DL_START, the UDL handshake, 60 s of mailbox |
-| `shannon_peek=1` | Step 1 also reads the CP region's first page |
-| `shannon_regs=1` | Step 1 also reads the CP SYS_PWR registers and more mailbox words |
-| `shannon_nv=1` | NV from `EFS:/nv_data.bin` (size logged, never contents); default 0xFF |
-| `shannon_base=0` | Secure request without the base in its mode (default: with) |
-| `shannon_toc=1` | TOC at +0 and BOOT at +0x200 (experiment) |
-| `shannon_blsize=N` | Boot-loader size for the secure request (default BOOT's TOC size, 0x1e40) |
-| `shannon_again=0` | No second try with interrupts on (170b5a8) |
-| `shannon_zero=0` | Do not zero the boot region before loading (170b5a8) |
-| `shannon_sysrev=N` | Board revision in the AP status word (default 0) |
-| `shannon_udl_irq=1` | Also ring the mailbox after each UDL word |
+| `cp=1` | Read only: the secure PMU words through the SMC, RADIO's table of contents, the CP's memory as found |
+| `cp=2` | Stage 2: `cal_cp_init` if the CP never ran, mode 2, the boot region cleared, BOOT/MAIN/VSS/NV loaded and CRC-checked, then mode 0 \| base. The CP is not started |
+| `cp=3` | Stage 2, then AP2CP_CFG only after a 0, DL_START, the UDL handshake, and the CP's mailbox |
+| `cp_nv=2` | `/nv_data.bin` from EFS, read-only, kept in RAM for the run (the S9's setting) |
+| `cp_nv=1` | The builder's `nv_data.bin` beside the kernel instead |
+| `cp_if=1` | With `cp=6`/`7` and `cp_apn`: the active data context becomes `pdp_ip0` and stays up |
+| `cp_apn=NAME` | The APN stage 6 asks for; none: no stage 6 |
+| `cp_rfs=1` | The CP's file opens answered "not there" from RAM |
+| `cp_delay=N` | Seconds before the driver starts (30; 40 on the S9 CI image) |
+| `cp_bl=1` | Read BOTA0-2 once, read-only, and log where the EL3 monitor's CP handler and messages might be |
+| `cp_vss=0` | Do not copy VSS |
+| `cp_rev=N`, `cp_ds=N`, `cp_wait=N` | Board revision (26), dual-SIM field (0), seconds the started CP is watched |
+| `cp_sim=1`, `cp_ping=A.B.C.D`, `cp_if_kb=N`, `cp_route=1` | As in the driver's header comment |
+
+`kern.hakios.cp.state` is the stage reached (1 looked, 2 loaded and checked, 3 the CP up, 4 the link up; 100 + the
+stage that failed; 200 stopped). `kern.hakios.cp.go`: 1 prints the state, 2 stops the CP, 3 asks the version again.
+
+The driver does not create `kern.hakios.cellular_*`: the redwood driver owns those names, and they come with step 3 of
+the plan. Every run's log is in the loader log or USB console (`cp:` lines). Firmware is read from the phone's own
+RADIO at run time, so nothing of Samsung's is in this repository or in any image.
 
 ### Risks
 
@@ -100,9 +130,9 @@ TWRP: build 39 found the CP cold again.
 - **Scheduler state.** Never bind threads to processors from this driver (build 37).
 - **What the SMCs change.** They change PMU state for the CP until the next power cycle. A failed secure request leaves
   the CP powered but not running. It has no lasting effect: the CP was cold again after each restart.
-- **Identity data.** NV holds the phone's identity. It is never logged, and it is only loaded with `shannon_nv=1`. With
+- **Identity data.** NV holds the phone's identity. It is never logged, and it is only loaded with `cp_nv=1` or `cp_nv=2`. With
   no RFS server nothing the CP writes reaches flash.
-- **Cost of a failed run.** Each one costs a TWRP round trip. Run one step at a time, `shannon=1` → `2` → `3`.
+- **Cost of a failed run.** Each one costs a TWRP round trip. Run one step at a time, `cp=1` → `2` → `3`.
 
 ## 1. How redwood does it (and what carries over)
 
@@ -276,7 +306,7 @@ function logs with.
    chunk. VSS is sent only once per Android boot (`vendor.cbd.first_xmit_done`).
 6. **"Request Security : secure mode"** = `std_security_req(0, BOOT.size, MAIN.size)`, i.e. (0, 0x1e40, 0x24075c0),
    again off CPU 0. The kernel ORs the region's base into the mode only if `shm_probe` found a CP memory map at boot.
-   On a cold boot BOOT sits at +0 and the probe looks at +0x2a0, so it finds none: **x1 = 0** in principle, but build 39 showed that EL3 rejects that with CP_INVALID_CP_BASE, so on this firmware the base is evidently passed (see the shannon_base row).
+   On a cold boot BOOT sits at +0 and the probe looks at +0x2a0, so it finds none: **x1 = 0** in principle, but build 39 showed that EL3 rejects that with CP_INVALID_CP_BASE, so on this firmware the base is evidently passed whenever the image carries its memory table (see "The sequence").
 7. **`get_factory_prop`** reads `/efs/factory.prop` (SIM count) and echoes it to `…/mif_pdata/sim/ds_detect`.
 8. **"MODEM ON : pda_active 1, cp power on"** = `IOCTL_MODEM_ON` (0x6f19, `ss310ap_on`).
 9. **"BOOT ON : change modem state, irq, wait cp state"** = `IOCTL_MODEM_BOOT_ON` (0x6f22). It waits for the CP status
@@ -323,10 +353,11 @@ RADIO TOC and the CP memory map read on the phone match the backup and the devic
 The "more" size, 0x1900000, is the sum of VSS, IPC, ZMC and VPA, and DRAM plus that is 0x9200000, the `modem_if`
 size. Everything sits inside the loader's keep-out (0xF0000000-0xFB1FFFFF).
 
-**The boot-loader size:** cbd passes BOOT's TOC size (0x1e40), with BOOT itself at +0, not after the TOC. That is the
-driver's default now. `shannon_toc=1` and `shannon_blsize=` remain only for experiments.
+**The boot-loader size:** cbd passes BOOT's TOC size (0x1e40), with BOOT itself at +0, not after the TOC. The driver
+does the same: nothing is put at 0 before BOOT. (A run with RADIO's TOC at 0 and BOOT at 0x200 answered the same
+`0x82001010`; that layout is not in the driver.)
 
-### The secure request on this boot chain: builds 39-40, and Carbon at EL2
+### The secure request on this boot chain: builds 39-44, and Carbon at EL2
 
 **What the phone answered:**
 
@@ -364,13 +395,15 @@ Samsung's EL2 normally registers its services with EL3 through that call; Carbon
   clock or power domain the verify needs and that is not on).
 - Neither of these is proven.
 
-**What build 41 (170b5a8) measures, to tell these apart:**
-- x0-x3 of the SSS clock call and of the request, logged in full. A non-zero clock answer points at the security
-  engine.
-- The request repeated once with interrupts on, as Linux makes it from the ioctl.
-- The boot region zeroed of the loader's leftovers first. Build 40 found the loader's payload text at +0.
+**What the 18 November run (`g30006199`) measured:**
+- The SSS clock calls answered 0 on and 0 off: the SMC path is open. That does not prove the engine's power domain.
+- Zeroing the boot region and byte-exact image CRCs changed nothing: the answer is not leftover data or a bad image.
+- Both layouts (BOOT at +0, and TOC at 0 with BOOT at 0x200) answered `0x82001010`; the address is not the refusal
+  (mode 0 alone answers `0x13`, the address error, as expected).
+- Next: read the monitor's code (BOTA0-2, read-only, `cp_bl=1`), then choose between an EL2/registration change and an
+  SSS/CM precondition. No boot-chain change without the owner's confirmation.
 
-**If the answer is still 0x82001010, the next steps are in the boot chain:**
+**The next steps are in the boot chain:**
 1. **Check the security engine.** Compare what Linux has on that Android does not leave to EL3: its CMU and power
    domain at the time of the call (Apollo's `clk-exynos9810.c`/PMUCAL for SSS).
 2. **Find EL3's dependency on EL2.** Read what EL3 (the `el3_mon` in the phone's bootloader partition, read-only)
@@ -445,25 +478,12 @@ and the boot go through without surprises.
 It does nothing without a boot argument. It is called from `hakios_input_init()` after `hakios_mpss_init()`, with a stub
 in `hakios.stubs.c`. It needs UFS (`ufs=2`).
 
-| Argument | Effect |
-|---|---|
-| `shannon=1` | Read only, each MMIO read logged before it is made: CP_CTRL_NS/S via SMC READ_CTRL, PMU CP_STAT, CENTRAL_SEQ conf/status, RESET_SEQUENCER_STATUS (what Samsung reads at any time), mailbox INTMR0 (read by Linux at boot), then RADIO TOC and MEM map. **Not** AP2CP_CFG: build 35 showed that reading it with the CP never initialised is a synchronous external abort (panic in `log_cp_registers`). It is touched only in step 3, once RESET_SEQUENCER_STATUS is 5 and the verify call passed, as `ss310ap_on` does |
-| `shannon_regs=1` | Also the CP SYS_PWR_REGs and the other mailbox words (INTSR0/INTMR1/INTSR1, words 0-3) |
-| `shannon_peek=1` | Also logs a few words of the first page at `0xF0000000` (what the boot loader left; Linux reads the same page at probe time) |
-| `shannon=2` | cbd's order: `cal_cp_init` if the CP was never initialised, SMC(2, 0, 0) (0 or CP_NOT_WORKING accepted), then BOOT/MAIN/VSS/NV at `address & 0x3fffffff` (BOOT +0, MAIN +0x10000, VSS +0x7900000, NV +0x4900000; crc32s logged), then SMC(0, BOOT size, MAIN size). Both SMCs are made off CPU 0, as cbd makes them. Does not start the CP |
-| `shannon_nv=1` | With 2-3: NV from `EFS:/nv_data.bin` if it is exactly the NV entry's size (size logged, never contents). Without it NV is 0xFF, what cbd's `create_empty_nv` writes |
-| `shannon_toc=1` | Experiment only: TOC at +0 and BOOT after it (the layout of `shm_ipc.c`'s memory-map probe), not cbd's |
-| `shannon_base=0` | The secure request without the region base in its mode. The base (0xF0000000) is ORed in by default since build 39: mode 0 alone, as cbd passes it, got **CP_INVALID_CP_BASE (0x13)** from EL3. Linux ORs it in when shm_ipc.c found the CP memory map at boot (use_cp_memory_map), and this RADIO carries one (MEM0 in BOOT). Step 2 also logs the region first words before loading, to show whether the boot loader left TOC/BOOT there |
-| `shannon_blsize=N` | The boot-loader size for the secure request (default BOOT's TOC size, as cbd) |
-| `shannon=3` | Then cbd steps 8-11: the AP status word, AP2CP_CFG = 1 (only with RESET_SEQUENCER_STATUS 5), up to 2 s for the CP status; DL_START (the legacy IPC map at 0xF8000000 reset, magic 0x424F4F54, AP status 1); the UDL handshake (0x900d to 0xa00d, then 0x9f00 to 0xaf00, as SIPC5 frames FC D7 08 00 + word in the RAW queues, 30 s each); then 60 s of the CP mailbox (PHONE_START, INIT_START, ...). PIF_INIT_DONE / INIT_END (the SBD rings) are next |
-| `shannon_udl_irq=1` | Also rings the mailbox (MASK_SEND_RAW) after each UDL word; Linux xmit_udl does not |
-| `shannon_sysrev=N` | The board revision in the AP status word (default 0) |
+The arguments are the current ones in "Boot arguments" above and in the driver's header comment; the `shannon_*` names
+that appear in the 13 November sections are the earlier driver and are kept only as history.
 
-`sysctl kern.hakios.shannon_state` is 0 (nothing), 1 (read), 2 (verified), 3 (CP status up) or 4 (CP spoke). The
-driver does not create `kern.hakios.cellular_*`: the redwood driver owns those names, and they come with step 3 of the
-plan. **Order of runs:** `shannon=1` → `shannon=1 shannon_peek=1` → `shannon=2` → `shannon=3`. Each run's log is in
-the loader log or USB console (`shannon:` lines). Firmware is read from the phone's own RADIO at run time, so
-nothing of Samsung's is in this repository or in any image.
+The driver does not create `kern.hakios.cellular_*`: the redwood driver owns those names, and they come with step 3 of
+the plan. Every run's log is in the loader log or the USB console (`cp:` lines). Firmware is read from the phone's own
+RADIO at run time, so nothing of Samsung's is in this repository or in any image.
 
 ## 8. Rules kept
 
