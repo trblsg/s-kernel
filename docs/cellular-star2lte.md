@@ -25,13 +25,18 @@ history). On the phone it runs with `cp=7 cp_nv=2 cp_if=1 cp_rfs=1 cp_delay=40`,
   never sent) because that is what the CP's reset vector expects, not because it is expected to change the check.
 - **The check bypass is gone for good.** `cp_check=0` is removed: with the CP started after a refused check, reading
   AP2CP_CFG (`0x14820000`) is a kernel data abort (ESR `0x96000410`, FAR `0x10014820000`). Stage 3 runs only after a 0.
-- **Next diagnostic: `cp_bl=1`.** A read-only scan of BOTA0-2 through `hakios_ufs_read_partition()` looks for
-  `0x82000700`, `0x82001011`, `0x82001010` and the strings the monitor's CP path would carry (`el3_mon`, `CP_CPU`,
-  `CP_INVALID_CP_BASE`, `CP not working`, `CryptoManager`), logging each hit's offset and 16 bytes around it.
-  Nothing is written and no bootloader partition is mapped.
+- **The BOTA scan found nothing (`g947ea4db`, 18 November).** `cp_bl=1` read BOTA0 (4,194,304 bytes), BOTA1
+  (8,388,608) and BOTA2 (8,388,608) read-only through `hakios_ufs_read_partition()` (148/295/297 ms) and looked for
+  `0x82000700`, `0x82001011`, `0x82001010`, `"el3_mon"`, `"CP_CPU"`, `"CP_INVALID_CP_BASE"`, `"CP not working"` and
+  `"CryptoManager"`: **0 hits for every pattern in every partition**. That is a result about those bytes only, not
+  proof that EL3 is absent: the bootloaders may be encrypted or compressed, or the monitor may sit in a partition the
+  scan did not open.
+- **The rest of that run was identical to `g30006199`.** The boot region cleared in 18 ms, BOOT/MAIN/VSS CRCs all
+  "THE SAME", NV from EFS (1,048,576 bytes, CRC-32 `4bf7…`), mode 2 `0xb`, mode 0 `0x82001010` with x1=2, x2=x3=0, a
+  lone mode 0 `0x13`, CP back in reset, AP2CP_CFG never read, no panic.
 - **Still the working hypotheses:** EL3 expects the `0xC2000401` registration Samsung's EL2 (uH/RKP) makes, or the
-  security engine (SSS) is not in the state the verify needs. The scan is meant to show which code path answers, not
-  to prove either.
+  security engine (SSS) is not in the state the verify needs. The scan was meant to show which code path answers; it
+  did not, so the next step is another read-only probe, not more SMC argument changes.
 
 ## Status, 13 November 2026 (end of day; definitive)
 
@@ -63,9 +68,10 @@ TWRP: build 39 found the CP cold again.
   (uH/RKP) makes. EL3's verify may depend on Samsung's EL2.
 - **Suspect 2: the security engine.** 0x82001010 neighbours the SSS IDs 0x82001011 (clock) and 0x82001012, so it may be
   the security engine's status: a clock or power domain off.
-- **Next diagnostic: the monitor's own code.** `cp_bl=1` reads BOTA0-2 once, read-only, and logs where the CP SMC
-  number, the SSS numbers and the monitor's CP strings are (see the status section). It was written on 18 November and
-  has not run yet.
+- **The monitor's own code is not in BOTA0-2 in plain form.** `cp_bl=1` scanned all three read-only for the CP SMC
+  number, the SSS numbers and the monitor's CP strings; every pattern got 0 hits (see the status section). Either the
+  bootloaders carry it compressed or encrypted, or it lives elsewhere. A header/entropy dump is the next read-only
+  probe; guessing at SMC arguments has no more to give.
 
 ### Next steps, in order
 
@@ -400,8 +406,10 @@ Samsung's EL2 normally registers its services with EL3 through that call; Carbon
 - Zeroing the boot region and byte-exact image CRCs changed nothing: the answer is not leftover data or a bad image.
 - Both layouts (BOOT at +0, and TOC at 0 with BOOT at 0x200) answered `0x82001010`; the address is not the refusal
   (mode 0 alone answers `0x13`, the address error, as expected).
-- Next: read the monitor's code (BOTA0-2, read-only, `cp_bl=1`), then choose between an EL2/registration change and an
-  SSS/CM precondition. No boot-chain change without the owner's confirmation.
+- The follow-up run (`g947ea4db`) repeated all of that and ran the read-only BOTA0-2 scan: 4/8/8 MiB read, zero hits
+  for the CP SMC number, the SSS numbers and the monitor's strings. The next choice is still between an
+  EL2/registration change and an SSS/CM precondition, but the first needs a read-only probe of the boot chain (a
+  header/entropy dump of the BOTAs) before anything is changed. No boot-chain change without the owner's confirmation.
 
 **The next steps are in the boot chain:**
 1. **Check the security engine.** Compare what Linux has on that Android does not leave to EL3: its CMU and power
