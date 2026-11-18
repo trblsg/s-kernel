@@ -183,6 +183,12 @@ static uint32_t pll_mhz(void);
  */
 #define MALI_JOB_SPI            282u
 #define MALI_JOB_INTID          314u            /* SPI 282: INTID = 32 + 282 */
+/*
+ * JOB_INT_MASK is an enable register, as panfrost writes it (1 opens a slot's interrupt, 0 masks it; its hard handler
+ * masks with 0 and its threaded one opens again with all the bits). Jobs use JS0 (fragment) and JS1 (everything else),
+ * so the two slots' done bits (0, 1) and error bits (16, 17) are opened.
+ */
+#define MALI_JOB_MASK           ((1u << 0) | (1u << 1) | (1u << 16) | (1u << 17))
 #define MALI_IRQ_SPIN_US        20u             /* (two delays of 10 us before the first sleep) */
 #define MALI_IRQ_WATCH_US       200u            /* (a lost interrupt is found by this timer, not a 50 us nap) */
 #define MALI_IRQ_MISSES         64u             /* (jobs in a row done with no interrupt: poll again) */
@@ -1544,7 +1550,7 @@ mali_irq_arm(void)
 		return false;
 	}
 	wr(mali, JOB_INT_CLEAR, 0xffffffffu);
-	wr(mali, JOB_INT_MASK, 0);              /* (0 unmasks every slot: a set bit masks it) */
+	wr(mali, JOB_INT_MASK, MALI_JOB_MASK); /* (1 opens a slot; 0 is a mask, which is what the last run wrote) */
 	if (!mali_irq_attached) {
 		if (gic_v3_spi_attach(MALI_JOB_INTID, false, mali_job_interrupt, NULL) != KERN_SUCCESS) {
 			say("mali: job irq: SPI %u (GIC INTID %u) did not attach; polling\n", MALI_JOB_SPI, MALI_JOB_INTID);
@@ -1552,8 +1558,8 @@ mali_irq_arm(void)
 			return false;
 		}
 		mali_irq_attached = true;
-		say("mali: job irq=1: SPI %u (GIC INTID %u) attached; the done bit is still the answer\n", MALI_JOB_SPI,
-		    MALI_JOB_INTID);
+		say("mali: job irq=1: SPI %u (GIC INTID %u) attached; JOB_INT_MASK %#x (wrote %#x); the done bit is still "
+		    "the answer\n", MALI_JOB_SPI, MALI_JOB_INTID, rd(mali, JOB_INT_MASK), MALI_JOB_MASK);
 	}
 	return true;
 }
@@ -1582,7 +1588,8 @@ mali_irq_off(void)
 static void
 mali_irq_fallback(void)
 {
-	say("mali: job irq: %u jobs in a row completed without one; polling from now on\n", MALI_IRQ_MISSES);
+	say("mali: job irq: %u jobs in a row completed without one (JOB_INT_RAWSTAT %#x, JOB_INT_MASK %#x); polling from "
+	    "now on\n", MALI_IRQ_MISSES, rd(mali, JOB_INT_RAWSTAT), rd(mali, JOB_INT_MASK));
 	mali_irq = 0;
 	mali_irq_missing = 0;
 	mali_irq_fallbacks++;
@@ -2651,7 +2658,11 @@ mali_worker(__unused void *parameter, __unused wait_result_t result)
 					    jobs[1], busy[1] / 1000000, jobs[1] ? busy[1] / 1000 / jobs[1] : 0, pll_mhz(),
 					    gov_switches, gov_ups, gov_capped, mc == GOV_NOT_READ_MC ? 0 : mc / 1000,
 					    mc == GOV_NOT_READ_MC ? 0 : mc % 1000 / 100);
-					printf("mali: job waits: %llu by irq, %llu by poll (%u in a row without one), "
+					/*
+					 * say, not printf: this line is the one read from the USB console after a run; the
+					 * kernel's printf does not reach it. Every 5 s of GPU work, at most.
+					 */
+					say("mali: job waits: %llu by irq, %llu by poll (%u in a row without one), "
 					    "%llu empty irqs, %llu fallbacks; %llu poll spins, %llu sleeps in 5 s\n",
 					    mali_irq_waits, mali_irq_late, mali_irq_missing, mali_irq_empty, mali_irq_fallbacks,
 					    mali_spin_rounds, mali_naps);
