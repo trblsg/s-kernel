@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 754 symbols in 20 groups; 54 are set, 45 of them drivers built in.
+# 757 symbols in 20 groups; 54 are set, 45 of them drivers built in.
 #
 
 #
@@ -112,7 +112,7 @@ CONFIG_HAKIOS_QMI=y
 # the modem (modem=1): started, its file systems served from the flash, the IPA's data path as en1, the SIM and the ... [hakios.mpss.c, hakios.cell.c, hakios.nas.c, hakios.ipa.c; requires CONFIG_HAKIOS_QMI, CONFIG_HAKIOS_UFS]
 CONFIG_HAKIOS_MODEM=y
 
-# the Galaxy S9/S9+ Shannon modem (the Exynos 9810 CP), a step at a time (shannon=N): 1 its registers and the RADIO ... [hakios.shannon.c; requires CONFIG_HAKIOS_UFS]
+# the Galaxy S9's own modem, the Shannon CP inside the Exynos 9810 (cp=N): 1 a look at its PMU words, its mailbox and ... [hakios.shannon.c]
 # CONFIG_HAKIOS_SHANNON is not set
 
 # the battery: kern.hakios.battery_*, and HakiosBattery, the IOPMPowerSource Darwin reads the charge from (the state ... [hakios.battery.c, hakios.battery.cpp]
@@ -1690,7 +1690,7 @@ CONFIG_MODEM_AGAIN=y
 # CONFIG_UFS_WRITE_GUID is not set
 
 #
-# User space (184)
+# User space (187)
 #
 
 # Star2's primary rear camera (S5K2L3): 2 powers it up at boot as its stream would, reads its ID and revision, powers ...
@@ -1884,6 +1884,48 @@ CONFIG_MODEM_AGAIN=y
 
 # read by 1003-avf-console-quiet.patch (kernel)
 # CONFIG_CONSOLE_QUIET is not set
+
+# read by hakios.shannon.c (kernel)
+# CONFIG_CP is not set
+
+# the access point name stage 6 asks the data context for (the operator's published default; none: no stage 6)
+# CONFIG_CP_APN is not set
+
+# seconds after the boot before the modem's driver does anything (30), so that its lines are in the log
+# CONFIG_CP_DELAY is not set
+
+# the dual SIM field told to the modem (0)
+# CONFIG_CP_DS is not set
+
+# with cp=6 or 7 and cp_apn: the active data context becomes a network interface, pdp_ip0 (IPv4, point to point, the ...
+# CONFIG_CP_IF is not set
+
+# with cp_if=1: at most N KB through pdp_ip0 in a boot, both ways (2048 by default; the owner's mobile plan), then it ...
+# CONFIG_CP_IF_KB is not set
+
+# the phone's own NV data, a file nv_data.bin the image's builder put beside the kernel, is given to the modem (none: ...
+# CONFIG_CP_NV is not set
+
+# the address stage 7 sends its one echo request to (none: the context's first DNS server)
+# CONFIG_CP_PING is not set
+
+# the board's revision told to the modem (26, this phone's)
+# CONFIG_CP_REV is not set
+
+# an OPEN FILE answered from RAM: the file is not there
+# CONFIG_CP_RFS is not set
+
+# with cp_if=1: an IPv4 default route through pdp_ip0 (only when there is none yet: Wi-Fi's wins)
+# CONFIG_CP_ROUTE is not set
+
+# in low power mode, once the SIM is ready, one read of its administrative data file (EF_AD, 4 bytes: no identity) is ...
+# CONFIG_CP_SIM is not set
+
+# the image's VSS part (the voice processor's) is not copied
+# CONFIG_CP_VSS is not set
+
+# seconds the started modem is watched before it is put back in reset (20; 25 with the link)
+# CONFIG_CP_WAIT is not set
 
 # run it (0, or none: the fixed rates of cpufreq_lit= and cpufreq_big=)
 # CONFIG_CPUFREQ_GOV is not set
@@ -2145,39 +2187,6 @@ CONFIG_MODEM_AGAIN=y
 
 # read by hakios.scsnd.c (kernel)
 # CONFIG_SCSND_SIZE is not set
-
-# read only: CP_CTRL_NS/_S through the read SMC, the four PMU words Samsung's exynos_print_cp_status reads
-# CONFIG_SHANNON is not set
-
-# read by hakios.shannon.c (kernel)
-# CONFIG_SHANNON_AGAIN is not set
-
-# read by hakios.shannon.c (kernel)
-# CONFIG_SHANNON_BASE is not set
-
-# read by hakios.shannon.c (kernel)
-# CONFIG_SHANNON_BLSIZE is not set
-
-# read by hakios.shannon.c (kernel)
-# CONFIG_SHANNON_NV is not set
-
-# read by hakios.shannon.c (kernel)
-# CONFIG_SHANNON_PEEK is not set
-
-# read by hakios.shannon.c (kernel)
-# CONFIG_SHANNON_REGS is not set
-
-# read by hakios.shannon.c (kernel)
-# CONFIG_SHANNON_SYSREV is not set
-
-# read by hakios.shannon.c (kernel)
-# CONFIG_SHANNON_TOC is not set
-
-# read by hakios.shannon.c (kernel)
-# CONFIG_SHANNON_UDL_IRQ is not set
-
-# read by hakios.shannon.c (kernel)
-# CONFIG_SHANNON_ZERO is not set
 
 # read by scion_splash.c (kernel)
 # CONFIG_SPLASH_LINES is not set

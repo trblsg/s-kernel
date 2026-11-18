@@ -17,8 +17,14 @@ driver MODEM
 
 driver SHANNON
 	file    bsd/dev/hakios.shannon.c
-	requires UFS
 	default n
-	help    the Galaxy S9/S9+ Shannon modem (the Exynos 9810 CP), a step at a time (shannon=N): 1 its registers and the
-	help    RADIO partition headers, read only; 2 RADIO loaded into the CP memory and verified by EL3 (SMC 0x82000700),
-	help    not started; 3 started and its mailbox listened to for 60 s. docs/cellular-star2lte.md
+	help    the Galaxy S9's own modem, the Shannon CP inside the Exynos 9810 (cp=N): 1 a look at its PMU words, its
+	help    mailbox and the RADIO partition's table of contents; 2 its image copied from RADIO, read only and as it is,
+	help    into the CP's memory at 0xF0000000 and checked by the secure world's own call; 3 the CP started, its boot
+	help    loader's handshake, the ring table, PHONE_START; 4 the link, only with the phone's own NV data (cp_nv=1, a
+	help    file the image's builder supplies; EFS is never read or written): "low power mode" asked first, the CP's
+	help    messages logged, the software version asked; 5 with a ready SIM "normal" asked, the registration watched
+	help    for two minutes, then low power again (written, not yet run: the test SIM read as locked). Its file
+	help    requests are not answered. Only where the CP's memory is not XNU's: the ios-27 tree, and the 16.5 line since
+	help    its loader moves the payload out of it and keeps it out of XNU's RAM (xnuloader/platforms/starlte.c). The driver
+	help    checks that itself and does nothing otherwise. Off unless asked

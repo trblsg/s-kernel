@@ -333,6 +333,11 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -o obj/rwtouch src/rwtouch.c
 		# the kernel's thermal pressure passed on to iOS (src/thermald.c)
 		$DYN -o obj/thermald src/thermald.c
+		# the Galaxy S9's cellular data context (pdp_ip0, the kernel's cp_if=1) made a network service of configd's: the
+		# same source the iOS 27 root is given (tools/ios27/modem/scion-celld.c; com.hakios.celld.plist). It ends at once
+		# on a boot without the modem
+		$DYN -Wall -Wextra -Werror -framework CoreFoundation -framework SystemConfiguration -o obj/scion-celld \
+			../tools/ios27/modem/scion-celld.c
 		# the first boot's report (src/selftest.c, com.hakios.selftest.plist)
 		$DYN -o obj/selftest src/selftest.c
 		# the package manager's prefix on a kept /private/var (src/jb_seed.c, com.hakios.jbseed.plist)
@@ -674,6 +679,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/cpu_test ] && cp obj/cpu_test root/bin/        # (a prebuilt/ from before this program has none)
 	[ -f obj/mali_test ] && cp obj/mali_test root/bin/      # (likewise)
 	[ -f obj/thermald ] && cp obj/thermald root/bin/
+	[ -f obj/scion-celld ] && cp obj/scion-celld root/bin/
 	[ -f obj/selftest ] && cp obj/selftest root/bin/
 	[ -f obj/jb_seed ] && cp obj/jb_seed root/bin/
 	[ -f obj/passcoded ] && cp obj/passcoded root/bin/
@@ -950,6 +956,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	# fairplayd among them).
 	cp com.hakios.demo.plist com.hakios.wifi.plist com.hakios.thermald.plist com.hakios.passcoded.plist root/LaunchDaemons/
 	[ ! -f root/bin/jb_seed ] || cp com.hakios.jbseed.plist root/LaunchDaemons/
+	[ ! -f root/bin/scion-celld ] || cp com.hakios.celld.plist root/LaunchDaemons/
 	# sshd from the prefix, when there is a key of ours to let in (com.hakios.sshd.plist; SHARE=1: never)
 	if [ -z "$SHARE" ] && [ -f ../ssh/authorized_keys ]; then cp com.hakios.sshd.plist root/LaunchDaemons/; else rm -f root/LaunchDaemons/com.hakios.sshd.plist; fi
 	[ ! -f root/bin/selftest ] || cp com.hakios.selftest.plist root/LaunchDaemons/

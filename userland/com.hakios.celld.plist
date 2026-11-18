@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.hakios.celld</string>
+	<!-- the Galaxy S9's cellular data context (the kernel's modem driver, cp_if=1: pdp_ip0) published to configd as a
+	     network service, so that names resolve and iOS routes over cellular when nothing better is up
+	     (tools/ios27/modem/scion-celld.c, the source the iOS 27 root uses). As root: the kernel gives the context's
+	     address to root only. Without the modem (no cp=) it exits 0 at once and is left; it is started again only
+	     if it fails -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/redwood/bin/scion-celld</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+	<key>StandardOutPath</key>
+	<string>/dev/console</string>
+	<key>StandardErrorPath</key>
+	<string>/dev/console</string>
+</dict>
+</plist>

@@ -2,7 +2,7 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **696 arguments**: 605 read by the kernel, 23 by the loader, 85 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **699 arguments**: 608 read by the kernel, 23 by the loader, 85 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
@@ -600,7 +600,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 | `ufs_write_guid` | L | `loader.c` | `CONFIG_UFS_WRITE_GUID` |  |
 
-## User space (184)
+## User space (187)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -666,6 +666,20 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `cohtest` | K | `hakios.exynos_m3.c` | `CONFIG_COHTEST` |  |
 | `cohtest_delay` | K | `hakios.exynos_m3.c` | `CONFIG_COHTEST_DELAY` |  |
 | `console_quiet` | K | `1003-avf-console-quiet.patch` | `CONFIG_CONSOLE_QUIET` |  |
+| `cp` | K | `hakios.shannon.c` | `CONFIG_CP` |  |
+| `cp_apn` | K | `hakios.shannon.c` | `CONFIG_CP_APN` |  |
+| `cp_delay` | K | `hakios.shannon.c` | `CONFIG_CP_DELAY` |  |
+| `cp_ds` | K | `hakios.shannon.c` | `CONFIG_CP_DS` |  |
+| `cp_if` | K | `hakios.shannon.c` | `CONFIG_CP_IF` |  |
+| `cp_if_kb` | K | `hakios.shannon.c` | `CONFIG_CP_IF_KB` |  |
+| `cp_nv` | K | `hakios.shannon.c` | `CONFIG_CP_NV` |  |
+| `cp_ping` | K | `hakios.shannon.c` | `CONFIG_CP_PING` |  |
+| `cp_rev` | K | `hakios.shannon.c` | `CONFIG_CP_REV` |  |
+| `cp_rfs` | K | `hakios.shannon.c` | `CONFIG_CP_RFS` |  |
+| `cp_route` | K | `hakios.shannon.c` | `CONFIG_CP_ROUTE` |  |
+| `cp_sim` | K | `hakios.shannon.c` | `CONFIG_CP_SIM` |  |
+| `cp_vss` | K | `hakios.shannon.c` | `CONFIG_CP_VSS` |  |
+| `cp_wait` | K | `hakios.shannon.c` | `CONFIG_CP_WAIT` |  |
 | `cpufreq_gov` | K | `hakios.exynos_cpufreq.c` | `CONFIG_CPUFREQ_GOV` |  |
 | `cpufreq_gov_big_dual` | K | `hakios.exynos_cpufreq.c` | `CONFIG_CPUFREQ_GOV_BIG_DUAL` |  |
 | `cpufreq_gov_big_max` | K | `hakios.exynos_cpufreq.c` | `CONFIG_CPUFREQ_GOV_BIG_MAX` |  |
@@ -754,17 +768,6 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `scgpu.size` | K | `hakios.vgpu3d_xnu.c` | `CONFIG_SCGPU_SIZE` |  |
 | `scsnd.addr` | K | `hakios.scsnd.c` | `CONFIG_SCSND_ADDR` |  |
 | `scsnd.size` | K | `hakios.scsnd.c` | `CONFIG_SCSND_SIZE` |  |
-| `shannon` | K | `hakios.shannon.c` | `CONFIG_SHANNON` |  |
-| `shannon_again` | K | `hakios.shannon.c` | `CONFIG_SHANNON_AGAIN` |  |
-| `shannon_base` | K | `hakios.shannon.c` | `CONFIG_SHANNON_BASE` |  |
-| `shannon_blsize` | K | `hakios.shannon.c` | `CONFIG_SHANNON_BLSIZE` |  |
-| `shannon_nv` | K | `hakios.shannon.c` | `CONFIG_SHANNON_NV` |  |
-| `shannon_peek` | K | `hakios.shannon.c` | `CONFIG_SHANNON_PEEK` |  |
-| `shannon_regs` | K | `hakios.shannon.c` | `CONFIG_SHANNON_REGS` |  |
-| `shannon_sysrev` | K | `hakios.shannon.c` | `CONFIG_SHANNON_SYSREV` |  |
-| `shannon_toc` | K | `hakios.shannon.c` | `CONFIG_SHANNON_TOC` |  |
-| `shannon_udl_irq` | K | `hakios.shannon.c` | `CONFIG_SHANNON_UDL_IRQ` |  |
-| `shannon_zero` | K | `hakios.shannon.c` | `CONFIG_SHANNON_ZERO` |  |
 | `splash_lines` | K | `scion_splash.c` | `CONFIG_SPLASH_LINES` |  |
 | `switcher_wallpaper` | U | `inject_sb.c` | `CONFIG_SWITCHER_WALLPAPER` |  |
 | `system_apfs` | U | `init.c` | `CONFIG_SYSTEM_APFS` |  |

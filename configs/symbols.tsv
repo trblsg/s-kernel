@@ -173,6 +173,20 @@ COHTEST_DELAY	arg	cohtest_delay	User space	k	hakios.exynos_m3.c
 CONSOLE_QUIET	arg	console_quiet	User space	k	1003-avf-console-quiet.patch	
 CORE0	arg	core0	Loader	kl	loader.c,psci_smp.c	the kernel's box for this core (above), if it has one, and only with a kernel on another core to watch
 CORE1	arg	core1	Loader	l	loader.c	core 1, which S-Boot uses for its own display work, listed for the kernel all the same
+CP	arg	cp	User space	k	hakios.shannon.c	
+CP_APN	arg	cp_apn	User space	k	hakios.shannon.c	the access point name stage 6 asks the data context for (the operator's published default; none: no stage 6)
+CP_DELAY	arg	cp_delay	User space	k	hakios.shannon.c	seconds after the boot before the modem's driver does anything (30), so that its lines are in the log
+CP_DS	arg	cp_ds	User space	k	hakios.shannon.c	the dual SIM field told to the modem (0)
+CP_IF	arg	cp_if	User space	k	hakios.shannon.c	with cp=6 or 7 and cp_apn: the active data context becomes a network interface, pdp_ip0 (IPv4, point to point, the CP's address for it), and stays
+CP_IF_KB	arg	cp_if_kb	User space	k	hakios.shannon.c	with cp_if=1: at most N KB through pdp_ip0 in a boot, both ways (2048 by default; the owner's mobile plan), then it drops
+CP_NV	arg	cp_nv	User space	k	hakios.shannon.c	the phone's own NV data, a file nv_data.bin the image's builder put beside the kernel, is given to the modem (none: zeros, and no stage 4)
+CP_PING	arg	cp_ping	User space	k	hakios.shannon.c	the address stage 7 sends its one echo request to (none: the context's first DNS server)
+CP_REV	arg	cp_rev	User space	k	hakios.shannon.c	the board's revision told to the modem (26, this phone's)
+CP_RFS	arg	cp_rfs	User space	k	hakios.shannon.c	an OPEN FILE answered from RAM: the file is not there
+CP_ROUTE	arg	cp_route	User space	k	hakios.shannon.c	with cp_if=1: an IPv4 default route through pdp_ip0 (only when there is none yet: Wi-Fi's wins)
+CP_SIM	arg	cp_sim	User space	k	hakios.shannon.c	in low power mode, once the SIM is ready, one read of its administrative data file (EF_AD, 4 bytes: no identity) is asked, to see if the modem takes
+CP_VSS	arg	cp_vss	User space	k	hakios.shannon.c	the image's VSS part (the voice processor's) is not copied
+CP_WAIT	arg	cp_wait	User space	k	hakios.shannon.c	seconds the started modem is watched before it is put back in reset (20; 25 with the link)
 CPUFREQ_GOV	arg	cpufreq_gov	User space	k	hakios.exynos_cpufreq.c	run it (0, or none: the fixed rates of cpufreq_lit= and cpufreq_big=)
 CPUFREQ_GOV_BIG_DUAL	arg	cpufreq_gov_big_dual	User space	k	hakios.exynos_cpufreq.c	
 CPUFREQ_GOV_BIG_MAX	arg	cpufreq_gov_big_max	User space	k	hakios.exynos_cpufreq.c	
@@ -463,17 +477,6 @@ SCSND_ADDR	arg	scsnd.addr	User space	k	hakios.scsnd.c
 SCSND_SIZE	arg	scsnd.size	User space	k	hakios.scsnd.c	
 SECURITY	arg	security	Security stand-ins	k	kern_minimac.c	
 SERIAL	arg	serial	Loader	l	loader.c	
-SHANNON	arg	shannon	User space	k	hakios.shannon.c	read only: CP_CTRL_NS/_S through the read SMC, the four PMU words Samsung's exynos_print_cp_status reads
-SHANNON_AGAIN	arg	shannon_again	User space	k	hakios.shannon.c	
-SHANNON_BASE	hex	shannon_base	User space	k	hakios.shannon.c	
-SHANNON_BLSIZE	arg	shannon_blsize	User space	k	hakios.shannon.c	
-SHANNON_NV	arg	shannon_nv	User space	k	hakios.shannon.c	
-SHANNON_PEEK	arg	shannon_peek	User space	k	hakios.shannon.c	
-SHANNON_REGS	arg	shannon_regs	User space	k	hakios.shannon.c	
-SHANNON_SYSREV	arg	shannon_sysrev	User space	k	hakios.shannon.c	
-SHANNON_TOC	arg	shannon_toc	User space	k	hakios.shannon.c	
-SHANNON_UDL_IRQ	arg	shannon_udl_irq	User space	k	hakios.shannon.c	
-SHANNON_ZERO	arg	shannon_zero	User space	k	hakios.shannon.c	
 SHUB	arg	shub	Sensors	k	hakios.ssp.c	
 SHUB_ACC_CAL	arg	shub_acc_cal	Sensors	k	hakios.ssp.c	the accelerometer's factory offsets, sent to the hub before the sensors go on, as Samsung does
 SHUB_ACC_POS	arg	shub_acc_pos	Sensors	k	hakios.ssp.c	the accelerometer's (and gyroscope's) position in the formation of step 5
