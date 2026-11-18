@@ -7,15 +7,19 @@
  * WHAT THE CP IS, AS THE AP SEES IT (the phone's device tree and Samsung's kernel, read as data)
  *   its memory     146 MB of the phone's DRAM at 0xF0000000 (the device tree's reserved "modem_if"), outside XNU's
  *                  RAM. The CP sees it at 0x40000000. The image's own table (below) divides it:
- *                    0x0000000  the CP's code and data, 121 MB (BOOT at 0, MAIN at 0x10000, NV at 0x4900000)
+ *                    0x0000000  the table of contents, 512 bytes; then BOOT at 0x200 and MAIN at 0x10000, NV at
+ *                               0x4900000 (the boot loader's own layout: Samsung's shm_ipc reads the image's memory
+ *                               map at 0x200 + 0xA0)
  *                    0x7900000  VSS, the voice processor's, 7 MB
  *                    0x8000000  IPC, 5 MB: the memory both sides talk through
  *                    0x8500000  ZMC, 11 MB: downlink packets' buffers (not used here)
  *                    0x9000000  VPA, 2 MB
  *   its image      the phone's RADIO partition, read only, used exactly as it is. It starts with a table of
  *                  contents of 32-byte entries (name[12], offset in the partition, address for the CP, size, CRC-32,
- *                  number): TOC, BOOT, MAIN, VSS, NV, OFFSET. An entry goes to (its address - BOOT's address) in the
- *                  CP's memory. NV has no bytes in RADIO: it is the place of the phone's own non-volatile data
+ *                  number): TOC, BOOT, MAIN, VSS, NV, OFFSET. Each entry goes to (its address - BOOT's address) in the
+ *                  CP's memory, except BOOT itself, which goes right after the table of contents at 0x200 as the boot
+ *                  loader leaves it (the table's first entry, 512 bytes, stays at 0). NV has no bytes in RADIO: it is
+ *                  the place of the phone's own non-volatile data
  *                  (Android's boot daemon copies /efs/nv_data.bin there). This driver never writes the EFS partition
  *                  and never mounts it. With cp_nv=2 (the owner's decision of 13 Nov 2026) it READS /nv_data.bin out
  *                  of EFS at boot through a read-only ext4 reader (hakios.ext4ro.h over hakios_ufs_read_partition,
@@ -59,9 +63,10 @@
  *   1  a look, nothing changed: the PMU's and the mailbox's registers, the two secure words (the SMC's read),
  *      the first words of the CP's memory as the boot loader left it, RADIO's table of contents.
  *   2  that, and the image loaded and checked: the CP's power domain started if it never was (CP_CTRL_NS bit 1,
- *      CP_CTRL_S bit 3), the memory opened (mode 2), BOOT, MAIN and VSS copied from RADIO and compared with the
- *      table's CRCs, the NV place filled (zeros, or the builder's file with cp_nv=1), then the secure world's
- *      check (mode 0). Its answer is logged. The CP is not started.
+ *      CP_CTRL_S bit 3), the memory opened (mode 2), RADIO's table of contents, BOOT, MAIN and VSS copied to the
+ *      boot loader's layout (TOC at 0, BOOT at 0x200, MAIN at 0x10000) and compared with the table's CRCs, the NV
+ *      place filled (zeros, or the builder's file with cp_nv=1), then the secure world's check (mode 0). Its
+ *      answer is logged. The CP is not started.
  *   3  that, and the CP started: the mailbox cleared, the AP's state word set, AP2CP_CFG written, the CP's state
  *      waited for, the boot loader's two questions (0x900D, answer 0xA00D; 0x9F00, answer 0xAF00), then the
  *      running CP's INIT_START, the ring table written, PIF_INIT_DONE, and its PHONE_START: "THE CP IS UP".
@@ -762,10 +767,51 @@ cp_power_first(void)
 	return true;
 }
 
+/*
+ * Where the boot loader puts an entry. MAIN, VSS and NV go to the address the table gives (minus BOOT's,
+ * 0x40000000). BOOT does not: the boot loader keeps RADIO's table of contents, 512 bytes, at the CP memory's
+ * start and puts BOOT right after it, at its own offset in the partition (0x200), not at 0x40000000. Samsung's
+ * 9820 shm_ipc reads the image's memory map at BOOT's offset + 0xA0 for exactly that layout, and the secure world
+ * reads it there too (the check is given the memory's address, 0xF0000000).
+ */
+static uint32_t
+entry_off(const struct toc_entry *e)
+{
+	if (e == cp.boot) {
+		return e->offset;
+	}
+	return e->address - cp.boot->address;
+}
+
+/* RADIO's table of contents: 512 bytes at the CP memory's start, as the boot loader leaves it (first entry's size) */
+static bool
+copy_toc(void)
+{
+	const struct toc_entry *e = &cp.toc[0];
+	uint8_t *dst = (uint8_t *)cp.mem;
+	const volatile uint32_t *m = (const volatile uint32_t *)(void *)cp.mem;
+	uint64_t t0 = now_ms();
+	int error;
+
+	if (e->offset != 0 || e->size == 0 || e->size > CP_IPC_OFFSET || cp.boot == NULL || cp.boot->offset < e->size) {
+		say("cp: the table of contents is not where this driver expects it (RADIO %#x, %u bytes): nothing is loaded\n",
+		    e->offset, e->size);
+		return false;
+	}
+	error = hakios_ufs_read_partition("RADIO", e->offset, dst, e->size, NULL);
+	if (error != 0) {
+		say("cp: the table of contents could not be read (error %d)\n", error);
+		return false;
+	}
+	say("cp: TOC: %u bytes of RADIO at %#x copied to the CP's memory at 0 in %llu ms; read back, its first words %#x "
+	    "%#x %#x %#x\n", e->size, e->offset, now_ms() - t0, m[0], m[1], m[2], m[3]);
+	return true;
+}
+
 static bool
 copy_entry(const struct toc_entry *e)
 {
-	uint32_t at = e->address - cp.boot->address;
+	uint32_t at = entry_off(e);
 	uint8_t *dst = (uint8_t *)cp.mem + at;
 	uint64_t t0 = now_ms();
 	uint32_t crc;
@@ -895,20 +941,22 @@ fill_nv(void)
 static bool
 load_and_check(void)
 {
-	uint32_t answer;
+	const volatile uint32_t *m = (const volatile uint32_t *)(void *)cp.mem;
+	uint32_t answer, clk_on, clk_off, boot_at, map_at;
 	uint64_t mode;
 
 	if (!cp_power_first()) {
 		return false;
 	}
-	smc(SMC_SSS_CLK, 0, 0, 0);
+	clk_on = (uint32_t)smc(SMC_SSS_CLK, 0, 0, 0);
 	answer = (uint32_t)smc(SMC_CP, 2, 0, 0);
-	smc(SMC_SSS_CLK, 1, 0, 0);
+	clk_off = (uint32_t)smc(SMC_SSS_CLK, 1, 0, 0);
+	say("cp: the hash engine's clock: on answered %#x, off %#x\n", clk_on, clk_off);
 	say("cp: the secure world asked to open the CP's memory for loading (mode 2): it answered %#x (%s)\n", answer,
 	    smc_error(answer));
 	/* (Samsung's daemon goes on whatever this answers: "CP not working" is what a CP that never ran gives) */
 
-	if (!copy_entry(cp.boot) || !copy_entry(cp.main)) {
+	if (!copy_toc() || !copy_entry(cp.boot) || !copy_entry(cp.main)) {
 		say("cp: the image in the CP's memory is not the image in RADIO: the secure world is not asked, nothing started\n");
 		return false;
 	}
@@ -923,11 +971,21 @@ load_and_check(void)
 	if (!fill_nv()) {
 		return false;
 	}
+	/* the two places the secure world reads when it is given the memory's address: the table of contents' first
+	 * entry at 0 ("TOC") and, inside BOOT at its offset in the partition, the image's memory map ("MEMn") */
+	boot_at = entry_off(cp.boot);
+	map_at = boot_at + 0xa0;
+	say("cp: the CP's memory after the load: at 0 %#x %#x %#x %#x (the table of contents: \"TOC\" is 0x434f54)\n",
+	    m[0], m[1], m[2], m[3]);
+	say("cp: the CP's memory after the load: at %#x (BOOT) %#x %#x %#x %#x; at %#x (its memory map) %#x %#x %#x %#x\n",
+	    boot_at, m[boot_at / 4], m[boot_at / 4 + 1], m[boot_at / 4 + 2], m[boot_at / 4 + 3], map_at, m[map_at / 4],
+	    m[map_at / 4 + 1], m[map_at / 4 + 2], m[map_at / 4 + 3]);
 
 	mode = cp.mem_table ? CP_MEM_PA : 0;
-	smc(SMC_SSS_CLK, 0, 0, 0);
+	clk_on = (uint32_t)smc(SMC_SSS_CLK, 0, 0, 0);
 	answer = (uint32_t)smc(SMC_CP, mode, cp.boot->size, cp.main->size);
-	smc(SMC_SSS_CLK, 1, 0, 0);
+	clk_off = (uint32_t)smc(SMC_SSS_CLK, 1, 0, 0);
+	say("cp: the hash engine's clock around the check: on answered %#x, off %#x\n", clk_on, clk_off);
 	say("cp: THE SECURE WORLD'S CHECK of the image (mode 0, memory %#llx, BOOT %u bytes, MAIN %u bytes): it answered "
 	    "%#x (%s)\n", mode, cp.boot->size, cp.main->size, answer, smc_error(answer));
 	if (answer != 0) {
