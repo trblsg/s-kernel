@@ -31,6 +31,9 @@
  *                       Both can also be changed while the system runs: sysctl kern.hakios.g3d_sleep=0|1 and
  *                       kern.hakios.g3d_sleep_ms=MS (the USB console), so one image is both halves of an A/B.
  *   mali_nap_us=US      poll interval for a job still running after its first 200 us, clamped to 10..1000 (default 50).
+ *   mali_irq=1          wait for the JOB interrupt (SPI 282, GIC INTID 314) instead of the 50 us naps. The done bit is
+ *                       still what the wait reads; the interrupt only wakes it. After 64 jobs in a row complete without
+ *                       one, the driver goes back to polling. Default 0. kern.hakios.mali_irq=0|1 changes it at runtime.
  *
  * The user client is opened by backboardd, which does not run as root. Nothing here or in hakios.mali.cpp needs root.
  *
@@ -170,6 +173,32 @@ static bool g3d_power_on(void);         /* (mali_job_lock held: the power-on ste
 static void g3d_idle_gate(void);
 static void gov_rebase(void);
 static uint32_t pll_mhz(void);
+/*
+ * The JOB interrupt: SPI 282 on the G3D block, GIC INTID 314. Off by default (mali_irq=1 turns it on): the driver has
+ * polled since the first job, and a wrong mask or a level line that is never quieted would cost more than the naps. When
+ * it is on, the interrupt only wakes wait_job(); the done bit in JOB_INT_RAWSTAT is still the answer, so a stale or late
+ * line cannot make a running job look finished. The GIC routes an SPI to the processor that attaches it, so it is
+ * attached after the G3D is on and detached before the domain goes off: a read of a powered-off block is a bus hang. The
+ * handler must not take mali_job_lock, which the worker holds across the whole wait.
+ */
+#define MALI_JOB_SPI            282u
+#define MALI_JOB_INTID          314u            /* SPI 282: INTID = 32 + 282 */
+#define MALI_IRQ_SPIN_US        20u             /* (two delays of 10 us before the first sleep) */
+#define MALI_IRQ_WATCH_US       200u            /* (a lost interrupt is found by this timer, not a 50 us nap) */
+#define MALI_IRQ_MISSES         64u             /* (jobs in a row done with no interrupt: poll again) */
+static uint32_t mali_irq;                       /* boot-arg mali_irq=1 */
+static bool mali_irq_attached;
+static uint32_t mali_irq_armed;                 /* (a job is in flight and waits on mali_wait_event) */
+static uint64_t mali_irq_count;                 /* (the handler's: one per completion it woke) */
+static uint64_t mali_irq_empty;                 /* (a line with nothing set, or no waiter) */
+static uint64_t mali_irq_waits;                 /* (jobs finished after an interrupt) */
+static uint64_t mali_irq_late;                  /* (jobs finished by the poll first) */
+static uint64_t mali_irq_fallbacks;
+static uint32_t mali_irq_missing;               /* (in a row, for the fallback) */
+static uint64_t mali_spin_rounds, mali_naps;    /* (instrumentation: the poll's 10 us rounds and sleeps) */
+static bool mali_irq_arm(void);                 /* (mali_job_lock held, G3D on: clear, unmask, attach) */
+static void mali_irq_off(void);                 /* (mali_job_lock held: detach, then clear if the G3D is on) */
+static void mali_job_interrupt(void *context, uint32_t intid);
 /*
  * The supply, through ACPM (hakios.exynos_acpm.c): BUCK6 (vdd_g3d). Only B6OUT is written, never above 0x68 (950 mV,
  * the regulator's maximum in the phone's device tree), and it is read back. B6CTRL is read for the log. The rail is put
@@ -360,7 +389,8 @@ pause_us(uint32_t us)
 /*
  * The GPU's registers are at 0x17500000 (0x5000 bytes; the device tree's mali@17500000). A Bifrost GPU needs no
  * firmware. GPU_ID >> 16 reads 0x6221 on this phone: architecture 6.2, product 1, the G72. Interrupts are SPI 282 (job),
- * 281 (MMU) and 283 (GPU), GIC INTIDs 314, 313 and 315 on the GIC-400. They are not used; the driver polls.
+ * 281 (MMU) and 283 (GPU), GIC INTIDs 314, 313 and 315 on the GIC-400. The JOB one can be used (mali_irq=1); the other
+ * two are not used and the driver polls.
  * Coherency is none. The GPU does not look into the processors' caches, so the CPU cleans its cache around what the
  * GPU reads and writes in kernel memory (job pages, page tables). Program buffers are write-combined.
  */
@@ -1254,6 +1284,9 @@ g3d_power_on(void)
 	lck_mtx_unlock(&mali_lock);
 	gpu_answered = true;
 	g3d_awake = true;
+	if (mali_irq) {
+		(void)mali_irq_arm();           /* (the domain is on: the GIC line can be attached again) */
+	}
 	now = mach_absolute_time();
 	__atomic_store_n(&g3d_last_busy, now, __ATOMIC_RELAXED);
 	gov_rebase();
@@ -1424,6 +1457,9 @@ step_serve(void)
 	lck_mtx_lock(&mali_job_lock);
 	g3d_awake = true;
 	__atomic_store_n(&g3d_last_busy, mach_absolute_time(), __ATOMIC_RELAXED);
+	if (mali_irq) {
+		(void)mali_irq_arm();           /* (before HakiosMaliStart: the first client job sees the line) */
+	}
 	lck_mtx_unlock(&mali_job_lock);
 	HakiosMaliStart();
 	return true;
@@ -1448,6 +1484,8 @@ static const struct {
 /*
  * Waits for a job without keeping a core busy: a short poll, then sleeps of mali_nap_us at a time. The wait used to
  * spin (delay(10) in a loop) for as long as the GPU worked, which took a whole core of the four during each frame.
+ * With mali_irq=1 the short poll is 20 us and the sleep is on the JOB interrupt; the done bit is still read here. A job
+ * that completes without an interrupt 64 times in a row puts the driver back on the timer (mali_irq_fallback()).
  */
 static int mali_wait_event;
 static uint32_t mali_nap_us = 50;       /* boot-arg mali_nap_us (10 to 1000) */
@@ -1460,16 +1498,149 @@ job_bits(uint32_t value, uint32_t mask, uint32_t want)
 	return want == 0 ? (value & mask) != 0 : (value & mask) == want;
 }
 
+/*
+ * The JOB interrupt. It is attached after the G3D is on and detached before it goes off: the block's registers are a bus
+ * hang while the domain is off, and a level-triggered SPI left enabled with no waiter would storm. The handler masks the
+ * line and wakes wait_job(); the worker reads JOB_INT_RAWSTAT, clears the slot's bits and unmasks. Clearing here would
+ * erase the very bit the worker reads, and the job would look hung and be reset on every completion.
+ */
+extern kern_return_t gic_v3_spi_attach(uint32_t intid, bool edge, void (*handler)(void *context, uint32_t intid),
+    void *context);
+extern void gic_v3_spi_mask(uint32_t intid);
+extern void gic_v3_spi_unmask(uint32_t intid);
+extern void gic_v3_spi_detach(uint32_t intid);
+
+static void
+mali_job_interrupt(__unused void *context, uint32_t intid)
+{
+	uint32_t raw = rd(mali, JOB_INT_RAWSTAT);
+
+	/*
+	 * A line with no bit set is a stale one: the worker has already cleared the job, and there is nothing to mask. It
+	 * happens when the previous job's handler runs after that job's wait returned; waking the next wait for it would make
+	 * the next job look done. Count it and leave the line as it is.
+	 */
+	if (raw == 0) {
+		__atomic_add_fetch(&mali_irq_empty, 1, __ATOMIC_RELAXED);
+		return;
+	}
+	if (!__atomic_load_n(&mali_irq_armed, __ATOMIC_ACQUIRE)) {
+		__atomic_add_fetch(&mali_irq_empty, 1, __ATOMIC_RELAXED);
+		wr(mali, JOB_INT_CLEAR, raw);           /* (between jobs: quiet the source, no waiter to wake) */
+		return;
+	}
+	gic_v3_spi_mask(intid);
+	__atomic_add_fetch(&mali_irq_count, 1, __ATOMIC_RELEASE);
+	thread_wakeup((event_t)&mali_wait_event);
+}
+
+/* mali_job_lock held, G3D on: the block's stale bits gone, its interrupts unmasked, the GIC line attached if wanted. */
+static bool
+mali_irq_arm(void)
+{
+	if (mali == 0 || !mali_irq) {
+		return false;
+	}
+	wr(mali, JOB_INT_CLEAR, 0xffffffffu);
+	wr(mali, JOB_INT_MASK, 0);              /* (0 unmasks every slot: a set bit masks it) */
+	if (!mali_irq_attached) {
+		if (gic_v3_spi_attach(MALI_JOB_INTID, false, mali_job_interrupt, NULL) != KERN_SUCCESS) {
+			say("mali: job irq: SPI %u (GIC INTID %u) did not attach; polling\n", MALI_JOB_SPI, MALI_JOB_INTID);
+			mali_irq = 0;
+			return false;
+		}
+		mali_irq_attached = true;
+		say("mali: job irq=1: SPI %u (GIC INTID %u) attached; the done bit is still the answer\n", MALI_JOB_SPI,
+		    MALI_JOB_INTID);
+	}
+	return true;
+}
+
+/* mali_job_lock held: the GIC line given back, the block's registers left as they are. */
+static void
+mali_irq_detach(void)
+{
+	if (mali_irq_attached) {
+		gic_v3_spi_detach(MALI_JOB_INTID);
+		mali_irq_attached = false;
+	}
+}
+
+/* mali_job_lock held: the line detached (its handler finished), then the block's bits cleared if it is on. */
+static void
+mali_irq_off(void)
+{
+	mali_irq_detach();
+	if (mali != 0 && (g3d_awake || !g3d_sleep)) {
+		wr(mali, JOB_INT_CLEAR, 0xffffffffu);
+	}
+}
+
+/* 64 jobs in a row done with no interrupt: the timer is cheaper than a line that is not working. mali_job_lock held. */
+static void
+mali_irq_fallback(void)
+{
+	say("mali: job irq: %u jobs in a row completed without one; polling from now on\n", MALI_IRQ_MISSES);
+	mali_irq = 0;
+	mali_irq_missing = 0;
+	mali_irq_fallbacks++;
+	/*
+	 * Detach only: the completed job's bit is what its caller reads next, and clearing it here would make the job
+	 * that just finished look hung, for a reset. The worker clears the bits itself once it has read them.
+	 */
+	mali_irq_detach();
+}
+
 static bool
 wait_job(uint32_t at, uint32_t mask, uint32_t want, uint32_t ms)
 {
-	uint64_t deadline;
+	uint64_t deadline, gen = 0;
 
+	/*
+	 * mali_irq=1: two 10 us polls for the jobs that end at once, then sleeps on the JOB interrupt. The sleep's timeout
+	 * is the watchdog: 200 us is long enough that a lost interrupt costs one timer, not the 1 s hang deadline. The done
+	 * bit is read after every wake; an interrupt that arrives while the job is still running only costs the read.
+	 */
+	if (mali_irq_attached) {
+		gen = __atomic_load_n(&mali_irq_count, __ATOMIC_ACQUIRE);
+		for (uint32_t i = 0; i < MALI_IRQ_SPIN_US / 10; i++) {
+			if (job_bits(rd(mali, at), mask, want)) {
+				return true;
+			}
+			delay(10);
+			mali_spin_rounds++;
+		}
+		clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
+		while (mach_absolute_time() < deadline) {
+			if (job_bits(rd(mali, at), mask, want)) {
+				if (__atomic_load_n(&mali_irq_count, __ATOMIC_ACQUIRE) == gen) {
+					mali_irq_late++;
+					if (++mali_irq_missing >= MALI_IRQ_MISSES) {
+						mali_irq_fallback();
+					}
+				} else {
+					mali_irq_missing = 0;
+					mali_irq_waits++;
+				}
+				return true;
+			}
+			uint64_t nap;
+
+			clock_interval_to_deadline(MALI_IRQ_WATCH_US, NSEC_PER_USEC, &nap);
+			lck_mtx_lock(&mali_wait_lock);
+			(void)lck_mtx_sleep_deadline(&mali_wait_lock, LCK_SLEEP_DEFAULT, (event_t)&mali_wait_event, THREAD_UNINT,
+			    nap);
+			lck_mtx_unlock(&mali_wait_lock);
+			mali_naps++;
+		}
+		return job_bits(rd(mali, at), mask, want);
+	}
 	for (int i = 0; i < 20; i++) {
 		if (job_bits(rd(mali, at), mask, want)) {
 			return true;
 		}
 		delay(10);
+		mali_spin_rounds++;
 	}
 	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
 	while (mach_absolute_time() < deadline) {
@@ -1482,6 +1653,7 @@ wait_job(uint32_t at, uint32_t mask, uint32_t want, uint32_t ms)
 		lck_mtx_lock(&mali_wait_lock);
 		(void)lck_mtx_sleep_deadline(&mali_wait_lock, LCK_SLEEP_DEFAULT, (event_t)&mali_wait_event, THREAD_UNINT, nap);
 		lck_mtx_unlock(&mali_wait_lock);
+		mali_naps++;
 	}
 	return job_bits(rd(mali, at), mask, want);
 }
@@ -1784,6 +1956,7 @@ hakios_mali_submit(uint64_t chain, bool fragment)
 	}
 	lck_mtx_lock(&mali_lock);
 	wr(mali, JOB_INT_CLEAR, (1u << slot) | (1u << (slot + 16)));
+	__atomic_store_n(&mali_irq_armed, mali_irq_attached ? 1u : 0u, __ATOMIC_RELEASE);
 	wr(mali, js + JS_HEAD_NEXT_LO, (uint32_t)chain);
 	wr(mali, js + JS_HEAD_NEXT_HI, (uint32_t)(chain >> 32));
 	wr(mali, js + JS_AFFINITY_NEXT_LO, shader_mask);
@@ -1821,10 +1994,17 @@ hakios_mali_submit(uint64_t chain, bool fragment)
 		if (!gpu_cores_on(&which)) {
 			printf("mali: after the reset, %s did not power up again\n", which);
 		}
+		if (mali_irq) {
+			(void)mali_irq_arm();           /* (the reset may have taken JOB_INT_MASK with it) */
+		}
 		as0_update(pt_transtab, pt_transcfg());
 		wr(mali, MMU_INT_CLEAR, 0xffffffffu);
 	}
 	wr(mali, JOB_INT_CLEAR, (1u << slot) | (1u << (slot + 16)));
+	__atomic_store_n(&mali_irq_armed, 0, __ATOMIC_RELEASE);
+	if (mali_irq_attached) {
+		gic_v3_spi_unmask(MALI_JOB_INTID);      /* (the handler masked it; the slot's bits are clear now) */
+	}
 	__atomic_store_n(&g3d_last_busy, mach_absolute_time(), __ATOMIC_RELAXED);
 	lck_mtx_unlock(&mali_lock);
 	lck_mtx_unlock(&mali_job_lock);
@@ -2222,6 +2402,7 @@ g3d_idle_gate(void)
 		return;
 	}
 	say("mali: g3d_sleep: no job and no frame for %u ms: the G3D goes off\n", g3d_sleep_ms);
+	mali_irq_off();                         /* (detach first: the handler must not read the block while it is off) */
 	g3d_off();
 	off = (rd(pmu, PMU_G3D_STATUS) & G3D_ON) != G3D_ON;
 	if (off) {
@@ -2231,6 +2412,9 @@ g3d_idle_gate(void)
 	} else {
 		g3d_awake = true;
 		say("mali: g3d_sleep: the domain did not go off; it is left on, as g3d_off() said\n");
+		if (mali_irq) {
+			(void)mali_irq_arm();   /* (the domain is still on, so the line goes back on it) */
+		}
 	}
 	lck_mtx_unlock(&mali_job_lock);
 }
@@ -2305,6 +2489,54 @@ g3d_sleep_ms_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unu
 }
 SYSCTL_PROC(_kern_hakios, OID_AUTO, g3d_sleep_ms, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
     g3d_sleep_ms_sysctl, "I", "the screen-off grace for g3d_sleep=, ms (500..60000)");
+
+/*
+ * kern.hakios.mali_irq: mali_irq=, changed while the system runs (the USB console's
+ * "sysctl kern.hakios.mali_irq=1"). Enabling takes mali_job_lock, so no job is in flight when the GIC line is attached;
+ * disabling detaches it and leaves the poll. A G3D that is off attaches on its next power-on: the handler must not read
+ * the block while the domain is off.
+ */
+static int
+mali_irq_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	int value = (int)mali_irq, error;
+
+	error = sysctl_io_number(req, value, sizeof(value), &value, NULL);
+	if (error != 0 || req->newptr == 0) {
+		return error;
+	}
+	if (value != 0 && value != 1) {
+		return EINVAL;
+	}
+	if (reached < STEPS) {
+		return ENODEV;
+	}
+	lck_mtx_lock(&mali_job_lock);
+	if (value == 0) {
+		if (mali_irq) {
+			mali_irq = 0;
+			mali_irq_missing = 0;
+			mali_irq_off();
+			say("mali: job irq=0: polling (kern.hakios.mali_irq)\n");
+		}
+	} else {
+		mali_irq = 1;
+		mali_irq_missing = 0;
+		mali_irq_fallbacks = 0;
+		if (g3d_awake || !g3d_sleep) {
+			if (!mali_irq_arm()) {
+				lck_mtx_unlock(&mali_job_lock);
+				return ENODEV;
+			}
+		} else {
+			say("mali: job irq=1: the G3D is off; SPI %u is attached by the next job\n", MALI_JOB_SPI);
+		}
+	}
+	lck_mtx_unlock(&mali_job_lock);
+	return 0;
+}
+SYSCTL_PROC(_kern_hakios, OID_AUTO, mali_irq, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
+    mali_irq_sysctl, "I", "the JOB interrupt (SPI 282) instead of polling for a job's done bit (mali_irq=; 0 or 1)");
 
 int hakios_mali_second(uint64_t *busy_ns, uint32_t *jobs, uint64_t *queued_ns, uint32_t *mhz, uint32_t *switches,
     int32_t *g3d_mc);
@@ -2417,7 +2649,13 @@ mali_worker(__unused void *parameter, __unused wait_result_t result)
 					    jobs[1], busy[1] / 1000000, jobs[1] ? busy[1] / 1000 / jobs[1] : 0, pll_mhz(),
 					    gov_switches, gov_ups, gov_capped, mc == GOV_NOT_READ_MC ? 0 : mc / 1000,
 					    mc == GOV_NOT_READ_MC ? 0 : mc % 1000 / 100);
+					printf("mali: job waits: %llu by irq, %llu by poll (%u in a row without one), "
+					    "%llu empty irqs, %llu fallbacks; %llu poll spins, %llu sleeps in 5 s\n",
+					    mali_irq_waits, mali_irq_late, mali_irq_missing, mali_irq_empty, mali_irq_fallbacks,
+					    mali_spin_rounds, mali_naps);
 					busy[0] = busy[1] = jobs[0] = jobs[1] = 0;
+					mali_spin_rounds = 0;
+					mali_naps = 0;
 					since = now;
 				}
 			}
@@ -2625,6 +2863,8 @@ hakios_mali_init(void)
 	(void)PE_parse_boot_argn("mali_dvs_floor", &mali_dvs_floor, sizeof(mali_dvs_floor));
 	(void)PE_parse_boot_argn("mali_nap_us", &mali_nap_us, sizeof(mali_nap_us));
 	mali_nap_us = mali_nap_us < 10 ? 10 : mali_nap_us > 1000 ? 1000 : mali_nap_us;
+	(void)PE_parse_boot_argn("mali_irq", &mali_irq, sizeof(mali_irq));
+	mali_irq = mali_irq != 0;
 	if (!PE_parse_boot_argn("mali", &last_step, sizeof(last_step)) || last_step == 0) {
 		return;
 	}
