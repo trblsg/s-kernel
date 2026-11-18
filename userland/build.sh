@@ -372,6 +372,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -framework IOKit -o obj/mali_test src/mali_test.c
 		# which processes take the processors, every few seconds (src/cputop.c; rc.jobs.cputop)
 		$DYN -o obj/cputop src/cputop.c
+		# Optional WidgetKit scheduling experiment; disabled unless widget_nice=N boot argument is set.
+		$DYN -o obj/widget_boot src/widget_boot.c
 		# the kept data volume to the flash every few seconds: the phone is reset, never shut down (src/var_sync.c)
 		$DYN -o obj/var_sync src/var_sync.c
 		# the device's name as the computer name, which lockdownd would write: bluetoothd's name, Bonjour's (src/devname.c)
@@ -685,6 +687,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/passcoded ] && cp obj/passcoded root/bin/
 	[ -f obj/telephonyd ] && cp obj/telephonyd root/bin/
 	[ -f obj/cputop ] && cp obj/cputop root/bin/
+	[ -f obj/widget_boot ] && cp obj/widget_boot root/bin/
 	[ -f obj/var_sync ] && cp obj/var_sync root/bin/
 	[ -f obj/devname ] && cp obj/devname root/bin/
 	[ -f obj/poster_retry ] && cp obj/poster_retry root/bin/
