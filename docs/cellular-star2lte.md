@@ -37,6 +37,19 @@ history). On the phone it runs with `cp=7 cp_nv=2 cp_if=1 cp_rfs=1 cp_delay=40`,
 - **Still the working hypotheses:** EL3 expects the `0xC2000401` registration Samsung's EL2 (uH/RKP) makes, or the
   security engine (SSS) is not in the state the verify needs. The scan was meant to show which code path answers; it
   did not, so the next step is another read-only probe, not more SMC argument changes.
+- **One image, many probes (18 November).** `kern.hakios.cp.probe` is a root-only string sysctl that runs one
+  read-only probe on demand, so the next questions do not each need a build:
+  - `sysctl -w kern.hakios.cp.probe="dist BOTA0"` — zero share, distinct bytes, 64 KB block spread and AArch64
+    NOP/RET/STP counts: plaintext code, or encrypted/compressed;
+  - `... "dump BOTA0 0 256"` — the first 256 bytes, hex and ASCII (a header, or noise);
+  - `... "str BOTA1"` — up to 32 printable strings of 8+ characters with their offsets (versions, component names);
+  - `... "scan PARAM"` — the same eight patterns as `cp_bl=1`, on any partition;
+  - `... "find BOTA0 545a415343"` — any byte pattern of up to 32 bytes, as hex ("TZASC" here), with its first
+    offsets and 16 bytes around the first.
+  It works without `cp=`, needs no boot argument, writes nothing, maps nothing and makes no SMC. EFS, SEC_EFS,
+  CPEFS, KEYSTORAGE, PERSISTENT and NAD_REFER are refused: their bytes are never printed. `dist` is allowed there
+  (it shows no bytes). The first batch after the next boot: `dist` on BOTA0-2, `dump BOTA0 0 256`, `str BOTA1`;
+  then `str`/`scan` on PARAM, UP_PARAM, CP_DEBUG, DQMDBG, STEADY, OMR and HIDDEN.
 
 ## Status, 13 November 2026 (end of day; definitive)
 
@@ -70,8 +83,8 @@ TWRP: build 39 found the CP cold again.
   the security engine's status: a clock or power domain off.
 - **The monitor's own code is not in BOTA0-2 in plain form.** `cp_bl=1` scanned all three read-only for the CP SMC
   number, the SSS numbers and the monitor's CP strings; every pattern got 0 hits (see the status section). Either the
-  bootloaders carry it compressed or encrypted, or it lives elsewhere. A header/entropy dump is the next read-only
-  probe; guessing at SMC arguments has no more to give.
+  bootloaders carry it compressed or encrypted, or it lives elsewhere. The runtime probes answer that directly
+  (`kern.hakios.cp.probe`: `dist`, `dump`, `str`); guessing at SMC arguments has no more to give.
 
 ### Next steps, in order
 
@@ -121,6 +134,12 @@ TWRP: build 39 found the CP cold again.
 | `cp_vss=0` | Do not copy VSS |
 | `cp_rev=N`, `cp_ds=N`, `cp_wait=N` | Board revision (26), dual-SIM field (0), seconds the started CP is watched |
 | `cp_sim=1`, `cp_ping=A.B.C.D`, `cp_if_kb=N`, `cp_route=1` | As in the driver's header comment |
+
+`kern.hakios.cp.probe` is not a boot argument: a root shell writes one command and the probe runs at once, read-only,
+so a question about a partition does not need a new image. `scan NAME` (the eight `cp_bl=1` patterns), `find NAME HEX`
+(up to 32 bytes), `dump NAME OFF LEN` (at most 1024 bytes, hex and ASCII), `str NAME` (up to 32 strings of 8+
+characters) and `dist NAME` (zero share, distinct bytes, 64 KB blocks, AArch64 opcodes). It works without `cp=`.
+EFS, SEC_EFS, CPEFS, KEYSTORAGE, PERSISTENT and NAD_REFER refuse the commands that would print bytes.
 
 `kern.hakios.cp.state` is the stage reached (1 looked, 2 loaded and checked, 3 the CP up, 4 the link up; 100 + the
 stage that failed; 200 stopped). `kern.hakios.cp.go`: 1 prints the state, 2 stops the CP, 3 asks the version again.
@@ -408,8 +427,9 @@ Samsung's EL2 normally registers its services with EL3 through that call; Carbon
   (mode 0 alone answers `0x13`, the address error, as expected).
 - The follow-up run (`g947ea4db`) repeated all of that and ran the read-only BOTA0-2 scan: 4/8/8 MiB read, zero hits
   for the CP SMC number, the SSS numbers and the monitor's strings. The next choice is still between an
-  EL2/registration change and an SSS/CM precondition, but the first needs a read-only probe of the boot chain (a
-  header/entropy dump of the BOTAs) before anything is changed. No boot-chain change without the owner's confirmation.
+  EL2/registration change and an SSS/CM precondition, but the first needs to know what the boot chain holds. The
+  runtime probe (`kern.hakios.cp.probe`, see the status section) answers that on the next image without another
+  build. No boot-chain change without the owner's confirmation.
 
 **The next steps are in the boot chain:**
 1. **Check the security engine.** Compare what Linux has on that Android does not leave to EL3: its CMU and power

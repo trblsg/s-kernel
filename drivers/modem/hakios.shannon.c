@@ -148,6 +148,9 @@
  *   cp_delay=N   seconds after the boot before the modem's driver does anything (30), so that its lines are in the log
  *   cp_bl=1      read the boot loader's BOTA0-2 partitions once, read-only, and log where the EL3 monitor's CP
  *                handler and messages might be (offsets and a few words around each hit; nothing is written)
+ *   (at run time) kern.hakios.cp.probe="scan|find|dump|str|dist NAME ...", root only, works without cp=: one
+ *                read-only look at any partition, on demand, so a question does not need a new image. Nothing is
+ *                written, no partition is mapped and no SMC is made
  *
  * WHERE IT MAY RUN. The CP's memory is fixed by the boot chain at 0xF0000000. On a tree whose loader puts XNU itself
  * there this driver must not load anything: it checks that no page of the 146 MB is XNU's and that the kernel is not in
@@ -866,26 +869,34 @@ bl_find(const uint8_t *buf, uint32_t len, const uint8_t *pat, uint32_t plen, uin
 	return -1;
 }
 
+static bool
+probe_private(const char *name);
+
 static void
-scan_bootloader(const char *name)
+scan_bootloader(const char *name, const char *tag)
 {
 	uint8_t *buf;
 	uint64_t size = 0, t0 = now_ms();
-	uint32_t hits[NBLPATTERNS], first[NBLPATTERNS];
+	uint64_t first[NBLPATTERNS];
+	uint32_t hits[NBLPATTERNS];
 	bool have[NBLPATTERNS];
 	uint32_t step = BL_CHUNK - 32;          /* 32 bytes of overlap: a hit on a chunk's edge is still seen once */
 	int error;
 
+	if (probe_private(name)) {
+		say("cp: %s: %s holds identity or keys: its bytes are not shown\n", tag, name);
+		return;
+	}
 	bzero(hits, sizeof(hits));
 	bzero(have, sizeof(have));
 	error = hakios_ufs_read_partition(name, 0, NULL, 0, &size);
 	if (error != 0 || size == 0) {
-		say("cp: cp_bl=1: %s cannot be read (error %d, %llu bytes)\n", name, error, size);
+		say("cp: %s: %s cannot be read (error %d, %llu bytes)\n", tag, name, error, size);
 		return;
 	}
 	buf = kalloc_data(BL_CHUNK, Z_WAITOK);
 	if (buf == NULL) {
-		say("cp: cp_bl=1: %s: no %u KB to read it into\n", name, BL_CHUNK >> 10);
+		say("cp: %s: %s: no %u KB to read it into\n", tag, name, BL_CHUNK >> 10);
 		return;
 	}
 	for (uint64_t at = 0; at < size; at += step) {
@@ -893,7 +904,7 @@ scan_bootloader(const char *name)
 
 		error = hakios_ufs_read_partition(name, at, buf, n, NULL);
 		if (error != 0) {
-			say("cp: cp_bl=1: %s at %#llx could not be read (error %d): stopped there\n", name, at, error);
+			say("cp: %s: %s at %#llx could not be read (error %d): stopped there\n", tag, name, at, error);
 			break;
 		}
 		for (uint32_t p = 0; p < NBLPATTERNS; p++) {
@@ -909,7 +920,7 @@ scan_bootloader(const char *name)
 					continue;
 				}
 				if (hits[p] == 0) {
-					first[p] = (uint32_t)(at + (uint32_t)i);
+					first[p] = at + (uint32_t)i;
 					have[p] = true;
 				}
 				if (hits[p] != 0xffffffffu) {
@@ -919,9 +930,9 @@ scan_bootloader(const char *name)
 			}
 		}
 	}
-	say("cp: cp_bl=1: %s (%llu bytes) read only and scanned in %llu ms\n", name, size, now_ms() - t0);
+	say("cp: %s: %s (%llu bytes) read only and scanned in %llu ms\n", tag, name, size, now_ms() - t0);
 	for (uint32_t p = 0; p < NBLPATTERNS; p++) {
-		say("cp: cp_bl=1: %s: %s: %u hit(s)\n", name, bl_patterns[p].what, hits[p]);
+		say("cp: %s: %s: %s: %u hit(s)\n", tag, name, bl_patterns[p].what, hits[p]);
 	}
 	for (uint32_t p = 0; p < NBLPATTERNS; p++) {
 		uint8_t around[16];
@@ -937,7 +948,7 @@ scan_bootloader(const char *name)
 		}
 		if (hakios_ufs_read_partition(name, at, around, sizeof(around), NULL) == 0) {
 			memcpy(w, around, sizeof(w));
-			say("cp: cp_bl=1: %s: first %s at %#llx, 16 bytes around it: %08x %08x %08x %08x\n", name,
+			say("cp: %s: %s: first %s at %#llx, 16 bytes around it: %08x %08x %08x %08x\n", tag, name,
 			    bl_patterns[p].what, first[p], w[0], w[1], w[2], w[3]);
 		}
 	}
@@ -950,7 +961,369 @@ scan_bootloaders(void)
 	static const char *const names[] = { "BOTA0", "BOTA1", "BOTA2" };
 
 	for (uint32_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-		scan_bootloader(names[i]);
+		scan_bootloader(names[i], "cp_bl=1");
+	}
+}
+
+/*
+ * kern.hakios.cp.probe: read-only probes from the console, so one boot answers several questions without another
+ * build. Root only, and no boot argument is needed (it does not touch the CP). Commands:
+ *   scan NAME           the eight patterns cp_bl=1 uses, on any partition
+ *   find NAME HEX       any byte pattern of up to 32 bytes, as hex, on any partition: count and first offsets
+ *   dump NAME OFF LEN   LEN bytes (at most 1024) from OFF, 16 to a line
+ *   str NAME            up to 32 printable strings of 8 or more characters, with their offsets
+ *   dist NAME           zero share, distinct bytes, 64 KB blocks and AArch64 opcodes: plaintext code or not
+ * Every byte comes through hakios_ufs_read_partition(): nothing is written, no partition is mapped and no SMC is made.
+ */
+#define PROBE_DUMP_MAX  1024
+#define PROBE_STR_MAX   32
+#define PROBE_STR_LEN   64
+
+static int
+probe_hexdigit(char c)
+{
+	if (c >= '0' && c <= '9') {
+		return c - '0';
+	}
+	if (c >= 'a' && c <= 'f') {
+		return c - 'a' + 10;
+	}
+	if (c >= 'A' && c <= 'F') {
+		return c - 'A' + 10;
+	}
+	return -1;
+}
+
+static bool
+probe_space(char c)
+{
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+/* (the command's words: cut in place at whitespace) */
+static char *
+probe_word(char **p)
+{
+	char *w = *p, *e;
+
+	while (probe_space(*w)) {
+		w++;
+	}
+	if (*w == 0) {
+		return NULL;
+	}
+	for (e = w; *e != 0 && !probe_space(*e); e++) {
+	}
+	if (*e != 0) {
+		*e++ = 0;
+	}
+	*p = e;
+	return w;
+}
+
+static int
+probe_hex(const char *s, uint8_t *out, uint32_t max, uint32_t *len)
+{
+	uint32_t n = 0;
+
+	if (s == NULL || s[0] == 0) {
+		return EINVAL;
+	}
+	for (; s[0] != 0; s += 2) {
+		int hi = probe_hexdigit(s[0]), lo;
+
+		if (hi < 0 || s[1] == 0 || (lo = probe_hexdigit(s[1])) < 0) {
+			return EINVAL;
+		}
+		if (n == max) {
+			return E2BIG;
+		}
+		out[n++] = (uint8_t)((hi << 4) | lo);
+	}
+	*len = n;
+	return 0;
+}
+
+/* (the partitions whose bytes are never printed: identity, keys and calibration; the statistics-only probe is
+ * allowed, the ones that show data are not) */
+static bool
+probe_private(const char *name)
+{
+	static const char *const names[] = {
+		"EFS", "SEC_EFS", "CPEFS", "KEYSTORAGE", "PERSISTENT", "NAD_REFER"
+	};
+
+	for (uint32_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		if (strcmp(name, names[i]) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void
+probe_find(const char *name, const uint8_t *pat, uint32_t plen)
+{
+	uint8_t *buf;
+	uint64_t size = 0, first = 0, t0 = now_ms();
+	uint32_t count = 0, told = 0, step = BL_CHUNK - 32;
+	int error;
+
+	if (probe_private(name)) {
+		say("cp: probe: %s holds identity or keys: its bytes are not shown\n", name);
+		return;
+	}
+	error = hakios_ufs_read_partition(name, 0, NULL, 0, &size);
+	if (error != 0 || size == 0) {
+		say("cp: probe: %s cannot be read (error %d, %llu bytes)\n", name, error, size);
+		return;
+	}
+	buf = kalloc_data(BL_CHUNK, Z_WAITOK);
+	if (buf == NULL) {
+		say("cp: probe: %s: no %u KB to read it into\n", name, BL_CHUNK >> 10);
+		return;
+	}
+	for (uint64_t at = 0; at < size; at += step) {
+		uint32_t n = (uint32_t)MIN(size - at, (uint64_t)BL_CHUNK);
+
+		error = hakios_ufs_read_partition(name, at, buf, n, NULL);
+		if (error != 0) {
+			say("cp: probe: %s at %#llx could not be read (error %d): stopped there\n", name, at, error);
+			break;
+		}
+		for (uint32_t i = 0; i + plen <= n; i++) {
+			if (at != 0 && i + plen <= 32) {
+				continue;               /* (counted with the chunk before) */
+			}
+			if (memcmp(buf + i, pat, plen) != 0) {
+				continue;
+			}
+			if (count == 0) {
+				first = at + i;
+			}
+			if (told < 8) {
+				say("cp: probe: %s: hit %u at %#llx\n", name, told + 1, at + i);
+				told++;
+			}
+			count++;
+		}
+	}
+	say("cp: probe: %s (%llu bytes): %u hit(s) in %llu ms\n", name, size, count, now_ms() - t0);
+	if (count != 0) {
+		uint8_t around[16];
+		uint32_t w[4];
+		uint64_t at = first & ~3ull;
+
+		if (at + sizeof(around) <= size && hakios_ufs_read_partition(name, at, around, sizeof(around), NULL) == 0) {
+			memcpy(w, around, sizeof(w));
+			say("cp: probe: %s: first at %#llx, 16 bytes from %#llx: %08x %08x %08x %08x\n", name, first, at,
+			    w[0], w[1], w[2], w[3]);
+		}
+	}
+	kfree_data(buf, BL_CHUNK);
+}
+
+static void
+probe_dump(const char *name, uint64_t off, uint32_t len)
+{
+	uint8_t row[16];
+	uint64_t size = 0;
+	int error;
+
+	if (probe_private(name)) {
+		say("cp: probe: %s holds identity or keys: its bytes are not shown\n", name);
+		return;
+	}
+	error = hakios_ufs_read_partition(name, 0, NULL, 0, &size);
+	if (error != 0 || size == 0) {
+		say("cp: probe: %s cannot be read (error %d, %llu bytes)\n", name, error, size);
+		return;
+	}
+	if (len > PROBE_DUMP_MAX) {
+		len = PROBE_DUMP_MAX;
+		say("cp: probe: %s: %u bytes at most\n", name, PROBE_DUMP_MAX);
+	}
+	for (uint32_t done = 0; done < len; ) {
+		char line[160];
+		size_t at = 0;
+		uint32_t n = MIN(len - done, 16u);
+
+		error = hakios_ufs_read_partition(name, off + done, row, n, NULL);
+		if (error != 0) {
+			say("cp: probe: %s at %#llx could not be read (error %d)\n", name, off + done, error);
+			return;
+		}
+		at += (size_t)snprintf(line + at, sizeof(line) - at, "cp: probe: %s %#llx:", name, off + done);
+		for (uint32_t i = 0; i < 16; i++) {
+			if (i < n) {
+				at += (size_t)snprintf(line + at, sizeof(line) - at, " %02x", row[i]);
+			} else {
+				at += (size_t)snprintf(line + at, sizeof(line) - at, "   ");
+			}
+		}
+		at += (size_t)snprintf(line + at, sizeof(line) - at, "  |");
+		for (uint32_t i = 0; i < n; i++) {
+			char c = (char)row[i];
+
+			at += (size_t)snprintf(line + at, sizeof(line) - at, "%c", c >= 0x20 && c < 0x7f ? c : '.');
+		}
+		snprintf(line + at, sizeof(line) - at, "|");
+		say("%s\n", line);
+		done += n;
+	}
+}
+
+static void
+probe_str(const char *name)
+{
+	uint8_t *buf;
+	uint64_t size = 0;
+	char cur[PROBE_STR_LEN];
+	uint64_t curat = 0;
+	uint32_t curlen = 0, told = 0;
+	int error;
+
+	if (probe_private(name)) {
+		say("cp: probe: %s holds identity or keys: its bytes are not shown\n", name);
+		return;
+	}
+	error = hakios_ufs_read_partition(name, 0, NULL, 0, &size);
+	if (error != 0 || size == 0) {
+		say("cp: probe: %s cannot be read (error %d, %llu bytes)\n", name, error, size);
+		return;
+	}
+	buf = kalloc_data(BL_CHUNK, Z_WAITOK);
+	if (buf == NULL) {
+		say("cp: probe: %s: no %u KB to read it into\n", name, BL_CHUNK >> 10);
+		return;
+	}
+	for (uint64_t at = 0; at < size && told < PROBE_STR_MAX; at += BL_CHUNK) {
+		uint32_t n = (uint32_t)MIN(size - at, (uint64_t)BL_CHUNK);
+
+		error = hakios_ufs_read_partition(name, at, buf, n, NULL);
+		if (error != 0) {
+			say("cp: probe: %s at %#llx could not be read (error %d): stopped there\n", name, at, error);
+			break;
+		}
+		for (uint32_t i = 0; i < n; i++) {
+			uint8_t c = buf[i];
+
+			if (c >= 0x20 && c < 0x7f) {
+				if (curlen == 0) {
+					curat = at + i;
+				}
+				if (curlen < sizeof(cur)) {
+					cur[curlen++] = (char)c;
+				}
+				continue;
+			}
+			if (curlen >= 8) {
+				say("cp: probe: %s: %#llx \"%.*s\"\n", name, curat, (int)curlen, cur);
+				told++;
+				if (told >= PROBE_STR_MAX) {
+					break;
+				}
+			}
+			curlen = 0;
+		}
+	}
+	if (told < PROBE_STR_MAX && curlen >= 8) {
+		say("cp: probe: %s: %#llx \"%.*s\"\n", name, curat, (int)curlen, cur);
+		told++;
+	}
+	say("cp: probe: %s (%llu bytes): %u string(s) of 8 or more characters%s\n", name, size, told,
+	    told >= PROBE_STR_MAX ? " (stopped at the limit)" : "");
+	kfree_data(buf, BL_CHUNK);
+}
+
+static void
+probe_dist(const char *name)
+{
+	static const uint32_t a64_nop = 0xd503201fu;
+	static const uint32_t a64_ret = 0xd65f03c0u;
+	static const uint32_t a64_stp = 0xa9bf7bfdu;
+	uint8_t *buf;
+	uint64_t size = 0, total = 0, zeros = 0, t0 = now_ms();
+	uint32_t hist[256] = { 0 }, blocks = 0, min_d = 256, max_d = 0, all256 = 0;
+	uint32_t nop = 0, ret = 0, stp = 0, distinct = 0, zpm;
+	int error;
+
+	error = hakios_ufs_read_partition(name, 0, NULL, 0, &size);
+	if (error != 0 || size == 0) {
+		say("cp: probe: %s cannot be read (error %d, %llu bytes)\n", name, error, size);
+		return;
+	}
+	buf = kalloc_data(BL_CHUNK, Z_WAITOK);
+	if (buf == NULL) {
+		say("cp: probe: %s: no %u KB to read it into\n", name, BL_CHUNK >> 10);
+		return;
+	}
+	for (uint64_t at = 0; at < size; at += BL_CHUNK) {
+		uint32_t n = (uint32_t)MIN(size - at, (uint64_t)BL_CHUNK);
+		uint32_t bh[256] = { 0 }, d = 0;
+
+		error = hakios_ufs_read_partition(name, at, buf, n, NULL);
+		if (error != 0) {
+			say("cp: probe: %s at %#llx could not be read (error %d): stopped there\n", name, at, error);
+			break;
+		}
+		for (uint32_t i = 0; i < n; i++) {
+			uint8_t b = buf[i];
+
+			hist[b]++;
+			bh[b]++;
+			total++;
+			zeros += b == 0;
+		}
+		for (uint32_t v = 0; v < 256; v++) {
+			d += bh[v] != 0;
+		}
+		blocks++;
+		min_d = MIN(min_d, d);
+		max_d = MAX(max_d, d);
+		all256 += d == 256;
+		for (uint32_t i = 0; i + 4 <= n; i += 4) {
+			uint32_t w;
+
+			memcpy(&w, buf + i, sizeof(w));
+			nop += w == a64_nop;
+			ret += w == a64_ret;
+			stp += w == a64_stp;
+		}
+	}
+	kfree_data(buf, BL_CHUNK);
+	for (uint32_t v = 0; v < 256; v++) {
+		distinct += hist[v] != 0;
+	}
+	zpm = total != 0 ? (uint32_t)((zeros * 1000 + total / 2) / total) : 0;
+	say("cp: probe: %s (%llu bytes) in %llu ms: zero %u.%u%%, distinct %u\n", name, size, now_ms() - t0, zpm / 10,
+	    zpm % 10, distinct);
+	say("cp: probe: %s: %u 64 KB blocks: distinct bytes %u..%u, blocks with all 256 values %u\n", name, blocks, min_d,
+	    max_d, all256);
+	say("cp: probe: %s: AArch64 words (4-byte alignment): NOP %u, RET %u, STP x29/x30 %u\n", name, nop, ret, stp);
+	{
+		char top[160];
+		size_t at = 0;
+		bool used[256] = { false };
+
+		at += (size_t)snprintf(top + at, sizeof(top) - at, "cp: probe: %s: top bytes:", name);
+		for (uint32_t k = 0; k < 6; k++) {
+			uint32_t best = 0, bestn = 0, pm;
+
+			for (uint32_t v = 0; v < 256; v++) {
+				if (!used[v] && hist[v] > bestn) {
+					best = v;
+					bestn = hist[v];
+				}
+			}
+			if (bestn == 0) {
+				break;
+			}
+			used[best] = true;
+			pm = total != 0 ? (uint32_t)(((uint64_t)bestn * 1000 + total / 2) / total) : 0;
+			at += (size_t)snprintf(top + at, sizeof(top) - at, " %02x %u.%u%%", best, pm / 10, pm % 10);
+		}
+		say("%s\n", top);
 	}
 }
 
@@ -2158,6 +2531,92 @@ SYSCTL_PROC(_kern_hakios_cp, OID_AUTO, info, CTLTYPE_STRING | CTLFLAG_RD | CTLFL
     "the modem's state for user space: registration, technology, bars, dBm, operator code, SIM, phone state, data");
 SYSCTL_PROC(_kern_hakios_cp, OID_AUTO, addr, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, NULL, 0, cp_addr_sysctl, "A",
     "the data context's address and DNS servers (root only; empty without one)");
+
+/*
+ * kern.hakios.cp.probe="COMMAND ...": one read-only probe, made now (root only, works without cp=). This is the
+ * fast path for the boot chain's questions: no new image for each partition, offset or pattern. The commands are
+ * in the comment above probe_find(). Nothing is written, no partition is mapped and no SMC is made.
+ */
+static int
+cp_probe_sysctl SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	char buf[128], *p, *cmd, *a1, *a2, *a3;
+	size_t len;
+	int error;
+
+	if (req->newptr == USER_ADDR_NULL) {
+		static const char help[] = "scan|find|dump|str|dist NAME ...";
+
+		return SYSCTL_OUT(req, help, sizeof(help));
+	}
+	if (!kauth_cred_issuser(kauth_cred_get())) {
+		return EPERM;
+	}
+	if (req->newlen == 0 || req->newlen >= sizeof(buf)) {
+		return EINVAL;
+	}
+	error = SYSCTL_IN(req, buf, req->newlen);
+	if (error) {
+		return error;
+	}
+	len = req->newlen;
+	while (len > 0 && (buf[len - 1] == 0 || probe_space(buf[len - 1]))) {
+		len--;
+	}
+	buf[len] = 0;
+	p = buf;
+	cmd = probe_word(&p);
+	a1 = probe_word(&p);
+	a2 = probe_word(&p);
+	a3 = probe_word(&p);
+	if (cmd == NULL) {
+		return EINVAL;
+	}
+	if (strcmp(cmd, "scan") == 0 && a1 != NULL) {
+		scan_bootloader(a1, "probe");
+		return 0;
+	}
+	if (strcmp(cmd, "str") == 0 && a1 != NULL) {
+		probe_str(a1);
+		return 0;
+	}
+	if (strcmp(cmd, "dist") == 0 && a1 != NULL) {
+		probe_dist(a1);
+		return 0;
+	}
+	if (strcmp(cmd, "find") == 0 && a1 != NULL && a2 != NULL) {
+		uint8_t pat[32];
+		uint32_t plen = 0;
+
+		error = probe_hex(a2, pat, sizeof(pat), &plen);
+		if (error != 0) {
+			say("cp: probe: find's pattern must be 2 to 64 hex digits (an even number)\n");
+			return error;
+		}
+		probe_find(a1, pat, plen);
+		return 0;
+	}
+	if (strcmp(cmd, "dump") == 0 && a1 != NULL && a2 != NULL && a3 != NULL) {
+		char *end;
+		unsigned long off = strtoul(a2, &end, 0), n;
+
+		if (end == a2 || *end != 0) {
+			return EINVAL;
+		}
+		n = strtoul(a3, &end, 0);
+		if (end == a3 || *end != 0 || n == 0 || n > PROBE_DUMP_MAX) {
+			return EINVAL;
+		}
+		probe_dump(a1, (uint64_t)off, (uint32_t)n);
+		return 0;
+	}
+	say("cp: probe: commands: scan NAME | find NAME HEX | dump NAME OFF LEN | str NAME | dist NAME\n");
+	return EINVAL;
+}
+
+SYSCTL_PROC(_kern_hakios_cp, OID_AUTO, probe, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0,
+    cp_probe_sysctl, "A", "one read-only probe, now (root only): \"scan|find|dump|str|dist NAME ...\"");
 
 static void
 data_received(uint8_t ch, const uint8_t *p, uint32_t n)
