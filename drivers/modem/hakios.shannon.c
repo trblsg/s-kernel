@@ -63,17 +63,15 @@
  *   1  a look, nothing changed: the PMU's and the mailbox's registers, the two secure words (the SMC's read),
  *      the first words of the CP's memory as the boot loader left it, RADIO's table of contents.
  *   2  that, and the image loaded and checked: the CP's power domain started if it never was (CP_CTRL_NS bit 1,
- *      CP_CTRL_S bit 3), the memory opened (mode 2), RADIO's table of contents, BOOT, MAIN and VSS copied to the
- *      boot loader's layout (TOC at 0, BOOT at 0x200, MAIN at 0x10000) and compared with the table's CRCs, the NV
- *      place filled (zeros, or the builder's file with cp_nv=1), then the secure world's check (mode 0). Its
- *      answer is logged; if it is not 0 the same check is made once more without the memory's address (the log
- *      shows whether the address is what is refused), and the driver stops there unless cp_check=0 (the image is
- *      then not locked by EL3: the CP ran that way on 12 Nov 2026). The CP is not started.
+ *      CP_CTRL_S bit 3), the memory opened (mode 2), the boot region cleared of whatever the loader left in it,
+ *      RADIO's table of contents, BOOT, MAIN and VSS copied to the boot loader's layout (TOC at 0, BOOT at 0x200,
+ *      MAIN at 0x10000) and compared with the table's CRCs, the NV place filled (zeros, or the builder's file with
+ *      cp_nv=1), then the secure world's check (mode 0). Its answer is logged; if it is not 0 the same check is made
+ *      once more without the memory's address (the log shows whether the address is what is refused), and the
+ *      driver stops there: the image is not locked by EL3 and the CP is not started.
  *   3  that, and the CP started: the mailbox cleared, the AP's state word set, AP2CP_CFG written, the CP's state
- *      waited for (with cp_check=0 and stage 2's check refused, the check is asked once more here, with the boot
- *      loader running as Samsung's daemon asks it), the boot loader's two questions (0x900D, answer 0xA00D;
- *      0x9F00, answer 0xAF00), then the running CP's INIT_START, the ring table written, PIF_INIT_DONE, and its
- *      PHONE_START: "THE CP IS UP".
+ *      waited for, the boot loader's two questions (0x900D, answer 0xA00D; 0x9F00, answer 0xAF00), then the
+ *      running CP's INIT_START, the ring table written, PIF_INIT_DONE, and its PHONE_START: "THE CP IS UP".
  *      It is watched for cp_wait seconds (20) and then put back in reset.
  *   4  that, and the link, ONLY with the phone's own NV data loaded (cp_nv=1): the one command this driver ever
  *      sends that changes anything, "phone state: low power mode" (Samsung IPC's power group 0x01, number 0x07,
@@ -143,8 +141,6 @@
  *   cp_rfs=1     with cp_nv=2: the CP's file opens (RFS command 0x11, e.g. CP_OMC_AUDIO_SLSI.bin) answered "not there" (handle -1,
  *                ENOENT) from RAM; nothing is read or opened. Off: they stay unanswered
  *   cp_vss=0     the image's VSS part (the voice processor's) is not copied
- *   cp_check=0   go on to stage 3 even when the secure world's check of the image answers an error: the image is then
- *                not locked by EL3 (1, the default: stop at stage 2, the CP not started)
  *   cp_rev=N     the board's revision told to the modem (26, this phone's)
  *   cp_ds=N      the dual SIM field told to the modem (0)
  *   cp_wait=N    seconds the started modem is watched before it is put back in reset (20; 25 with the link)
@@ -324,7 +320,6 @@ static struct {
 	uint32_t ntoc;
 	const struct toc_entry *boot, *main, *vss, *nv;
 	bool mem_table;                 /* the image carries its memory table: the check gets the memory's address */
-	bool check_failed;              /* the secure world refused the image in stage 2 (cp_check=0 carried on) */
 	bool started, up, link;
 	bool nv_loaded;                 /* the phone's own NV data is in the CP's memory (not zeros) */
 	bool stop;                      /* something seen that this driver stops the CP for */
@@ -359,7 +354,6 @@ static struct {
 	uint8_t mseq;
 	uint32_t frames[NRINGS], rfs_requests, fmt_messages, phone_starts;
 	uint32_t rev, ds, wait_s, delay_s, nv_file, vss_on;
-	uint32_t check_strict;          /* cp_check: 1 (the default) stop when the secure world refuses the image */
 	uint32_t more[NRINGS];          /* bytes still to come of a frame longer than one buffer */
 	bool multi[NRINGS];             /* the frames now coming on a ring are the rest of a message already seen */
 	uint32_t rfs_more;              /* bytes of a file request still to come in later frames */
@@ -453,8 +447,26 @@ smc(uint64_t fid, uint64_t a1, uint64_t a2, uint64_t a3)
 	register uint64_t x2 __asm__("x2") = a2;
 	register uint64_t x3 __asm__("x3") = a3;
 
-	__asm__ volatile ("smc #0" : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3) : :
+	__asm__ volatile ("dsb sy\n\tsmc #0" : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3) : :
 	    "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+	return x0;
+}
+
+/* the same call with every answer register kept: the check's x1-x3 are part of its log */
+static uint64_t
+smc_full(uint64_t fid, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t regs[4])
+{
+	register uint64_t x0 __asm__("x0") = fid;
+	register uint64_t x1 __asm__("x1") = a1;
+	register uint64_t x2 __asm__("x2") = a2;
+	register uint64_t x3 __asm__("x3") = a3;
+
+	__asm__ volatile ("dsb sy\n\tsmc #0" : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3) : :
+	    "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+	regs[0] = x0;
+	regs[1] = x1;
+	regs[2] = x2;
+	regs[3] = x3;
 	return x0;
 }
 
@@ -946,12 +958,31 @@ fill_nv(void)
 	return true;
 }
 
+/*
+ * Whatever the boot loader left in the boot region (build 40 found its payload text, "loader.e...", at +0) is wiped
+ * before the images go in. If the secure world hashes a span rather than each entry alone, a leftover between BOOT and
+ * MAIN would fail it. Only the CP's own memory is written, and only while its door is open (mode 2).
+ */
+static void
+clear_boot_region(void)
+{
+	volatile uint64_t *p = (volatile uint64_t *)(void *)cp.mem;
+	uint64_t t0 = now_ms();
+
+	for (uint32_t off = 0; off < CP_IPC_OFFSET; off += 8) {
+		p[off / 8] = 0;
+	}
+	__builtin_arm_dsb(0xf);
+	say("cp: the boot region (+0 to +%#x, %u MB) cleared in %llu ms: nothing the loader left is between the images\n",
+	    CP_IPC_OFFSET, CP_IPC_OFFSET >> 20, now_ms() - t0);
+}
+
 static bool
 load_and_check(void)
 {
 	const volatile uint32_t *m = (const volatile uint32_t *)(void *)cp.mem;
 	uint32_t answer, without, clk_on, clk_off, boot_at, map_at;
-	uint64_t mode;
+	uint64_t mode, regs[4];
 
 	if (!cp_power_first()) {
 		return false;
@@ -964,6 +995,7 @@ load_and_check(void)
 	    smc_error(answer));
 	/* (Samsung's daemon goes on whatever this answers: "CP not working" is what a CP that never ran gives) */
 
+	clear_boot_region();
 	if (!copy_toc() || !copy_entry(cp.boot) || !copy_entry(cp.main)) {
 		say("cp: the image in the CP's memory is not the image in RADIO: the secure world is not asked, nothing started\n");
 		return false;
@@ -991,11 +1023,13 @@ load_and_check(void)
 
 	mode = cp.mem_table ? CP_MEM_PA : 0;
 	clk_on = (uint32_t)smc(SMC_SSS_CLK, 0, 0, 0);
-	answer = (uint32_t)smc(SMC_CP, mode, cp.boot->size, cp.main->size);
+	(void)smc_full(SMC_CP, mode, cp.boot->size, cp.main->size, regs);
+	answer = (uint32_t)regs[0];
 	clk_off = (uint32_t)smc(SMC_SSS_CLK, 1, 0, 0);
 	say("cp: the hash engine's clock around the check: on answered %#x, off %#x\n", clk_on, clk_off);
 	say("cp: THE SECURE WORLD'S CHECK of the image (mode 0, memory %#llx, BOOT %u bytes, MAIN %u bytes): it answered "
-	    "%#x (%s)\n", mode, cp.boot->size, cp.main->size, answer, smc_error(answer));
+	    "%#x (%s); its other registers %#llx %#llx %#llx\n", mode, cp.boot->size, cp.main->size, answer,
+	    smc_error(answer), regs[1], regs[2], regs[3]);
 	if (answer != 0 && mode != 0) {
 		/*
 		 * The same check without the memory's address in the mode. Samsung adds the address only when the image
@@ -1010,13 +1044,8 @@ load_and_check(void)
 		    clk_on, clk_off, without, smc_error(without));
 	}
 	if (answer != 0) {
-		cp.check_failed = true;
-		if (cp.check_strict) {
-			say("cp: the secure world did not accept the image: stopping here, the CP is not started\n");
-			return false;
-		}
-		say("cp: THE SECURE WORLD DID NOT ACCEPT THE IMAGE, cp_check=0: going on anyway, the image is not locked "
-		    "by EL3; the check is asked once more in stage 3, with the boot loader running\n");
+		say("cp: the secure world did not accept the image: stopping here, the CP is not started\n");
+		return false;
 	}
 	return true;
 }
@@ -2467,10 +2496,14 @@ start(void)
 
 	say("cp: the IPC memory before the start: magic %#x access %#x\n", ipc_rd32(IPC_MAGIC), ipc_rd32(IPC_ACCESS));
 
-	say("cp: AP2CP_CFG was %#x: writing 1, the CP's processor may run\n", rd(cp.cfg, 0));
+	/*
+	 * AP2CP_CFG is written, never read. Samsung's ss310ap_on reads it first, but a read after a refused check is a
+	 * data abort at 0x14820000 (seen on 18 Nov 2026 when the refusal was ignored), and the write is all that is
+	 * needed here ("CP_CPU will work right now!!!").
+	 */
 	cp.started = true;
 	wr(cp.cfg, 0, 1);
-	say("cp: AP2CP_CFG is %#x\n", rd(cp.cfg, 0));
+	say("cp: AP2CP_CFG 0x14820000 written (bit 0): the CP's processor may run\n");
 
 	until = now_ms() + 3000;
 	do {
@@ -2488,23 +2521,6 @@ start(void)
 	}
 	say("cp: THE CP'S BOOT LOADER RUNS: its state word %#x (state %u) %llu ms after the start\n", state,
 	    CP_STATE_STATUS(state), now_ms() - (until - 3000));
-
-	if (cp.check_failed) {
-		/*
-		 * The check once more, now in the state Samsung's daemon asks it in: the CP's power is on, AP2CP_CFG was
-		 * just written, and the boot loader is running with the image in place. In stage 2 the same call answered
-		 * an error; if what it wanted was the CP up, this answer is 0 and the memory is locked from here.
-		 */
-		uint32_t clk_on, clk_off, answer;
-		uint64_t mode = cp.mem_table ? CP_MEM_PA : 0;
-
-		clk_on = (uint32_t)smc(SMC_SSS_CLK, 0, 0, 0);
-		answer = (uint32_t)smc(SMC_CP, mode, cp.boot->size, cp.main->size);
-		clk_off = (uint32_t)smc(SMC_SSS_CLK, 1, 0, 0);
-		say("cp: THE SECURE WORLD'S CHECK with the boot loader running (mode 0, memory %#llx, clock on %#x off %#x): "
-		    "it answered %#x (%s)%s\n", mode, clk_on, clk_off, answer, smc_error(answer),
-		    answer == 0 ? "; the image is locked from here" : "");
-	}
 
 	/* Android's order: only now, with the boot loader running, the old queues' pointers are zeroed and the magic
 	 * "BOOT" written (the boot loader clears the memory's first words itself when it starts: a magic written before
@@ -2962,8 +2978,6 @@ hakios_shannon_init(void)
 	cp.if_kb = 2048;
 	PE_parse_boot_argn("cp_if_kb", &cp.if_kb, sizeof(cp.if_kb));
 	PE_parse_boot_argn("cp_vss", &cp.vss_on, sizeof(cp.vss_on));
-	cp.check_strict = 1;
-	PE_parse_boot_argn("cp_check", &cp.check_strict, sizeof(cp.check_strict));
 	PE_parse_boot_argn("cp_rev", &cp.rev, sizeof(cp.rev));
 	PE_parse_boot_argn("cp_ds", &cp.ds, sizeof(cp.ds));
 	PE_parse_boot_argn("cp_wait", &cp.wait_s, sizeof(cp.wait_s));
