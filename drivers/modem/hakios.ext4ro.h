@@ -11,8 +11,10 @@
  * What it understands, from the on-disk format as documented (no code taken from any implementation): the superblock
  * at byte 1024, 32- and 64-byte group descriptors, inodes of any size, extent trees of any depth (uninitialised extents
  * read as zeros), the classic direct/indirect block map, and directories read linearly (an htree directory's index
- * blocks look like empty entries to a linear reader). Not: inline data, encryption. A path is looked up from the root,
- * one name per component.
+ * blocks look like empty entries to a linear reader). Not: inline data, and not an encrypted inode's contents or an
+ * encrypted directory's names: those are refused with ENOTSUP, never read as ciphertext. A file system that only has
+ * the encrypt feature switched on, with the file wanted in the clear (the S9's EFS and /nv_data.bin), is read. A path
+ * is looked up from the root, one name per component.
  *
  * Header-only (static functions), so a driver includes it and a host-side test builds the same code.
  */
@@ -26,6 +28,7 @@ struct ext4ro {
 	ext4ro_read_fn read;
 	void *ctx;
 	uint32_t block_size, inode_size, inodes_per_group, desc_size, first_data_block;
+	uint32_t incompat, compat, ro_compat;   /* (the superblock's feature words, for the caller's log) */
 	uint64_t blocks;
 	bool is64;
 	uint8_t *blk;           /* scratch, the caller's: block_size bytes (at most 64 KB) */
@@ -34,9 +37,10 @@ struct ext4ro {
 
 #define EXT4RO_MAGIC            0xEF53
 #define EXT4RO_INCOMPAT_64BIT   0x0080
-#define EXT4RO_INCOMPAT_ENCRYPT 0x10000
+#define EXT4RO_INCOMPAT_ENCRYPT 0x10000         /* (the file system has encryption; only a plain inode is read) */
 #define EXT4RO_INODE_EXTENTS    0x00080000
 #define EXT4RO_INODE_INLINE     0x10000000
+#define EXT4RO_INODE_ENCRYPT    0x00000800      /* (EXT4_ENCRYPT_FL: this inode's data, or its names, are ciphertext) */
 #define EXT4RO_ROOT_INO         2
 #define EXT4RO_MAX_DEPTH        5
 #define EXT4RO_MAX_DIR_BYTES    (16u << 20)     /* a directory bigger than this is not looked through (EFBIG) */
@@ -54,7 +58,7 @@ ext4ro_le32(const uint8_t *p)
 	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
 }
 
-/* the superblock: 0, or an errno (EINVAL: not ext2/3/4, ENOTSUP: a feature this reader does not have) */
+/* the superblock: 0, or an errno (EINVAL: not ext2/3/4, or a layout this reader cannot use) */
 static int
 ext4ro_open(struct ext4ro *fs)
 {
@@ -76,6 +80,9 @@ ext4ro_open(struct ext4ro *fs)
 	fs->inodes_per_group = ext4ro_le32(sb + 0x28);
 	fs->first_data_block = ext4ro_le32(sb + 0x14);
 	incompat = ext4ro_le32(sb + 0x60);
+	fs->incompat = incompat;
+	fs->compat = ext4ro_le32(sb + 0x5C);
+	fs->ro_compat = ext4ro_le32(sb + 0x64);
 	fs->inode_size = ext4ro_le32(sb + 0x4C) >= 1 ? ext4ro_le16(sb + 0x58) : 128;   /* revision 0: 128 */
 	fs->is64 = (incompat & EXT4RO_INCOMPAT_64BIT) != 0;
 	fs->desc_size = fs->is64 ? ext4ro_le16(sb + 0xFE) : 32;
@@ -85,9 +92,11 @@ ext4ro_open(struct ext4ro *fs)
 	    fs->blocks > EXT4RO_MAX_BLOCKS) {
 		return EINVAL;
 	}
-	if (incompat & EXT4RO_INCOMPAT_ENCRYPT) {
-		return ENOTSUP;
-	}
+	/*
+	 * The encrypt feature is not refused here: it says the file system can hold encrypted inodes, not that every
+	 * inode is one. ext4ro_lookup() and ext4ro_read_file() refuse an inode that actually carries the flag, so a
+	 * plain /nv_data.bin on an EFS with the feature on is read, and nothing is ever returned as ciphertext.
+	 */
 	return 0;
 }
 
@@ -130,6 +139,14 @@ static uint64_t
 ext4ro_size(const uint8_t *inode)
 {
 	return ext4ro_le32(inode + 0x04) | (uint64_t)ext4ro_le32(inode + 0x6C) << 32;
+}
+
+/* The inode's own encrypt flag (EXT4_ENCRYPT_FL, in the flags at 0x20): its blocks, or a directory's entries' names,
+ * are ciphertext. The superblock's encrypt feature alone says nothing about any one inode. */
+static bool
+ext4ro_encrypted(const uint8_t *inode)
+{
+	return (ext4ro_le32(inode + 0x20) & EXT4RO_INODE_ENCRYPT) != 0;
 }
 
 /*
@@ -246,6 +263,9 @@ ext4ro_lookup(struct ext4ro *fs, uint32_t dir_ino, const char *name, size_t name
 	if ((ext4ro_le16(inode) & 0xF000) != 0x4000) {
 		return ENOTDIR;
 	}
+	if (ext4ro_encrypted(inode)) {
+		return ENOTSUP;                 /* (its entries' names are ciphertext: no lookup can match one) */
+	}
 	size = ext4ro_size(inode);
 	if (size > EXT4RO_MAX_DIR_BYTES) {
 		return EFBIG;                   /* (a size made up on the disk would otherwise be walked block by block) */
@@ -315,6 +335,9 @@ ext4ro_read_file(struct ext4ro *fs, const char *path, uint8_t *dst, uint64_t cap
 	}
 	if ((ext4ro_le16(inode) & 0xF000) != 0x8000) {
 		return EISDIR;
+	}
+	if (ext4ro_encrypted(inode)) {
+		return ENOTSUP;                 /* (its blocks are ciphertext: never copied to the CP as if they were NV) */
 	}
 	*size = ext4ro_size(inode);
 	if (*size > cap) {

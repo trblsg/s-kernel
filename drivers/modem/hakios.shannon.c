@@ -814,6 +814,9 @@ nv_from_efs(uint32_t size)
 		say("cp: cp_nv=2: EFS (%llu bytes) is no ext4 this reader knows (errno %d): not going on\n", part, e);
 		return false;
 	}
+	say("cp: cp_nv=2: EFS's superblock: incompat %#x, compat %#x, ro_compat %#x%s\n", fs.incompat, fs.compat,
+	    fs.ro_compat, (fs.incompat & EXT4RO_INCOMPAT_ENCRYPT) ? "; the encrypt feature is on, so an encrypted inode "
+	    "is refused (a plain nv_data.bin is read)" : "");
 	fs.blk = kalloc_data(fs.block_size, Z_WAITOK);
 	fs.blk2 = kalloc_data(fs.block_size, Z_WAITOK);
 	cp.nv_ram = kalloc_data(size, Z_WAITOK | Z_ZERO);
@@ -939,12 +942,22 @@ load_and_check(void)
 static void
 cp_stop(const char *why)
 {
-	if (!cp.started) {
-		return;
+	bool started = cp.started;
+
+	if (cp.pmu == 0) {
+		return;                         /* (never mapped: no register of it was written) */
 	}
-	say("cp: stopping the CP (%s)\n", why);
-	mbox_raise(INT_AP_WAKEUP);
-	IOSleep(5);
+	if (started) {
+		say("cp: stopping the CP (%s)\n", why);
+		mbox_raise(INT_AP_WAKEUP);
+		IOSleep(5);
+	} else {
+		/*
+		 * The load failed before start(): the domain is still powered (cp_power_first(), CP_CTRL_NS's NS_PWRON), so
+		 * it is put back down even though the CP itself never ran. Its interrupt is not raised: nothing is listening.
+		 */
+		say("cp: powering the CP's domain down (%s)\n", why);
+	}
 	(void)secure_update(SMC_CP_REG_NS, 0, NS_DUMP_PC_NO_PG, "keep its program counter readable");
 	wr(cp.pmu, 0x1320, rd(cp.pmu, 0x1320) & ~3u);
 	wr(cp.pmu, 0x1324, rd(cp.pmu, 0x1324) & ~1u);
@@ -2624,7 +2637,8 @@ cp_thread(__unused void *arg, __unused wait_result_t result)
 
 	if (!load_and_check()) {
 		set_state(102);
-		look_pmu("after the failed load");
+		look_pmu("after the failed load");      /* (before the domain is put back down) */
+		cp_stop("the load failed");
 		return;
 	}
 	set_state(2);
