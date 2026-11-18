@@ -46,7 +46,6 @@
  */
 #include <kern/clock.h>
 #include <kern/locks.h>
-#include <kern/sched_prim.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
@@ -1532,7 +1531,7 @@ mali_job_interrupt(__unused void *context, uint32_t intid)
 	}
 	gic_v3_spi_mask(intid);
 	__atomic_add_fetch(&mali_irq_count, 1, __ATOMIC_RELEASE);
-	thread_wakeup((event_t)&mali_wait_event);
+	wakeup((caddr_t)&mali_wait_event);
 }
 
 /* mali_job_lock held, G3D on: the block's stale bits gone, its interrupts unmasked, the GIC line attached if wanted. */
