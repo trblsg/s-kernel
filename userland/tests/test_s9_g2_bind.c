@@ -29,9 +29,10 @@ int main(void) {
     assert(!s9_g2_redundant(&s,1,tex2d,7,tex2d));
     s9_g2_record(&s,0,tex2d,0,tex2d); /* unbind texture zero is state */
     assert(s9_g2_redundant(&s,0,tex2d,0,tex2d));
-    s.attempts=17;s.skipped=5;s.executed=12;
+    s.attempts=17;s.skipped=5;s.executed=12;s.verify_serial=127;
     s9_g2_reset_counters(&s);
     assert(s.attempts==0 && s.skipped==0 && s.executed==0);
+    assert(s.verify_serial==127); /* verification cadence never restarts per frame bucket */
     assert(s9_g2_redundant(&s,0,tex2d,0,tex2d)); /* reset keeps state */
     assert(s9_has_boot_flag("p1_userdict=1 p11_trace=1 g2_bind=1 g2_verify=1", "g2_bind=1"));
     assert(!s9_has_boot_flag("notg2_bind=1 g2_bind=10","g2_bind=1"));

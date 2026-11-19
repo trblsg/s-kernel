@@ -1794,7 +1794,7 @@ my_glBindTexture(void *context, GLenum target, GLuint texture)
 	if (g2_bind_on && target == GL_TEXTURE_2D && e->unit < S9_G2_UNITS) e->g2.attempts++;
 	bool skip = g2_bind_on && !e->g2_fault &&
 	    s9_g2_redundant(&e->g2,e->unit,target,texture,GL_TEXTURE_2D);
-	if (skip && g2_verify_on && ((e->g2.skipped+1) % 128 == 0)) {
+	if (skip && g2_verify_on && ((++e->g2.verify_serial % 128u) == 0)) {
 		GLint actual = -1;
 		glGetIntegerv(GL_TEXTURE_BINDING_2D,&actual);
 		if (actual < 0 || (GLuint)actual != texture) {

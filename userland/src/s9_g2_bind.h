@@ -13,6 +13,7 @@ struct s9_g2_state {
     uint32_t name[S9_G2_UNITS];
     uint8_t valid[S9_G2_UNITS];
     uint32_t attempts, skipped, executed, invalidations;
+    uint64_t verify_serial; /* persists across 60-frame counter resets */
 };
 static inline void s9_g2_invalidate(struct s9_g2_state *s) {
     if (!s) return;
