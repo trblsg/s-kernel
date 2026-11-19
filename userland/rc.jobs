@@ -13,7 +13,7 @@
 # Opt-in through poster_probe=1. Samples CPU/RSS/faults of CollectionsPoster,
 # PosterBoard, backboardd, SpringBoard and chronod without touching wallpaper.
 # When poster_probe is absent, the sampler exits immediately with no output.
-/redwood/bin/poster_cost 5 120 &
+/redwood/bin/poster_cost 5 300 &  # P1/G1: 25min PID logs, detect repeated Poster crashes without extra reflash
 # Temporary WidgetKit scheduling experiment, opt-in via boot-arg widget_nice=1..10; default is off.
 /redwood/bin/widget_boot &
 # the Galaxy S9's GPU from a program (says one line and stops where there is no HakiosMali: anywhere but mali=9)

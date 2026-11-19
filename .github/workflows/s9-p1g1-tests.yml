@@ -1,0 +1,67 @@
+name: S9 P1 PridePoster SPI and G1 GLES call-cost tests
+
+on:
+  push:
+    branches:
+      - s9/pride-userdict-glcost-p1g1
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify exact P1/G1 boot flag and GL cost arithmetic in C and C++
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -fsanitize=undefined -g \
+            userland/tests/test_s9_p1_g1.c -o /tmp/s9_p1g1_c
+          /tmp/s9_p1g1_c
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -fsanitize=undefined -g \
+            -x c++ userland/tests/test_s9_p1_g1.c -o /tmp/s9_p1g1_cpp
+          /tmp/s9_p1g1_cpp
+      - name: Preserve previous frame profiler and widgetless invariants
+        env:
+          PYTHONPATH: userland
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            userland/tests/test_gl_stage_stats.c -o /tmp/s9_glstage
+          /tmp/s9_glstage
+          python3 -m unittest discover -s userland/tests -p 'test_strip_widgets.py' -v
+          bash -n userland/build.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          metal=Path('userland/src/metalvk/NativeBridgeMetalFrontend.mm').read_text()
+          gl=Path('userland/src/eagl.c').read_text()
+          mali=Path('drivers/gpu/mali/hakios.mali.c').read_text()
+          assert 'userDictionary' in metal and 'p1_userdict=1' in metal
+          assert 'doesNotRecognizeSelector:_cmd' in metal
+          assert 'glcost_on' in gl and 's9_gl_cost_add' in gl
+          assert 'glcost=1' in gl
+          assert 'glFinish();' in gl and 'glFlush();' in gl
+          assert 'GOV_CAP1_MC     85000' in mali
+          assert 'GOV_CAP2_MC     95000' in mali
+          print('P1/G1 opt-in guarded, existing GL synchronization and thermal caps kept')
+          PY
+
+  ios-syntax:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: iOS arm64 GLES frontend syntax
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=gnu11 -fblocks -Wno-deprecated-declarations \
+            -fsyntax-only userland/src/eagl.c
+      - name: iOS arm64 Objective-C++ Metal frontend syntax
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun clang++ -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=c++17 -fobjc-arc -fblocks -x objective-c++ \
+            -Wno-deprecated-declarations -Itools/metal -fsyntax-only \
+            userland/src/metalvk/NativeBridgeMetalFrontend.mm

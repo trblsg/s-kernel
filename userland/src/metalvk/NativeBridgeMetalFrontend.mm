@@ -999,6 +999,21 @@ static void notified(void *context,uint64_t value) {
 @end
 
 // ---- command buffers and encoders ----
+// P1 opt-in Metal SPI: QuartzCore's PridePoster reads -userDictionary on
+// each command buffer. Without it the extension aborts and launchd retries.
+// Keep the exact legacy missing-selector behavior unless p1_userdict=1.
+#include "s9_bootarg_flag.h"
+#include <sys/sysctl.h>
+static bool s9P1UserDictionaryOn() {
+ static const bool enabled=[] {
+  char args[4096]={};size_t len=sizeof(args)-1;
+  if(sysctlbyname("kern.bootargs",args,&len,nullptr,0)!=0)return false;
+  args[std::min(len,sizeof(args)-1)]=0;
+  return s9_has_boot_flag(args,"p1_userdict=1")!=0;
+ }();
+ return enabled;
+}
+static std::atomic<uint64_t> gP1UserDictMade{0},gP1UserDictReads{0};
 @interface NBQueue : NBObject
 @property(nonatomic) NmbQueue *handle;
 @property(atomic,strong) dispatch_queue_t completionQueue;   // SPI: where command buffers' handlers run (nil: the runtime's thread)
@@ -1021,6 +1036,9 @@ static void notified(void *context,uint64_t value) {
 // Runtime handles retain GPU storage, but only the Objective-C owner retains
 // a no-copy deallocator, its memory owner and texture/heap ancestry.
 @property(nonatomic,strong) NSMutableSet *resourceOwners;
+// Strongly retained for this buffer's entire lifetime, not shared between
+// buffers/queues. Initialized only upon the first SPI request.
+@property(nonatomic,strong) NSMutableDictionary *s9UserDictionary;
 @property(nonatomic,strong) dispatch_group_t handlers;
 @property(nonatomic,strong) dispatch_group_t schedulingHandlers;
 @property(nonatomic) BOOL schedulingDelivered;
@@ -1469,6 +1487,24 @@ extern "C" void NBWaitInFlight(uint64_t beforeUs);
  return self;
 }
 - (void)dealloc {nmb_command_buffer_release(_handle);}
+- (NSMutableDictionary *)userDictionary {
+ if(!s9P1UserDictionaryOn()) {
+  // Preserve the pre-P1 absent-selector failure for a clean control run.
+  [self doesNotRecognizeSelector:_cmd];
+  return nil;
+ }
+ gP1UserDictReads++;
+ @synchronized(self) {
+  if(!_s9UserDictionary) {
+   _s9UserDictionary=[NSMutableDictionary new];
+   const uint64_t made=++gP1UserDictMade;
+   if(made==1 || made==100 || made==1000)
+    NBSAY(@"native-metal: P1 userDictionary SPI: created=%llu reads=%llu (p1_userdict=1)",
+     (unsigned long long)made,(unsigned long long)gP1UserDictReads.load());
+  }
+  return _s9UserDictionary;
+ }
+}
 - (id<MTLCommandQueue>)commandQueue {return (id<MTLCommandQueue>)_queue;}
 - (BOOL)retainedReferences {return YES;}
 // No shader logging and no encoder execution status are kept: Metal's answers where neither was asked for.

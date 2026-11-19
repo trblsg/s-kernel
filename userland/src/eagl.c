@@ -82,6 +82,8 @@
 
 #include "hakios.gl.h"
 #include "gl_stage_stats.h"   /* opt-in glstage=1: host-side GLES/scanout timing buckets */
+#include "s9_gl_cost.h"       /* opt-in glcost=1: time/count EAGL slot calls, no GL changes */
+#include "metalvk/s9_bootarg_flag.h"
 
 /* ---- OpenGL ES: the types, the few names used here, the library's functions --------------------- */
 
@@ -329,12 +331,16 @@ struct eagl {
 	uint64_t all_calls, all_draws, all_triangles, readback_us, wait_us, attach_us, flush_us, frame_us;
 	unsigned most_calls, most_triangles;
 	struct s9_gl_stage_stats glstage;       /* 60-frame buckets, no per-frame console writes */
+	struct s9_gl_cost glcost;               /* grouped GL slot timings; reset every 60 frames */
 	const char *sources[256];       /* the text of the shaders being made, by name (modulo this) */
 	bool fragment[256];             /* ... and which of the two kinds each is */
 	unsigned plain_said;
 };
 
 static int glstage_on;                       /* boot-arg glstage=1: 60-frame timing aggregates */
+static int glcost_on;                        /* boot-arg glcost=1: per-slot CPU wall timing */
+static __thread uint64_t glcost_begun[8];    /* nested-safe, avoids cross-thread start timestamp races */
+static __thread unsigned glcost_depth;
 static unsigned trace_first, trace_last;        /* the frames whose calls are written down */
 static uint64_t trace_at;                       /* ... or the first frame from this time on (now_us()) */
 static unsigned trace_draws;                    /* ... or the first frame after one of so many draws */
@@ -423,6 +429,11 @@ eagl_enter(struct eagl *e, unsigned offset)
 		}
 		current = e;
 	}
+	if (glcost_on) {
+		unsigned depth = glcost_depth++;
+		if (depth < sizeof(glcost_begun) / sizeof(glcost_begun[0]))
+			glcost_begun[depth] = now_us();
+	}
 	slot_calls[offset / 8]++;
 	e->calls++;
 	if (slow_calls_us != 0) {
@@ -438,6 +449,13 @@ eagl_leave(struct eagl *e, unsigned offset)
 	if (check_errors && offset != 0x338 && (error = glGetError()) != 0) {
 		if (e->errors++ < 60) {
 			say("hakios-gl: %s: error %#x\n", eagl_slot_name(offset), error);
+		}
+	}
+	if (glcost_on && glcost_depth != 0) {
+		unsigned depth = --glcost_depth;
+		if (depth < sizeof(glcost_begun) / sizeof(glcost_begun[0])) {
+			uint64_t ended = now_us(), began = glcost_begun[depth];
+			if (ended >= began) s9_gl_cost_add(&e->glcost, offset, ended - began);
 		}
 	}
 	if (slow_calls_us != 0) {
@@ -461,6 +479,7 @@ eagl_missing(void *context, unsigned offset)
 	if (slot_calls[offset / 8] == 1) {
 		say("hakios-gl: CALLED AND NOT THERE: entry %#x, %s\n", offset, eagl_slot_name(offset));
 	}
+	if (glcost_on) eagl_leave(e, offset);  /* balance the diagnostic timer stack */
 	return 0;
 }
 
@@ -1632,6 +1651,29 @@ frame_end(struct eagl *e, bool finished)
 			    s9_gl_stage_p95_bucket(s), s->slow16, s->slow33, s->max_us, s->presented);
 			s9_gl_stage_reset(s);
 		}
+	}
+	if (glcost_on && e->frames % 60 == 0) {
+		uint64_t us[S9_GL_GROUPS];uint32_t count[S9_GL_GROUPS];unsigned top[3];
+		s9_gl_cost_summary(&e->glcost, us, count, top);
+		uint64_t sum=0;uint32_t calls=0;
+		for(unsigned g=0;g<S9_GL_GROUPS;++g){sum+=us[g];calls+=count[g];}
+		say("hakios-gl-cost: up=%llu.%03llus frames=%u..%u calls=%u measured=%lluus "
+		    "draw=%llu/%u texture=%llu/%u uniform=%llu/%u shader=%llu/%u "
+		    "state=%llu/%u vertex=%llu/%u target=%llu/%u other=%llu/%u\n",
+		    after/1000000,(after/1000)%1000,e->frames-59,e->frames,calls,(unsigned long long)sum,
+		    (unsigned long long)us[S9_GL_DRAW],count[S9_GL_DRAW],
+		    (unsigned long long)us[S9_GL_TEXTURE],count[S9_GL_TEXTURE],
+		    (unsigned long long)us[S9_GL_UNIFORM],count[S9_GL_UNIFORM],
+		    (unsigned long long)us[S9_GL_SHADER],count[S9_GL_SHADER],
+		    (unsigned long long)us[S9_GL_STATE],count[S9_GL_STATE],
+		    (unsigned long long)us[S9_GL_VERTEX],count[S9_GL_VERTEX],
+		    (unsigned long long)us[S9_GL_TARGET],count[S9_GL_TARGET],
+		    (unsigned long long)us[S9_GL_OTHER],count[S9_GL_OTHER]);
+		for(unsigned k=0;k<3;++k) if(top[k]!=UINT_MAX)
+			say("hakios-gl-cost-top: up=%llu.%03llus rank=%u slot=%#x name=%s calls=%u us=%llu\n",
+			    after/1000000,(after/1000)%1000,k+1,top[k]*8,eagl_slot_name(top[k]*8),
+			    e->glcost.count[top[k]],(unsigned long long)e->glcost.us[top[k]]);
+		s9_gl_cost_reset(&e->glcost);
 	}
 	if (e->calls > e->most_calls) {
 		e->most_calls = e->calls;
@@ -4703,6 +4745,8 @@ install(void)
 		census_on = strstr(arguments, "glcensus=1") != NULL;
 		frame_lines = strstr(arguments, "glframes=1") != NULL;
 		glstage_on = strstr(arguments, "glstage=1") != NULL;
+		glcost_on = s9_has_boot_flag(arguments, "glcost=1");
+		if (glcost_on) say("hakios-gl-cost: enabled; CPU wall time per EAGL slot, 60-frame groups; no GL state changes\n");
 		if (glstage_on) {
 			say("hakios-gl-stage: enabled; 60 frames/bucket, mach uptime microseconds; no GL sync changes\n");
 		}
