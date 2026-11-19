@@ -1359,9 +1359,15 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 		# -f: a cryptex fetched with the cache already in it would otherwise stop the build
 		ln -f "$f" $D/
 	done
+	# S9 experimental ablation: strip WidgetKit/Today extensions and AegirPoster
+	# ONLY from this isolated sysroot copy. Keep chronod/PosterBoard and services alive.
+	# A second manifest prevents mkapfs from resurrecting empty removed bundles.
+	python3 -m py_compile strip_widgets.py
+	python3 -m unittest discover -s tests -p test_strip_widgets.py -q
+	python3 strip_widgets.py sysroot --manifest-in "$DARWIN/system.manifest" --manifest-out widget-ablation.manifest
 	# zlib where it saves room, as Apple keeps the root (a small file whole in its attribute): 5.4 GB of
 	# files in 2.5 GB, what fits into the phone's RAM beside Darwin
-	python3 ../tools/apfs/mkapfs.py -z -o system.apfs System=sysroot,manifest=$DARWIN/system.manifest | tail -1
-	[ -z "$CHECK" ] || ../tools/apfs/check-image.sh system.apfs System=sysroot,manifest=$DARWIN/system.manifest
+	python3 ../tools/apfs/mkapfs.py -z -o system.apfs System=sysroot,manifest=widget-ablation.manifest | tail -1
+	[ -z "$CHECK" ] || ../tools/apfs/check-image.sh system.apfs System=sysroot,manifest=widget-ablation.manifest
 	rm -rf sysroot
 fi
