@@ -1014,6 +1014,32 @@ static bool s9P1UserDictionaryOn() {
  return enabled;
 }
 static std::atomic<uint64_t> gP1UserDictMade{0},gP1UserDictReads{0};
+/* P1.1 diagnostic: P1 removed the selector exception, but PridePoster now
+ * SIGSEGVs immediately after the getter. Its address/stack are unavailable
+ * in PuTTY; record safe normal-context caller offsets, not signal hooks. */
+static bool s9P11TraceOn() {
+ static const bool enabled=[] {
+  char args[4096]={};size_t len=sizeof(args)-1;
+  if(sysctlbyname("kern.bootargs",args,&len,nullptr,0)!=0)return false;
+  args[std::min(len,sizeof(args)-1)]=0;
+  return s9_has_boot_flag(args,"p11_trace=1")!=0;
+ }();
+ return enabled;
+}
+static void s9P11Trace(const char *event,id object,void *handle,id dictionary,bool stack) {
+ if(!s9P11TraceOn())return;
+ NBSAY(@"native-metal-p11: %s command=%p native=%p userdict=%p tid=%u",
+       event,(__bridge void *)object,handle,(__bridge void *)dictionary,threadIdLow());
+ if(!stack)return;
+ void *frames[9]={};const int depth=backtrace(frames,9);
+ for(int k=1;k<depth && k<=6;++k){
+  Dl_info info={};if(!dladdr(frames[k],&info))continue;
+  const char *base=info.dli_fname?strrchr(info.dli_fname,'/'):nullptr;
+  base=base?base+1:(info.dli_fname?info.dli_fname:"unknown");
+  NBSAY(@"native-metal-p11: stack[%d]=%s+0x%llx",
+    k,base,(unsigned long long)((uintptr_t)frames[k]-(uintptr_t)info.dli_fbase));
+ }
+}
 @interface NBQueue : NBObject
 @property(nonatomic) NmbQueue *handle;
 @property(atomic,strong) dispatch_queue_t completionQueue;   // SPI: where command buffers' handlers run (nil: the runtime's thread)
@@ -1486,7 +1512,10 @@ extern "C" void NBWaitInFlight(uint64_t beforeUs);
  if(self){createdUs=nowUs();createCpu=threadCpuUs();createTid=threadIdLow();earlyEligible=onRenderServerThread();sampleWindowOpen();}
  return self;
 }
-- (void)dealloc {nmb_command_buffer_release(_handle);}
+- (void)dealloc {
+ if(_s9UserDictionary) s9P11Trace("command-dealloc",self,_handle,_s9UserDictionary,false);
+ nmb_command_buffer_release(_handle);
+}
 - (NSMutableDictionary *)userDictionary {
  if(!s9P1UserDictionaryOn()) {
   // Preserve the pre-P1 absent-selector failure for a clean control run.
@@ -1494,6 +1523,7 @@ extern "C" void NBWaitInFlight(uint64_t beforeUs);
   return nil;
  }
  gP1UserDictReads++;
+ if(s9P11TraceOn())s9P11Trace("userdict-enter",self,_handle,_s9UserDictionary,true);
  @synchronized(self) {
   if(!_s9UserDictionary) {
    _s9UserDictionary=[NSMutableDictionary new];
@@ -1502,6 +1532,7 @@ extern "C" void NBWaitInFlight(uint64_t beforeUs);
     NBSAY(@"native-metal: P1 userDictionary SPI: created=%llu reads=%llu (p1_userdict=1)",
      (unsigned long long)made,(unsigned long long)gP1UserDictReads.load());
   }
+  if(s9P11TraceOn())s9P11Trace("userdict-return",self,_handle,_s9UserDictionary,false);
   return _s9UserDictionary;
  }
 }
@@ -1655,6 +1686,7 @@ extern "C" void NBWaitInFlight(uint64_t beforeUs);
 }
 // After completion (or a refusal): invalidate the CPU's view of imported surfaces, then completed handlers, once.
 - (void)finish {
+ if(_s9UserDictionary) s9P11Trace("command-finish",self,_handle,_s9UserDictionary,false);
  flushSurfaces(_surfaces);
  // Actual GPU completion (or a local refusal that never submitted) is the
  // release point. A retained completed command must not pin every old frame.
@@ -1674,6 +1706,7 @@ extern "C" void NBWaitInFlight(uint64_t beforeUs);
  if(queue)dispatch_async(queue,run);else run();
 }
 - (void)commit {
+ if(_s9UserDictionary) s9P11Trace("command-commit",self,_handle,_s9UserDictionary,false);
  if(self.committed){NBLOG(@"native-metal: commit twice");return;}
  self.committed=YES;
  self.committedUs=nowUs();

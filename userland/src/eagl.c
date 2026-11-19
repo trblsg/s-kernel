@@ -83,6 +83,7 @@
 #include "hakios.gl.h"
 #include "gl_stage_stats.h"   /* opt-in glstage=1: host-side GLES/scanout timing buckets */
 #include "s9_gl_cost.h"       /* opt-in glcost=1: time/count EAGL slot calls, no GL changes */
+#include "s9_g2_bind.h"       /* opt-in g2_bind=1: skip proven redundant native texture binds */
 #include "metalvk/s9_bootarg_flag.h"
 
 /* ---- OpenGL ES: the types, the few names used here, the library's functions --------------------- */
@@ -332,6 +333,8 @@ struct eagl {
 	unsigned most_calls, most_triangles;
 	struct s9_gl_stage_stats glstage;       /* 60-frame buckets, no per-frame console writes */
 	struct s9_gl_cost glcost;               /* grouped GL slot timings; reset every 60 frames */
+	struct s9_g2_state g2;                  /* driver binding truth cache; all raw binds invalidate */
+	bool g2_fault;                          /* any verification mismatch fails this context closed */
 	const char *sources[256];       /* the text of the shaders being made, by name (modulo this) */
 	bool fragment[256];             /* ... and which of the two kinds each is */
 	unsigned plain_said;
@@ -339,6 +342,8 @@ struct eagl {
 
 static int glstage_on;                       /* boot-arg glstage=1: 60-frame timing aggregates */
 static int glcost_on;                        /* boot-arg glcost=1: per-slot CPU wall timing */
+static int g2_bind_on;                        /* boot-arg g2_bind=1, otherwise legacy code path */
+static int g2_verify_on;                      /* boot-arg g2_verify=1: sample actual GL binding */
 static __thread uint64_t glcost_begun[8];    /* nested-safe, avoids cross-thread start timestamp races */
 static __thread unsigned glcost_depth;
 static unsigned trace_first, trace_last;        /* the frames whose calls are written down */
@@ -359,6 +364,19 @@ static int trace_listed;                        /* the draw at hand is one of th
 static int all_shaders;                         /* boot-arg glshaders=1: the text of every shader, not of the first two */
 static struct group_texture *group_of(struct eagl *e, GLuint texture);
 static __thread struct eagl *current;
+/* The GLES shim has internal raw glBindTexture calls for blur, mirror and
+ * inspection. Their binding changes MUST invalidate our fast-path snapshot,
+ * including the calls from frame_end, or it could skip a required bind. */
+static void s9_g2_internal_bind(GLenum target, GLuint name) {
+	if (g2_bind_on && current) s9_g2_invalidate(&current->g2);
+	glBindTexture(target, name);
+}
+static void s9_g2_internal_delete(GLsizei count, const GLuint *names) {
+	if (g2_bind_on && current) s9_g2_invalidate(&current->g2);
+	glDeleteTextures(count, names);
+}
+#define glBindTexture s9_g2_internal_bind
+#define glDeleteTextures s9_g2_internal_delete
 static struct eagl *contexts[8];
 static uint32_t slot_calls[SLOTS];
 /*
@@ -1675,6 +1693,12 @@ frame_end(struct eagl *e, bool finished)
 			    e->glcost.count[top[k]],(unsigned long long)e->glcost.us[top[k]]);
 		s9_gl_cost_reset(&e->glcost);
 	}
+	if (g2_bind_on && e->frames % 60 == 0) {
+		say("hakios-gl-g2: up=%llu.%03llus frames=%u..%u attempted=%u skipped=%u driver=%u invalidated=%u fault=%u verify=%d\n",
+		    after/1000000,(after/1000)%1000,e->frames-59,e->frames,e->g2.attempts,
+		    e->g2.skipped,e->g2.executed,e->g2.invalidations,e->g2_fault?1:0,g2_verify_on);
+		s9_g2_reset_counters(&e->g2);
+	}
 	if (e->calls > e->most_calls) {
 		e->most_calls = e->calls;
 	}
@@ -1767,7 +1791,28 @@ my_glBindTexture(void *context, GLenum target, GLuint texture)
 	if (eagl_tracing) {
 		eagl_trace("glBindTexture(%#x, %u)\n", target, texture);
 	}
-	glBindTexture(target, texture);
+	if (g2_bind_on && target == GL_TEXTURE_2D && e->unit < S9_G2_UNITS) e->g2.attempts++;
+	bool skip = g2_bind_on && !e->g2_fault &&
+	    s9_g2_redundant(&e->g2,e->unit,target,texture,GL_TEXTURE_2D);
+	if (skip && g2_verify_on && ((e->g2.skipped+1) % 128 == 0)) {
+		GLint actual = -1;
+		glGetIntegerv(GL_TEXTURE_BINDING_2D,&actual);
+		if (actual < 0 || (GLuint)actual != texture) {
+			e->g2_fault = true;
+			s9_g2_invalidate(&e->g2);
+			say("hakios-gl-g2: BINDING MISMATCH unit=%u expected=%u actual=%d; disabled optimization for context\n",
+			    e->unit,texture,actual);
+			skip = false;
+		}
+	}
+	if (skip) e->g2.skipped++;
+	else {
+		glBindTexture(target, texture);  /* raw wrapper invalidates; never skip IOSurface freshness below */
+		if (g2_bind_on) {
+			e->g2.executed++;
+			if (!e->g2_fault) s9_g2_record(&e->g2,e->unit,target,texture,GL_TEXTURE_2D);
+		}
+	}
 	if (target == GL_TEXTURE_2D && e->unit < 8) {
 		e->bound[e->unit] = texture;
 	}
@@ -4746,6 +4791,9 @@ install(void)
 		frame_lines = strstr(arguments, "glframes=1") != NULL;
 		glstage_on = strstr(arguments, "glstage=1") != NULL;
 		glcost_on = s9_has_boot_flag(arguments, "glcost=1");
+		g2_bind_on = s9_has_boot_flag(arguments, "g2_bind=1");
+		g2_verify_on = s9_has_boot_flag(arguments, "g2_verify=1");
+		if (g2_bind_on) say("hakios-gl-g2: enabled; skip redundant GL_TEXTURE_2D native binds, preserve all IOSurface checks; verify=%d\n",g2_verify_on);
 		if (glcost_on) say("hakios-gl-cost: enabled; CPU wall time per EAGL slot, 60-frame groups; no GL state changes\n");
 		if (glstage_on) {
 			say("hakios-gl-stage: enabled; 60 frames/bucket, mach uptime microseconds; no GL sync changes\n");

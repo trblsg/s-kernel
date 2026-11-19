@@ -1,0 +1,69 @@
+name: S9 P1.1 Metal fault trace and G2 safe GLES binding tests
+on:
+  push:
+    branches: [s9/p11-g2-safe-bind-if-redundant]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    steps:
+      - uses: actions/checkout@v4
+      - name: G2 state correctness in strict C11 and C++17
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -fsanitize=undefined \
+            userland/tests/test_s9_g2_bind.c -o /tmp/s9g2_c
+          /tmp/s9g2_c
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -fsanitize=undefined \
+            -x c++ userland/tests/test_s9_g2_bind.c -o /tmp/s9g2_cpp
+          /tmp/s9g2_cpp
+      - name: Previous P1/G1, GLES frame and Widgetless tests
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            userland/tests/test_s9_p1_g1.c -o /tmp/s9_p1g1
+          /tmp/s9_p1g1
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            userland/tests/test_gl_stage_stats.c -o /tmp/s9_glstage
+          /tmp/s9_glstage
+          PYTHONPATH=userland python3 -m unittest discover \
+            -s userland/tests -p test_strip_widgets.py -v
+          bash -n userland/build.sh
+      - name: Preserve graphics and thermal invariants
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          gl=Path('userland/src/eagl.c').read_text()
+          metal=Path('userland/src/metalvk/NativeBridgeMetalFrontend.mm').read_text()
+          mali=Path('drivers/gpu/mali/hakios.mali.c').read_text()
+          assert 'g2_bind=1' in gl and 'g2_verify=1' in gl
+          assert '#define glBindTexture s9_g2_internal_bind' in gl
+          assert '#define glDeleteTextures s9_g2_internal_delete' in gl
+          assert 'surface_changed(e, image)' in gl
+          assert 'surface_to_texture(e, image)' in gl
+          assert 'glFinish();' in gl and 'glFlush();' in gl
+          assert 'p11_trace=1' in metal and 'native-metal-p11:' in metal
+          assert 'doesNotRecognizeSelector:_cmd' in metal
+          assert 'GOV_CAP1_MC     85000' in mali
+          assert 'GOV_CAP2_MC     95000' in mali
+          print('G2 fast path guarded with raw-bind invalidations; fences and thermal caps unchanged')
+          PY
+  ios-syntax:
+    runs-on: macos-15
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - name: iOS arm64 EAGL C frontend syntax
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=gnu11 -fblocks -Wno-deprecated-declarations \
+            -fsyntax-only userland/src/eagl.c
+      - name: iOS arm64 Metal Objective-C++ frontend syntax
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun clang++ -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=c++17 -fobjc-arc -fblocks -x objective-c++ \
+            -Wno-deprecated-declarations -Itools/metal -fsyntax-only \
+            userland/src/metalvk/NativeBridgeMetalFrontend.mm
