@@ -21,6 +21,8 @@ jobs:
             userland/tests/test_s9_texture_layout.c -o /tmp/s9_tex_test
           /tmp/s9_tex_test
       - name: Regression tests for the widgetless parent
+        env:
+          PYTHONPATH: userland
         run: |
           python3 -m unittest discover -s userland/tests -p 'test_strip_widgets.py' -v
           bash -n userland/build.sh
