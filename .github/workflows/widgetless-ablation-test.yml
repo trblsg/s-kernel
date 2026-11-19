@@ -1,0 +1,26 @@
+name: S9 widgetless ablation validation
+
+on:
+  push:
+    branches:
+      - s9/widgetless-aegir-ablation
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-ablation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout experimental branch
+        uses: actions/checkout@v4
+      - name: Compile Python syntax and unit-test bundle selection
+        env:
+          PYTHONPATH: userland
+        run: |
+          python3 -m py_compile userland/strip_widgets.py userland/tests/test_strip_widgets.py
+          python3 -m unittest discover -s userland/tests -p 'test_strip_widgets.py' -v
+      - name: Check system image build script syntax
+        run: bash -n userland/build.sh
