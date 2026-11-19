@@ -2101,7 +2101,10 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
 // Not made here: a texture over raw memory in Apple's layout, and Apple's texture layout object. Both are refused, with the reason, rather than
 // answered with a guessed shape.
 - (id<MTLTexture>)newTextureWithBytesNoCopy:(void *)bytes length:(NSUInteger)length descriptor:(MTLTextureDescriptor *)d deallocator:(void (^)(void *,NSUInteger))deallocator {
- if(!s9LayoutOn())return nil;
+ if(!s9LayoutOn()) {
+  NBLOG(@"native-metal: newTextureWithBytesNoCopy:length:descriptor:deallocator: is not implemented (Apple's texture layout of raw memory is not known)");
+  return nil;
+ }
  s9_texture_layout p={};
  if(!bytes || !s9LayoutDescriptor(d,&p) || length<p.size ||
     ((uintptr_t)bytes&(p.alignment-1))) {
@@ -2137,7 +2140,10 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
 }
 - (id)newTextureLayoutWithDescriptor:(MTLTextureDescriptor *)d isHeapOrBufferBacked:(BOOL)backed {
  (void)backed;
- if(!s9LayoutOn())return nil;
+ if(!s9LayoutOn()) {
+  NBLOG(@"native-metal: newTextureLayoutWithDescriptor:isHeapOrBufferBacked: is not implemented (Apple's layout object is not known)");
+  return nil;
+ }
  s9LayoutRequests++;
  s9_texture_layout p={};
  if(!s9LayoutDescriptor(d,&p)) {

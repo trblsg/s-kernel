@@ -39,13 +39,21 @@ inputs unchanged from the working widgetless build.
 Control A: boot_args = poster_retry=2 widget_nice=0 poster_probe=1 metal_layout=0
 Test B:    boot_args = poster_retry=2 widget_nice=0 poster_probe=1 metal_layout=1
 
-Both builds must use the SAME new source and SYSTEM. Installing this new
-frontend and sampler initially REQUIRES changing SYSTEM, not just BOOT.
-Once installed, a subsequent boot-arg change can be tested by BOOT-only
-flashing if paired kernel and SYSTEM remain compatible. THE EXISTING
-INSTALLER FORMATS USERDATA. Back up BOOT, SYSTEM, EFS and USERDATA outside
-the phone and verify recovery before any full installer run. Do not
-repeatedly flash full ZIPs to change one boot argument.
+Both A/B runs must use the SAME new source binaries and the same wallpaper.
+Build.sh places poster_cost and HakiosMetalVK.dylib under /redwood in the
+small root APFS by default. But files larger than 4 MiB move to SYSTEM's
+/usr/local/redwood (with a symlink in the small root). Inspect userland.log
+for the exact 'build.sh: lib/... in the system image' lines, and compare
+root.apfs against system.apfs BEFORE choosing any flash method. If both
+changed binaries remain in the small root and the old SYSTEM is compatible,
+a matched BOOT/kernel + new root.apfs update may be sufficient WITHOUT a
+SYSTEM reflash. If either moved to SYSTEM, both images must be updated.
+A plain kernel-only BOOT flash does not inject a new userland binary.
+THE EXISTING FULL S9 INSTALLER FORMATS USERDATA. Back up BOOT, SYSTEM,
+EFS and USERDATA off-device and verify the recovery path before any full
+installation. Do not repeatedly use a USERDATA-formatting ZIP just to
+change one boot argument. The A/B flags can use BOOT-only updates once
+the required new small root and matching SYSTEM have been installed.
 
 ## Measurement protocol; no wallpaper manipulation
 
