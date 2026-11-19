@@ -2169,6 +2169,12 @@ pll_mhz(void)
 #define GOV_LEVELS      g3d_nrates
 extern int32_t hakios_exynos_tmu_zone_mc(unsigned zone);       /* 2: the G3D's (hakios.exynos_tmu.c; stubs.c) */
 static uint32_t mali_gov;
+/* S9 diagnostic only: 5-second governor decision summaries (mali_probe=1).
+ * Frame-floor tuning uses the EXISTING mali_gov_frame boot arg/sysctl.
+ * Does not change PLL, BUCK6 voltage or thermal caps on its own. */
+static uint32_t mali_probe;
+static uint64_t gov_probe_since, gov_probe_busy, gov_probe_elapsed;
+static uint32_t gov_probe_windows, gov_probe_frames, gov_probe_floor_forced, gov_probe_thermal;
 /*
  * mali_gov_frame=<MHz> (also kern.hakios.mali_gov_frame): the clock floor while frames are coming. A frame is one given
  * to the display (hakios_mali_frame(), present() in MiniIOMobileFramebuffer.cpp) within the last GOV_FRAME_MS. The GPU
@@ -2254,6 +2260,11 @@ gov_start(void)
 	}
 	gov_on = true;
 	gov_since = mach_absolute_time();
+	gov_probe_since = gov_since;
+	if (mali_probe) {
+		say("mali-probe: enabled (five-second summaries); framefloor=%u MHz, dvs=%u, thermal caps intact\n",
+		    gov_frame_mhz, gov_dvs ? 1 : 0);
+	}
 	say("mali: mali_gov=1: the GPU's clock follows its load from %u MHz: %u%% of a %u ms window wanted at most; no more "
 	    "than %u MHz from %d C on the G3D's sensor, %u MHz from %d C\n", g3d_rates[gov_level].mhz, GOV_TARGET, GOV_WINDOW_MS,
 	    g3d_rates[1].mhz, GOV_CAP1_MC / 1000, g3d_rates[0].mhz, GOV_CAP2_MC / 1000);
@@ -2304,10 +2315,11 @@ gov_set(unsigned level)
 static void
 gov_window(uint64_t now, uint64_t busy)
 {
-	uint64_t window, elapsed;
+	uint64_t window, elapsed, window_busy;
 	unsigned want, cap;
 	uint32_t load;
 	int32_t mc;
+	bool had_frame = false, floor_forced = false;
 
 	if (!gov_on) {
 		return;
@@ -2318,6 +2330,7 @@ gov_window(uint64_t now, uint64_t busy)
 	if (elapsed < window) {
 		return;
 	}
+	window_busy = gov_busy;
 	load = (uint32_t)(gov_busy >= elapsed ? 100 : gov_busy * 100 / elapsed);
 	gov_since = now;
 	gov_busy = 0;
@@ -2344,12 +2357,15 @@ gov_window(uint64_t now, uint64_t busy)
 		uint64_t last = __atomic_load_n(&gov_frame_last, __ATOMIC_RELAXED), span;
 
 		nanoseconds_to_absolutetime((uint64_t)GOV_FRAME_MS * NSEC_PER_MSEC, &span);
-		if (last != 0 && now - last < span) {
+		if (last != 0 && now >= last && now - last < span) {
 			unsigned floor = 0;
+
+			had_frame = true;
 
 			while (floor + 1 < GOV_LEVELS && g3d_rates[floor].mhz < gov_frame_mhz) {
 				floor++;
 			}
+			floor_forced = want < floor;
 			want = want < floor ? floor : want;
 		}
 	}
@@ -2364,6 +2380,33 @@ gov_window(uint64_t now, uint64_t busy)
 		}
 	} else {
 		gov_down = 0;
+	}
+	if (mali_probe) {
+		uint64_t interval, uptime_ns;
+
+		gov_probe_windows++;
+		gov_probe_elapsed += elapsed;
+		gov_probe_busy += window_busy;
+		gov_probe_frames += had_frame;
+		gov_probe_floor_forced += floor_forced;
+		gov_probe_thermal += cap < GOV_LEVELS - 1;
+		nanoseconds_to_absolutetime(5ull * NSEC_PER_SEC, &interval);
+		if (now - gov_probe_since >= interval && gov_probe_windows != 0) {
+			absolutetime_to_nanoseconds(now, &uptime_ns);
+			say("mali-probe: up=%llums windows=%u busy=%llu%% frame_windows=%u floor_forced=%u "
+			    "thermal_windows=%u framefloor=%uMHz clock=%uMHz level=%u cap=%uMHz g3d=%dmc "
+			    "switches=%u rises=%u falls=%u dvs=%u\n",
+			    uptime_ns / NSEC_PER_MSEC, gov_probe_windows,
+			    gov_probe_elapsed ? (gov_probe_busy >= gov_probe_elapsed ? 100 :
+			    gov_probe_busy * 100 / gov_probe_elapsed) : 0, gov_probe_frames,
+			    gov_probe_floor_forced, gov_probe_thermal, gov_frame_mhz,
+			    gov_level < GOV_LEVELS ? g3d_rates[gov_level].mhz : 0,
+			    gov_level, g3d_rates[gov_cap].mhz, mc,
+			    gov_switches, gov_ups, gov_downs, gov_dvs ? 1 : 0);
+			gov_probe_since = now;
+			gov_probe_windows = gov_probe_frames = gov_probe_floor_forced = gov_probe_thermal = 0;
+			gov_probe_busy = gov_probe_elapsed = 0;
+		}
 	}
 }
 
@@ -2867,6 +2910,8 @@ hakios_mali_init(void)
 	(void)PE_parse_boot_argn("mali_mhz", &mali_mhz, sizeof(mali_mhz));
 	(void)PE_parse_boot_argn("mali_acpm", &mali_acpm, sizeof(mali_acpm));
 	(void)PE_parse_boot_argn("mali_gov", &mali_gov, sizeof(mali_gov));
+	(void)PE_parse_boot_argn("mali_probe", &mali_probe, sizeof(mali_probe));
+	mali_probe = mali_probe != 0;
 	(void)PE_parse_boot_argn("g3d_sleep", &g3d_sleep, sizeof(g3d_sleep));
 	(void)PE_parse_boot_argn("g3d_sleep_ms", &g3d_sleep_ms, sizeof(g3d_sleep_ms));
 	g3d_sleep_ms = g3d_sleep_ms < 500 ? 500 : g3d_sleep_ms > 60000 ? 60000 : g3d_sleep_ms;

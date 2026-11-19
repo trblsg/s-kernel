@@ -1,0 +1,53 @@
+name: S9 GLES stage and Mali governor probe tests
+on:
+  push:
+    branches:
+      - s9/glstage-mali-frame-ab
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check per-frame timing statistics in C and C++
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -fsanitize=undefined \
+            userland/tests/test_gl_stage_stats.c -o /tmp/gl_stage_c
+          /tmp/gl_stage_c
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -fsanitize=undefined \
+            -x c++ userland/tests/test_gl_stage_stats.c -o /tmp/gl_stage_cpp
+          /tmp/gl_stage_cpp
+      - name: Check parent regression tests and source invariants
+        env:
+          PYTHONPATH: userland
+        run: |
+          python3 -m unittest discover -s userland/tests -p 'test_strip_widgets.py' -v
+          python3 -m py_compile userland/strip_widgets.py
+          bash -n userland/build.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          mali=Path("drivers/gpu/mali/hakios.mali.c").read_text()
+          gl=Path("userland/src/eagl.c").read_text()
+          assert 'mali_probe' in mali and 'gov_probe_floor_forced' in mali
+          assert 'want = want > cap ? cap : want;' in mali
+          assert 'GOV_CAP1_MC     85000' in mali
+          assert 'GOV_CAP2_MC     95000' in mali
+          assert 's9_gl_stage_add' in gl
+          assert 'sync_frames = strstr(arguments, "glsync=0") == NULL' in gl
+          assert 'wait_for_frames = 0' in gl
+          print("S9 guarded telemetry: existing thermal caps and GL sync paths remain")
+          PY
+  ios-eagl-syntax:
+    runs-on: macos-15
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: iOS SDK syntax check for GLES shim
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=gnu11 -fblocks -Wno-deprecated-declarations -Wno-unknown-pragmas \
+            -fsyntax-only userland/src/eagl.c

@@ -81,6 +81,7 @@
 #include <unistd.h>
 
 #include "hakios.gl.h"
+#include "gl_stage_stats.h"   /* opt-in glstage=1: host-side GLES/scanout timing buckets */
 
 /* ---- OpenGL ES: the types, the few names used here, the library's functions --------------------- */
 
@@ -327,11 +328,13 @@ struct eagl {
 	unsigned frames, shaders, programs, errors, shared, refused, paced;
 	uint64_t all_calls, all_draws, all_triangles, readback_us, wait_us, attach_us, flush_us, frame_us;
 	unsigned most_calls, most_triangles;
+	struct s9_gl_stage_stats glstage;       /* 60-frame buckets, no per-frame console writes */
 	const char *sources[256];       /* the text of the shaders being made, by name (modulo this) */
 	bool fragment[256];             /* ... and which of the two kinds each is */
 	unsigned plain_said;
 };
 
+static int glstage_on;                       /* boot-arg glstage=1: 60-frame timing aggregates */
 static unsigned trace_first, trace_last;        /* the frames whose calls are written down */
 static uint64_t trace_at;                       /* ... or the first frame from this time on (now_us()) */
 static unsigned trace_draws;                    /* ... or the first frame after one of so many draws */
@@ -1513,7 +1516,7 @@ static void
 frame_end(struct eagl *e, bool finished)
 {
 	static unsigned unfollowed;
-	uint64_t before, waited, after;
+	uint64_t before, sync_began, waited, after;
 	unsigned copied = 0, in_place = 0, presented = 0;
 
 	clear_now(e);
@@ -1533,6 +1536,7 @@ frame_end(struct eagl *e, bool finished)
 			}
 		}
 	}
+	sync_began = glstage_on ? now_us() : before;
 	if (in_place != 0 && !finished && pace_frames && presented == in_place && hakios_gl_pace(e->gl)) {
 		e->paced++;             /* every surface of it shown by the host (pace_frames) */
 	} else if (in_place != 0 && !finished && wait_for_frames) {
@@ -1610,6 +1614,25 @@ frame_end(struct eagl *e, bool finished)
 	e->attach_us += e->attaching;
 	e->flush_us += e->flushing;
 	e->frame_us += after - e->began;
+	if (glstage_on) {
+		/* Monotonic mach time. Draw includes IOSurface import; pre_sync includes
+		 * handing mirrored surfaces to the host; sync includes pace/finish/fence;
+		 * copy includes the post-sync surface updates. No extra GL calls. */
+		struct s9_gl_stage_stats *s = &e->glstage;
+		s9_gl_stage_add(s, before - e->began, sync_began - before,
+		    waited - sync_began, after - waited, e->flushing,
+		    after - e->began, presented);
+		if (s->n == 60) {
+			say("hakios-gl-stage: up=%llu.%03llus frames=%u..%u n=%u "
+			    "draw=%lluus present=%lluus sync=%lluus copy=%lluus flush=%lluus total=%lluus "
+			    "p95bin=%u slow16=%u slow33=%u max=%lluus shown=%u\n",
+			    after / 1000000, (after / 1000) % 1000, e->frames - s->n + 1, e->frames, s->n,
+			    s->draw_us / s->n, s->present_us / s->n, s->sync_us / s->n,
+			    s->copy_us / s->n, s->flush_us / s->n, s->total_us / s->n,
+			    s9_gl_stage_p95_bucket(s), s->slow16, s->slow33, s->max_us, s->presented);
+			s9_gl_stage_reset(s);
+		}
+	}
 	if (e->calls > e->most_calls) {
 		e->most_calls = e->calls;
 	}
@@ -4679,6 +4702,10 @@ install(void)
 		}
 		census_on = strstr(arguments, "glcensus=1") != NULL;
 		frame_lines = strstr(arguments, "glframes=1") != NULL;
+		glstage_on = strstr(arguments, "glstage=1") != NULL;
+		if (glstage_on) {
+			say("hakios-gl-stage: enabled; 60 frames/bucket, mach uptime microseconds; no GL sync changes\n");
+		}
 		latency_lines = strstr(arguments, "touch_lat=1") != NULL;
 		still_seldom = strstr(arguments, "glstill=0") == NULL;
 		if ((argument = strstr(arguments, "glprof=")) != NULL) {
