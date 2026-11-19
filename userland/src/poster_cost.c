@@ -33,7 +33,7 @@ int proc_pidinfo(int, int, uint64_t, void *, int);
 int proc_name(int, void *, uint32_t);
 
 struct snap {int pid;char name[64];struct proc_taskinfo info;};
-static const char *targets[]={"backboardd","CollectionsPoster","PosterBoard","SpringBoard","chronod"};
+static const char *targets[]={"backboardd","CollectionsPoster","PosterBoard","SpringBoard","chronod","poster_cost"};
 static struct snap prev[MAX_MATCHES],now[MAX_MATCHES];
 static int prev_count;
 static int selected(const char *name) {
@@ -75,6 +75,8 @@ int main(int argc,char **argv) {
         const double elapsed=(double)(at-previous_at);
         const unsigned long long t=(unsigned long long)((at-beginning)*
             (double)base.numer/base.denom/1e9);
+        const unsigned long long uptime=(unsigned long long)(at*
+            (double)base.numer/base.denom/1e9);
         int count=0;unsigned mask=0;
         for(int k=0;k<(bytes>0?bytes/(int)sizeof(int):0) && count<MAX_MATCHES;k++) {
             if(pids[k]<=0)continue;
@@ -96,11 +98,11 @@ int main(int argc,char **argv) {
             const int32_t csw=old?info.pti_csw-old->info.pti_csw:0;
             const int32_t mach=old?info.pti_syscalls_mach-old->info.pti_syscalls_mach:0;
             const int32_t unix=old?info.pti_syscalls_unix-old->info.pti_syscalls_unix:0;
-            printf("poster_cost: %llu s: %s[%d] cpu=%.1f%% rss=%lluKiB vm=%lluMiB faults=%d pageins=%d csw=%d mach=%d unix=%d %s\n",
+            printf("poster_cost: %llu s: %s[%d] cpu=%.1f%% rss=%lluKiB vm=%lluMiB faults=%d pageins=%d csw=%d mach=%d unix=%d up=%llus %s\n",
                 t,name,pids[k],cpu,(unsigned long long)(info.pti_resident_size>>10),
                 (unsigned long long)(info.pti_virtual_size>>20),
                 faults<0?0:faults,pageins<0?0:pageins,csw<0?0:csw,mach<0?0:mach,unix<0?0:unix,
-                old?"sample":"new-pid");
+                uptime,old?"sample":"new-pid");
         }
         if(look)for(size_t i=0;i<sizeof(targets)/sizeof(targets[0]);i++)
             if(!(mask&(1u<<i)))printf("poster_cost: %llu s: %s missing\n",t,targets[i]);

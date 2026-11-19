@@ -22,7 +22,9 @@ poster_probe=0 (default): poster_cost exits silently; nothing sampled.
 poster_probe=1: rc.jobs starts /redwood/bin/poster_cost 5 120, which logs
 5-second PID-specific CPU %, RSS, virtual size, faults, pageins, context
 switches and syscall deltas for CollectionsPoster, PosterBoard, backboardd,
-SpringBoard and chronod. PID absence and respawns are reported. This is
+SpringBoard and chronod, plus the sampler itself (poster_cost) to estimate
+measurement overhead. Each line includes monotonic uptime for alignment.
+PID absence and respawns are reported. This is
 TOTAL PROCESS CPU time, NOT isolated render-thread time, GPU time, or watts.
 Use fps:, cpufreq_gov:, cputop: and process-labeled HakiosMetal logging to
 correlate visible render activity. Mali busy/MHz is whole-device telemetry.
