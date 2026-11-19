@@ -20,6 +20,9 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -pedantic -fsanitize=undefined -g \
             userland/tests/test_s9_texture_layout.c -o /tmp/s9_tex_test
           /tmp/s9_tex_test
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -x c++ \
+            userland/tests/test_s9_texture_layout.c -o /tmp/s9_tex_cpp_test
+          /tmp/s9_tex_cpp_test
       - name: Regression tests for the widgetless parent
         env:
           PYTHONPATH: userland

@@ -83,7 +83,13 @@ static inline int s9_tex_plan(uint32_t fmt, uint64_t width, uint64_t height,
         !s9_tex_add(raw,page-1,&padded))return 0;
     padded&=~(page-1);
     if (padded>SIZE_MAX || row>SIZE_MAX) return 0;
-    *out=(s9_texture_layout){row,blocks_h,padded,page,bw,bh,bytes};
+    out->row_bytes=row;
+    out->block_rows=blocks_h;
+    out->size=padded;
+    out->alignment=page;
+    out->block_width=bw;
+    out->block_height=bh;
+    out->bytes_per_block=bytes;
     return 1;
 }
 
