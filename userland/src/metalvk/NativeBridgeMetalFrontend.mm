@@ -2020,6 +2020,8 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  return true;
 }
 
+#include "s9_texture_layout.inc"
+
 @interface NBDeviceMethods : NSObject
 @end
 @implementation NBDeviceMethods
@@ -2099,14 +2101,55 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
 // Not made here: a texture over raw memory in Apple's layout, and Apple's texture layout object. Both are refused, with the reason, rather than
 // answered with a guessed shape.
 - (id<MTLTexture>)newTextureWithBytesNoCopy:(void *)bytes length:(NSUInteger)length descriptor:(MTLTextureDescriptor *)d deallocator:(void (^)(void *,NSUInteger))deallocator {
- (void)bytes;(void)length;(void)d;(void)deallocator;
- NBLOG(@"native-metal: newTextureWithBytesNoCopy:length:descriptor:deallocator: is not implemented (Apple's texture layout of raw memory is not known)");
- return nil;
+ if(!s9LayoutOn())return nil;
+ s9_texture_layout p={};
+ if(!bytes || !s9LayoutDescriptor(d,&p) || length<p.size ||
+    ((uintptr_t)bytes&(p.alignment-1))) {
+  static std::atomic<bool> said{false};
+  if(!said.exchange(true))NBLOG(@"native-metal: S9 layout no-copy refused (bad descriptor, pointer or size)");
+  return nil;
+ }
+ if(p.block_width>1 || p.block_height>1) {
+  // ASTC/ETC: the native bridge cannot import a compressed linear buffer.
+  // Copy packed blocks into a GPU texture while retaining the caller's memory
+  // owner until that texture goes, as the Redfin Metal frontend does.
+  MTLTextureDescriptor *own=[d copy];own.storageMode=MTLStorageModeShared;
+  id<MTLTexture> texture=[(id<MTLDevice>)self newTextureWithDescriptor:own];
+  if(!texture)return nil;
+  @try {
+   [texture replaceRegion:MTLRegionMake2D(0,0,d.width,d.height)
+            mipmapLevel:0 withBytes:bytes bytesPerRow:(NSUInteger)p.row_bytes];
+  } @catch(NSException *e) {
+   NBLOG(@"native-metal: S9 compressed no-copy refused: %@",e.reason);return nil;
+  }
+  S9TextureMemoryOwner *owner=[S9TextureMemoryOwner new];
+  owner.pointer=bytes;owner.length=length;owner.deallocator=deallocator;
+  objc_setAssociatedObject((id)texture,&s9TextureMemoryOwnerKey,owner,OBJC_ASSOCIATION_RETAIN);
+  s9NoCopyAccepts++;
+  return texture;
+ }
+ id<MTLBuffer> buffer=[(id<MTLDevice>)self newBufferWithBytesNoCopy:bytes length:length
+                     options:MTLResourceStorageModeShared deallocator:deallocator];
+ if(!buffer)return nil;
+ NBTexture *texture=textureOnBuffer((NBBuffer *)buffer,d,0,(NSUInteger)p.row_bytes,false);
+ if(texture)s9NoCopyAccepts++;
+ return (id<MTLTexture>)texture;
 }
 - (id)newTextureLayoutWithDescriptor:(MTLTextureDescriptor *)d isHeapOrBufferBacked:(BOOL)backed {
- (void)d;(void)backed;
- NBLOG(@"native-metal: newTextureLayoutWithDescriptor:isHeapOrBufferBacked: is not implemented (Apple's layout object is not known)");
- return nil;
+ (void)backed;
+ if(!s9LayoutOn())return nil;
+ s9LayoutRequests++;
+ s9_texture_layout p={};
+ if(!s9LayoutDescriptor(d,&p)) {
+  static std::atomic<bool> said{false};
+  if(!said.exchange(true))NBLOG(@"native-metal: S9 texture layout refused: unknown format or unsupported descriptor");
+  return nil;
+ }
+ if(s9LayoutAccepts.fetch_add(1)==0)
+  NBSAY(@"native-metal: S9 texture layout enabled: %lux%lu fmt %lu row %llu size %llu (metal_layout=1)",
+    (unsigned long)d.width,(unsigned long)d.height,(unsigned long)d.pixelFormat,
+    (unsigned long long)p.row_bytes,(unsigned long long)p.size);
+ return [[S9TextureLayout alloc] initWithPlan:p];
 }
 - (id<MTLCommandQueue>)newCommandQueueWithMaxCommandBufferCount:(NSUInteger)count {(void)count;return [(id<MTLDevice>)self newCommandQueue];}
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)options {

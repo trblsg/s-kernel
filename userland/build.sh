@@ -372,6 +372,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -framework IOKit -o obj/mali_test src/mali_test.c
 		# which processes take the processors, every few seconds (src/cputop.c; rc.jobs.cputop)
 		$DYN -o obj/cputop src/cputop.c
+		# S9: opt-in PID-level PosterBoard/backboardd CPU+memory sampler (poster_probe=1).
+		$DYN -o obj/poster_cost src/poster_cost.c
 		# Optional WidgetKit scheduling experiment; disabled unless widget_nice=N boot argument is set.
 		$DYN -o obj/widget_boot src/widget_boot.c
 		# the kept data volume to the flash every few seconds: the phone is reset, never shut down (src/var_sync.c)
@@ -687,6 +689,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/passcoded ] && cp obj/passcoded root/bin/
 	[ -f obj/telephonyd ] && cp obj/telephonyd root/bin/
 	[ -f obj/cputop ] && cp obj/cputop root/bin/
+	[ -f obj/poster_cost ] && cp obj/poster_cost root/bin/
 	[ -f obj/widget_boot ] && cp obj/widget_boot root/bin/
 	[ -f obj/var_sync ] && cp obj/var_sync root/bin/
 	[ -f obj/devname ] && cp obj/devname root/bin/

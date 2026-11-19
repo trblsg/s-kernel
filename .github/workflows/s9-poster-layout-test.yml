@@ -1,0 +1,42 @@
+name: S9 Poster layout and process-cost self-tests
+
+on:
+  push:
+    branches:
+      - s9/poster-texture-layout-probe
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+      - name: Layout footprint arithmetic and overflow tests
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -fsanitize=undefined -g \
+            userland/tests/test_s9_texture_layout.c -o /tmp/s9_tex_test
+          /tmp/s9_tex_test
+      - name: Regression tests for the widgetless parent
+        run: |
+          python3 -m unittest discover -s userland/tests -p 'test_strip_widgets.py' -v
+          bash -n userland/build.sh
+  ios-syntax:
+    runs-on: macos-15
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile poster cost sampler for iOS ARM64 (syntax)
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=c11 -Wall -Wextra -Werror -fsyntax-only userland/src/poster_cost.c
+      - name: Compile Metal frontend for iOS ARM64 (syntax)
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun clang++ -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=c++17 -fobjc-arc -fblocks -x objective-c++ -Wno-deprecated-declarations \
+            -Itools/metal -fsyntax-only userland/src/metalvk/NativeBridgeMetalFrontend.mm
