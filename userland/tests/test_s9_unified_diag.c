@@ -19,7 +19,8 @@ int main(void) {
     assert(s9_has_boot_flag(args,"p_layout_probe=1"));
     assert(!s9_has_boot_flag(args,"g2_bind=1"));
     assert(!s9_has_boot_flag("no_glhash=1 glhash=10","glhash=1"));
-    struct s9_g2_state g={0};
+    struct s9_g2_state g;
+    memset(&g,0,sizeof(g)); /* strict C++ -Wmissing-field-initializers */
     const unsigned tex=0x0de1;
     assert(!s9_g2_redundant(&g,0,tex,10,tex));
     g.attempts=10;
