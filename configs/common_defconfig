@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 757 symbols in 20 groups; 54 are set, 45 of them drivers built in.
+# 760 symbols in 20 groups; 54 are set, 45 of them drivers built in.
 #
 
 #
@@ -512,7 +512,7 @@ CONFIG_TOUCHSCREEN=y
 # CONFIG_VIRTIO_INPUT is not set
 
 #
-# GPU and display (117)
+# GPU and display (120)
 #
 
 # rendering on Adreno (an image built with GL=1; the GPU's firmware from your phone) [needs fw-gpu/ from the phone]
@@ -806,11 +806,20 @@ CONFIG_GPU=y
 # leave PLL_G3D as the boot set it; the step stops if it is not running
 # CONFIG_MALI_PLL is not set
 
+# sample five-second GPU busy and thermal governor counters
+# CONFIG_MALI_PROBE is not set
+
 # one line per job: "tl: j SEQ f|v q QUEUED b BEGAN e ENDED", in microseconds
 # CONFIG_MALI_TRACE is not set
 
 # say where Metal's device is (docs/metal-plan.md, step 1)
 # CONFIG_METAL is not set
+
+# sample read-only G3D PMU and PLL state every five seconds
+# CONFIG_P3POWER is not set
+
+# read BUCK6 PMIC voltage at most once every thirty seconds
+# CONFIG_P3RAIL is not set
 
 # the driver: without it nothing here runs
 # CONFIG_PANEL is not set
