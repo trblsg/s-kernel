@@ -175,6 +175,7 @@ CORE0	arg	core0	Loader	kl	loader.c,psci_smp.c	the kernel's box for this core (ab
 CORE1	arg	core1	Loader	l	loader.c	core 1, which S-Boot uses for its own display work, listed for the kernel all the same
 CP	arg	cp	User space	k	hakios.shannon.c	
 CP_APN	arg	cp_apn	User space	k	hakios.shannon.c	the access point name stage 6 asks the data context for (the operator's published default; none: no stage 6)
+CP_BL	arg	cp_bl	User space	k	hakios.shannon.c	read the boot loader's BOTA0-2 partitions once, read-only, and log where the EL3 monitor's CP
 CP_DELAY	arg	cp_delay	User space	k	hakios.shannon.c	seconds after the boot before the modem's driver does anything (30), so that its lines are in the log
 CP_DS	arg	cp_ds	User space	k	hakios.shannon.c	the dual SIM field told to the modem (0)
 CP_IF	arg	cp_if	User space	k	hakios.shannon.c	with cp=6 or 7 and cp_apn: the active data context becomes a network interface, pdp_ip0 (IPv4, point to point, the CP's address for it), and stays
@@ -271,6 +272,7 @@ GLSHOW_PART	arg	glshow_part	GPU and display	u	eagl.c
 GLSHOW_ZOOM	arg	glshow_zoom	GPU and display	u	eagl.c	
 GLSKIP	arg	glskip	GPU and display	u	eagl.c	the draws of those programs are left out of the picture, which says what in it is their work
 GLSLOW	arg	glslow	GPU and display	u	eagl.c	
+GLSTAGE	arg	glstage	GPU and display	u	eagl.c	
 GLSTILL	arg	glstill	GPU and display	u	eagl.c	
 GLSURFACES	arg	glsurfaces	GPU and display	u	eagl.c	
 GLSURFACES_MB	arg	glsurfaces_mb	GPU and display	u	eagl.c	
@@ -340,6 +342,7 @@ MALI_FASTMAP	arg	mali_fastmap	GPU and display	k	hakios.mali.c	walk the page tabl
 MALI_FLUSH	arg	mali_flush	GPU and display	k	hakios.mali.cpp	
 MALI_GOV	arg	mali_gov	GPU and display	k	hakios.mali.c	the clock follows the load (see gov_window())
 MALI_GOV_FRAME	arg	mali_gov_frame	GPU and display	k	hakios.mali.c	clock floor while frames are shown (default 572; 0: none)
+MALI_IRQ	arg	mali_irq	GPU and display	k	hakios.mali.c	wait for the JOB interrupt (SPI 282, GIC INTID 314) instead of the 50 us naps
 MALI_MAX	arg	mali_max	GPU and display	k	hakios.mali.c	
 MALI_MHZ	arg	mali_mhz	GPU and display	k	hakios.mali.c	GPU clock: 260 (default), 455 or 572 (or mali_max's level)
 MALI_NAP_US	arg	mali_nap_us	GPU and display	k	hakios.mali.c	poll interval for a job still running after its first 200 us, clamped to 10..1000 (default 50)

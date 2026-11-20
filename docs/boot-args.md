@@ -2,13 +2,13 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **702 arguments**: 611 read by the kernel, 23 by the loader, 85 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **705 arguments**: 613 read by the kernel, 23 by the loader, 86 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
 Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl kern.bootargs`).
 
-## GPU and display (121)
+## GPU and display (123)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -73,6 +73,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `glshow_zoom` | U | `eagl.c` | `CONFIG_GLSHOW_ZOOM` |  |
 | `glskip` | U | `eagl.c` | `CONFIG_GLSKIP` |  |
 | `glslow` | U | `eagl.c` | `CONFIG_GLSLOW` |  |
+| `glstage` | U | `eagl.c` | `CONFIG_GLSTAGE` |  |
 | `glstill` | U | `eagl.c` | `CONFIG_GLSTILL` |  |
 | `glsurfaces` | U | `eagl.c` | `CONFIG_GLSURFACES` |  |
 | `glsurfaces_mb` | U | `eagl.c` | `CONFIG_GLSURFACES_MB` |  |
@@ -106,6 +107,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `mali_flush` | K | `hakios.mali.cpp` | `CONFIG_MALI_FLUSH` |  |
 | `mali_gov` | K | `hakios.mali.c` | `CONFIG_MALI_GOV` |  |
 | `mali_gov_frame` | K | `hakios.mali.c` | `CONFIG_MALI_GOV_FRAME` |  |
+| `mali_irq` | K | `hakios.mali.c` | `CONFIG_MALI_IRQ` |  |
 | `mali_max` | K | `hakios.mali.c` | `CONFIG_MALI_MAX` |  |
 | `mali_mhz` | K | `hakios.mali.c` | `CONFIG_MALI_MHZ` |  |
 | `mali_nap_us` | K | `hakios.mali.c` | `CONFIG_MALI_NAP_US` |  |
@@ -603,7 +605,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 | `ufs_write_guid` | L | `loader.c` | `CONFIG_UFS_WRITE_GUID` |  |
 
-## User space (187)
+## User space (188)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -671,6 +673,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `console_quiet` | K | `1003-avf-console-quiet.patch` | `CONFIG_CONSOLE_QUIET` |  |
 | `cp` | K | `hakios.shannon.c` | `CONFIG_CP` |  |
 | `cp_apn` | K | `hakios.shannon.c` | `CONFIG_CP_APN` |  |
+| `cp_bl` | K | `hakios.shannon.c` | `CONFIG_CP_BL` |  |
 | `cp_delay` | K | `hakios.shannon.c` | `CONFIG_CP_DELAY` |  |
 | `cp_ds` | K | `hakios.shannon.c` | `CONFIG_CP_DS` |  |
 | `cp_if` | K | `hakios.shannon.c` | `CONFIG_CP_IF` |  |

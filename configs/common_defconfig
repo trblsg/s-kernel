@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 760 symbols in 20 groups; 54 are set, 45 of them drivers built in.
+# 763 symbols in 20 groups; 54 are set, 45 of them drivers built in.
 #
 
 #
@@ -512,7 +512,7 @@ CONFIG_TOUCHSCREEN=y
 # CONFIG_VIRTIO_INPUT is not set
 
 #
-# GPU and display (120)
+# GPU and display (122)
 #
 
 # rendering on Adreno (an image built with GL=1; the GPU's firmware from your phone) [needs fw-gpu/ from the phone]
@@ -702,6 +702,9 @@ CONFIG_GPU=y
 # CONFIG_GLSLOW is not set
 
 # read by eagl.c (user space)
+# CONFIG_GLSTAGE is not set
+
+# read by eagl.c (user space)
 # CONFIG_GLSTILL is not set
 
 # read by eagl.c (user space)
@@ -793,6 +796,9 @@ CONFIG_GPU=y
 
 # clock floor while frames are shown (default 572; 0: none)
 # CONFIG_MALI_GOV_FRAME is not set
+
+# wait for the JOB interrupt (SPI 282, GIC INTID 314) instead of the 50 us naps
+# CONFIG_MALI_IRQ is not set
 
 # read by hakios.mali.c (kernel)
 # CONFIG_MALI_MAX is not set
@@ -1699,7 +1705,7 @@ CONFIG_MODEM_AGAIN=y
 # CONFIG_UFS_WRITE_GUID is not set
 
 #
-# User space (187)
+# User space (188)
 #
 
 # Star2's primary rear camera (S5K2L3): 2 powers it up at boot as its stream would, reads its ID and revision, powers ...
@@ -1899,6 +1905,9 @@ CONFIG_MODEM_AGAIN=y
 
 # the access point name stage 6 asks the data context for (the operator's published default; none: no stage 6)
 # CONFIG_CP_APN is not set
+
+# read the boot loader's BOTA0-2 partitions once, read-only, and log where the EL3 monitor's CP
+# CONFIG_CP_BL is not set
 
 # seconds after the boot before the modem's driver does anything (30), so that its lines are in the log
 # CONFIG_CP_DELAY is not set

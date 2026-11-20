@@ -185,6 +185,7 @@ core0	kl
 core1	l
 cp	k
 cp_apn	k
+cp_bl	k
 cp_delay	k
 cp_ds	k
 cp_if	k
@@ -284,6 +285,7 @@ glshow_part	u
 glshow_zoom	u
 glskip	u
 glslow	u
+glstage	u
 glstill	u
 glsurfaces	u
 glsurfaces_mb	u
@@ -358,6 +360,7 @@ mali_fastmap	k
 mali_flush	k
 mali_gov	k
 mali_gov_frame	k
+mali_irq	k
 mali_max	k
 mali_mhz	k
 mali_nap_us	k
