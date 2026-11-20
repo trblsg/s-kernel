@@ -36,7 +36,7 @@ jobs:
           PYTHONPATH=userland python3 -m unittest discover \
             -s userland/tests -p test_strip_widgets.py -v
           bash -n userland/build.sh
-      - name: Source invariants: P0 gated and P1/P3 observational, P2 unchanged
+      - name: "Source invariants: P0 gated and P1/P3 observational, P2 unchanged"
         run: |
           python3 - <<'PY'
           from pathlib import Path
