@@ -1,0 +1,77 @@
+name: S9 G3D Power Lab strict policy and invariant tests
+
+on:
+  push:
+    branches:
+      - s9/g3d-power-lab
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check G3D lab policy in strict C11 and C++17 with UBSan
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror -pedantic -fsanitize=undefined \
+            tools/tests/test_s9_g3d_lab_policy.c -o /tmp/s9_lab_c
+          /tmp/s9_lab_c
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror -pedantic -fsanitize=undefined \
+            -x c++ tools/tests/test_s9_g3d_lab_policy.c -o /tmp/s9_lab_cpp
+          /tmp/s9_lab_cpp
+      - name: Static fail-closed interlock and thermal source checks
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          k=Path('drivers/gpu/mali/hakios.mali.c').read_text()
+          lab=Path('drivers/gpu/mali/hakios.mali_lab.h').read_text()
+          h=Path('drivers/gpu/mali/hakios.mali_lab_policy.h').read_text()
+          m=Path('drivers/map').read_text()
+          assert 'gpu/mali bsd/dev/hakios.mali_lab.h' in m
+          assert 'gpu/mali bsd/dev/hakios.mali_lab_policy.h' in m
+          assert 'tools/tests/test_s9_g3d_lab_policy.c' in str(Path('tools/tests/test_s9_g3d_lab_policy.c'))
+          assert '#include "hakios.mali_lab_policy.h"' in k
+          assert '#include "hakios.mali_lab.h"' in k
+          assert k.index('lck_mtx_lock(&mali_job_lock);', k.index('g3d_idle_gate(void)')) < k.index(
+              's9_g3d_lab_eligible(', k.index('g3d_idle_gate(void)'))
+          assert 'queued = mali_queue_count != 0;' in k
+          assert 'g3d_lab_gpu_safe = false' in k
+          assert 'g3d_lab_trip(1);' in k
+          assert 'power OFF REFUSED' in k and 'g3d_lab_trip(2);' in k
+          assert 'g3d_lab_trip(3);' in k
+          assert 'GOV_CAP1_MC     85000' in k
+          assert 'GOV_CAP2_MC     95000' in k
+          assert 'g3d_lab_mv = 950' in k
+          assert 's9_g3d_lab_mv_allowed' in h
+          assert 'rail_set(B6OUT_950MV)' in lab
+          assert 'g3d_lab_phase_sysctl' in lab
+          assert 'g3d_lab_reset_sysctl' in lab
+          assert 'g3d_lab_stats_sysctl' in lab
+          assert 'g3d_lab_restore_after_job_error' in k
+          assert 'g3d_lab_gpu_safe' in k
+          assert 'gpu_safe=' in lab
+          assert 's9_g3d_lab_eligible' in k
+          assert 'clock_interval_to_deadline(5000, NSEC_PER_MSEC' in lab
+          assert 'lck_mtx_sleep_deadline' in lab
+          assert 'lck_mtx_sleep_deadline(&mali_queue_lock' in lab
+          assert 'g3d_lab_rail_probe' in lab
+          assert 'g3d_lab_rail_probe' in k
+          assert 'g3d_lab_gate' in k
+          assert 'g3d_lab_mv' in k
+          # This is a kernel-only experiment; userland P0/P1/P3 must remain
+          # at the previously verified interface and P2 is out of scope.
+          print('G3D Lab defaults, GPU queue interlocks, rail bounds, and thermal caps preserved')
+          PY
+      - name: Verify P0/P1/P3 baseline syntax-preserving tests still pass
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            userland/tests/test_s9_ioshash4.c -o /tmp/s9_hash
+          /tmp/s9_hash
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            userland/tests/test_s9_unified_diag.c -o /tmp/s9_unified
+          /tmp/s9_unified
+          bash -n userland/build.sh

@@ -40,6 +40,8 @@ display/panel iokit/Kernel/hakios.backlight.cpp
 gpu      iokit/Kernel/hakios.gpu.cpp
 gpu/mali bsd/dev/hakios.mali.c
 gpu/mali bsd/dev/hakios.mali_va.h
+gpu/mali bsd/dev/hakios.mali_lab_policy.h
+gpu/mali bsd/dev/hakios.mali_lab.h
 gpu/mali iokit/Kernel/hakios.mali.cpp
 
 camera   bsd/dev/hakios.camera.c

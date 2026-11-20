@@ -58,6 +58,7 @@
 #include <vm/vm_kern.h>
 #include <sys/hakios.exynos_soc.h>
 #include "hakios.mali_va.h"
+#include "hakios.mali_lab_policy.h" /* opt-in runtime power/rail lab with portable policy tests */
 #include <sys/hakios.log.h>
 #include <sys/hakios.xnu.h>
 
@@ -166,13 +167,29 @@ static bool gpu_answered;               /* step 4 read a G72: a soft reset befor
  */
 static uint32_t g3d_sleep, g3d_sleep_ms = 3000;
 static bool g3d_awake;
+static bool g3d_lab_gpu_safe = true; /* false means no GPU job may be submitted until verified recovery */
 static uint64_t g3d_last_busy;          /* the end of the last job, by mach_absolute_time */
 static uint64_t g3d_off_at;
+/* G3D Power Lab. Defaults are the existing production ON/950mV path.
+ * No new boot arguments are required: USB sysctl selects each phase. */
+static uint32_t g3d_lab_gate, g3d_lab_idle_ms = 10000, g3d_lab_mv = 950;
+static uint32_t g3d_lab_phase; /* 0..99, user-set phase marker; NO hardware effect */
+static uint32_t g3d_lab_rail_probe, g3d_lab_fault, g3d_lab_monitor_started;
+static uint32_t g3d_lab_off_count, g3d_lab_wake_count, g3d_lab_wake_failed;
+static uint32_t g3d_lab_shadow_count, g3d_lab_denied_count, g3d_lab_job_faults;
+static uint64_t g3d_lab_off_residency_ns, g3d_lab_last_wake_us;
+static uint64_t g3d_lab_max_wake_us, g3d_lab_total_wake_us, g3d_lab_last_wake_at;
+static uint64_t g3d_lab_last_shadow_at, g3d_lab_last_rail_at;
+static uint8_t g3d_lab_rail_ctrl, g3d_lab_rail_vsel;
+static bool g3d_lab_rail_valid;
 static bool g3d_ensure_on(void);        /* (mali_job_lock held: the G3D back on after g3d_sleep) */
 static bool g3d_power_on(void);         /* (mali_job_lock held: the power-on steps, without the g3d_sleep test) */
 static void g3d_idle_gate(void);
 static void gov_rebase(void);
 static uint32_t pll_mhz(void);
+static void g3d_lab_monitor_start(void);
+static void g3d_lab_trip(uint32_t fault);
+static void g3d_lab_restore_after_job_error(void);
 /*
  * The JOB interrupt: SPI 282 on the G3D block, GIC INTID 314. Off by default (mali_irq=1 turns it on): the driver has
  * polled since the first job, and a wrong mask or a level line that is never quieted would cost more than the naps. When
@@ -904,6 +921,17 @@ smc(uint64_t function, uint64_t first, uint64_t second, uint64_t third)
 	return x0;
 }
 
+/* Faults latch until a verified restore or reboot. Never clear g3d_sleep
+ * while the domain may be OFF: that would allow GPU MMIO without wake. */
+static void
+g3d_lab_trip(uint32_t fault)
+{
+	if (g3d_lab_fault == 0) {
+		g3d_lab_fault = fault;
+		say("g3d-lab: FAULT=%u latched; further automatic OFF transitions blocked\n", fault);
+	}
+}
+
 /*
  * Power the G3D domain off again, undoing step 2. A GPU that answered is reset first, so nothing runs when the power
  * goes. If the protection cannot be saved, or the domain does not go off, it is switched on again and left on: a
@@ -917,7 +945,13 @@ g3d_off(void)
 	if (gpu_answered) {
 		say("mali: before the power goes: a reset\n");
 		if (!gpu_reset()) {
-			say("mali: the reset did not finish (GPU_INT_RAWSTAT %#x): the power goes anyway\n", rd(mali, GPU_INT_RAWSTAT));
+			/* Fail closed: an incomplete reset is NOT safe to power gate.
+			 * Keep the PMU on and let the operator roll back. */
+			say("mali: g3d_lab: reset did not finish (GPU_INT_RAWSTAT %#x): power OFF REFUSED\n",
+			    rd(mali, GPU_INT_RAWSTAT));
+			g3d_lab_trip(1);
+			g3d_lab_gpu_safe = false;
+			return;
 		}
 		gpu_answered = false;
 	}
@@ -941,6 +975,8 @@ g3d_off(void)
 	say("mali: SMC %#x (%u, %#x): the DTZPC save, returned %#llx\n", DTZPC_SMC, DTZPC_SAVE, DTZPC_G3D, answer);
 	if ((uint32_t)answer != 0) {
 		say("mali: the protection was not saved: the domain is left ON\n");
+		g3d_lab_trip(2);
+		g3d_lab_gpu_safe = false;
 		g3d_lpm_restore();
 		powered_here = false;
 		return;
@@ -949,6 +985,8 @@ g3d_off(void)
 	if (!wait_for(pmu, PMU_G3D_STATUS, G3D_ON, 0, G3D_WAIT_US)) {
 		say("mali: the domain did not go off: status %#x after %u ms; switching it on again\n", rd(pmu, PMU_G3D_STATUS),
 		    G3D_WAIT_US / 1000);
+		g3d_lab_trip(3);
+		g3d_lab_gpu_safe = false;
 		wr(pmu, PMU_G3D_CONFIGURATION, rd(pmu, PMU_G3D_CONFIGURATION) | G3D_ON);
 		if (wait_for(pmu, PMU_G3D_STATUS, G3D_ON, G3D_ON, G3D_WAIT_US)) {
 			answer = smc(DTZPC_SMC, DTZPC_RESTORE, DTZPC_G3D, 0);
@@ -1264,24 +1302,32 @@ static bool
 g3d_power_on(void)
 {
 	const char *which = NULL;
-	uint64_t now;
+	uint64_t now, began = mach_absolute_time();
 
 	say("mali: g3d_sleep: the first work after the power went: the G3D is coming back on\n");
 	if (!step_power()) {
+		g3d_lab_wake_failed++;
+		g3d_lab_trip(4);
 		g3d_lpm_restore();
 		say("mali: g3d_sleep: step 2 did not bring the domain up: no job is run\n");
 		return false;
 	}
 	g3d_lpm_restore();
 	if (!step_dtzpc()) {
+		g3d_lab_wake_failed++;
+		g3d_lab_trip(4);
 		say("mali: g3d_sleep: step 3 did not restore the protection: no job is run\n");
 		return false;
 	}
 	if (!gpu_reset()) {
+		g3d_lab_wake_failed++;
+		g3d_lab_trip(4);
 		say("mali: g3d_sleep: the GPU did not finish a reset: no job is run\n");
 		return false;
 	}
 	if (!gpu_cores_on(&which)) {
+		g3d_lab_wake_failed++;
+		g3d_lab_trip(4);
 		say("mali: g3d_sleep: %s did not power up: no job is run\n", which);
 		return false;
 	}
@@ -1290,6 +1336,7 @@ g3d_power_on(void)
 	lck_mtx_unlock(&mali_lock);
 	gpu_answered = true;
 	g3d_awake = true;
+	g3d_lab_gpu_safe = true;
 	if (mali_irq) {
 		(void)mali_irq_arm();           /* (the domain is on: the GIC line can be attached again) */
 	}
@@ -1297,9 +1344,17 @@ g3d_power_on(void)
 	__atomic_store_n(&g3d_last_busy, now, __ATOMIC_RELAXED);
 	gov_rebase();
 	if (g3d_off_at != 0) {
-		uint64_t off_ns;
+		uint64_t off_ns, wake_ns;
 
-		absolutetime_to_nanoseconds(now - g3d_off_at, &off_ns);
+		absolutetime_to_nanoseconds(began >= g3d_off_at ? began - g3d_off_at : 0, &off_ns);
+		absolutetime_to_nanoseconds(now - began, &wake_ns);
+		g3d_lab_off_residency_ns += off_ns;
+		g3d_lab_last_wake_us = wake_ns / 1000;
+		g3d_lab_total_wake_us += g3d_lab_last_wake_us;
+		if (g3d_lab_last_wake_us > g3d_lab_max_wake_us)
+			g3d_lab_max_wake_us = g3d_lab_last_wake_us;
+		g3d_lab_last_wake_at = now;
+		g3d_lab_wake_count++;
 		say("mali: g3d_sleep: the G3D is on again after %llu ms; %u MHz, %u shader cores\n", off_ns / 1000000,
 		    pll_mhz(), __builtin_popcount(shader_mask));
 		g3d_off_at = 0;
@@ -1312,8 +1367,12 @@ static bool
 g3d_ensure_on(void)
 {
 	if (g3d_awake || !g3d_sleep) {
-		return true;
+		return g3d_lab_gpu_safe;
 	}
+	/* A failed power-on is not safe to retry for every queued job. The
+	 * operator can issue g3d_lab_reset=1 or reboot with Lab defaults. */
+	if (g3d_lab_fault != 0)
+		return false;
 	return g3d_power_on();
 }
 
@@ -2469,43 +2528,118 @@ gov_rebase(void)
  * mali_job_lock keeps a submission or an MMU update out while the power goes. A job queued after the check is not lost:
  * the worker calls g3d_ensure_on() before it submits.
  */
+static uint64_t
+g3d_lab_age_ms(uint64_t now, uint64_t last)
+{
+	uint64_t ns;
+	if (last == 0)
+		return UINT64_MAX;        /* never observed: no recent activity */
+	if (now < last)
+		return 0;
+	absolutetime_to_nanoseconds(now - last, &ns);
+	return ns / NSEC_PER_MSEC;
+}
+
+/*
+ * Recheck BOTH activity timestamps and the queue under mali_job_lock.
+ * A new enqueue after the queue check can still wake the worker; its
+ * first job will run g3d_ensure_on before touching the GPU. The 10fps
+ * static panel never meets the >=1.5s long-quiet condition.
+ */
 static void
 g3d_idle_gate(void)
 {
-	uint64_t now, span;
-	bool off;
+	uint64_t now, frame_age, job_age;
+	uint32_t gate_mode, ms, state;
+	enum s9_g3d_lab_reason reason;
+	bool queued;
 
-	if (!g3d_sleep || !gov_on || !g3d_awake) {
+	if ((!g3d_sleep && g3d_lab_gate != 1) || !gov_on || !g3d_awake || g3d_lab_fault)
 		return;
-	}
+	gate_mode = g3d_lab_gate != 0 ? g3d_lab_gate : 2;
+	ms = g3d_lab_gate != 0 ? g3d_lab_idle_ms : g3d_sleep_ms;
+	if (gate_mode == 3 && ms < 1500)
+		ms = 1500;
 	now = mach_absolute_time();
-	nanoseconds_to_absolutetime((uint64_t)g3d_sleep_ms * NSEC_PER_MSEC, &span);
-	if (now - __atomic_load_n(&g3d_last_busy, __ATOMIC_RELAXED) < span) {
+	job_age = g3d_lab_age_ms(now, __atomic_load_n(&g3d_last_busy, __ATOMIC_RELAXED));
+	frame_age = g3d_lab_age_ms(now, __atomic_load_n(&gov_frame_last, __ATOMIC_RELAXED));
+	if (job_age < ms || frame_age < ms)
 		return;
-	}
-	if (__atomic_load_n(&gov_frame_last, __ATOMIC_RELAXED) != 0 &&
-	    now - __atomic_load_n(&gov_frame_last, __ATOMIC_RELAXED) < span) {
-		return;
-	}
+
 	lck_mtx_lock(&mali_job_lock);
-	if (!g3d_sleep || !g3d_awake) {
+	now = mach_absolute_time();
+	job_age = g3d_lab_age_ms(now, __atomic_load_n(&g3d_last_busy, __ATOMIC_RELAXED));
+	frame_age = g3d_lab_age_ms(now, __atomic_load_n(&gov_frame_last, __ATOMIC_RELAXED));
+	lck_mtx_lock(&mali_queue_lock);
+	queued = mali_queue_count != 0;
+	lck_mtx_unlock(&mali_queue_lock);
+	state = rd(pmu, PMU_G3D_STATUS) & G3D_ON;
+	reason = s9_g3d_lab_eligible(gate_mode, g3d_sleep, g3d_awake && gov_on &&
+	    state == G3D_ON, g3d_lab_fault, g3d_lab_mv, queued, job_age, frame_age, ms);
+	if (reason != S9_G3D_LAB_ALLOW) {
+		g3d_lab_denied_count++;
 		lck_mtx_unlock(&mali_job_lock);
 		return;
 	}
-	say("mali: g3d_sleep: no job and no frame for %u ms: the G3D goes off\n", g3d_sleep_ms);
-	mali_irq_off();                         /* (detach first: the handler must not read the block while it is off) */
-	g3d_off();
-	off = (rd(pmu, PMU_G3D_STATUS) & G3D_ON) != G3D_ON;
-	if (off) {
-		g3d_awake = false;
-		g3d_off_at = mach_absolute_time();
-		say("mali: g3d_sleep: the G3D is off; the first job will power it on\n");
-	} else {
-		g3d_awake = true;
-		say("mali: g3d_sleep: the domain did not go off; it is left on, as g3d_off() said\n");
-		if (mali_irq) {
-			(void)mali_irq_arm();   /* (the domain is still on, so the line goes back on it) */
+	if (gate_mode == 3 && g3d_lab_last_wake_at != 0 &&
+	    g3d_lab_age_ms(now, g3d_lab_last_wake_at) < 10000) {
+		/* Never power-cycle the full SMC/MMU/PLL path at 10fps. */
+		g3d_lab_denied_count++;
+		lck_mtx_unlock(&mali_job_lock);
+		return;
+	}
+	if (gate_mode == 1) {
+		uint64_t last = g3d_lab_last_shadow_at;
+		if (last == 0 || g3d_lab_age_ms(now, last) >= 5000) {
+			g3d_lab_last_shadow_at = now;
+			g3d_lab_shadow_count++;
+			say("g3d-lab: shadow eligible: no job for %llums, no frame for %llums; no power write\n",
+			    job_age, frame_age);
 		}
+		lck_mtx_unlock(&mali_job_lock);
+		return;
+	}
+	if (!g3d_sleep) {          /* runtime sysctl may have disabled it */
+		lck_mtx_unlock(&mali_job_lock);
+		return;
+	}
+	say("g3d-lab: OFF candidate mode=%u idle=%ums job_age=%llums frame_age=%llums queue=0\n",
+	    gate_mode, ms, job_age, frame_age);
+	mali_irq_off();            /* detach GIC before any GPU block can disappear */
+	g3d_off();
+	state = rd(pmu, PMU_G3D_STATUS) & G3D_ON;
+	if (state == 0) {
+		g3d_awake = false;
+		g3d_lab_gpu_safe = false; /* no Mali MMIO until complete power-on */
+		g3d_off_at = mach_absolute_time();
+		g3d_lab_off_count++;
+		say("g3d-lab: G3D domain OFF; next GPU job must restore SMC/PLL/MMU first\n");
+	} else if (state == G3D_ON) {
+		g3d_awake = true;
+		if (!g3d_lab_gpu_safe) {
+			/* A reset may have run before DTZPC SAVE refused.
+			 * Reconstruct cores and MMU before allowing ANY job. */
+			const char *which = NULL;
+			if (gpu_reset() && gpu_cores_on(&which)) {
+				lck_mtx_lock(&mali_lock);
+				as0_update(pt_transtab, pt_transcfg());
+				lck_mtx_unlock(&mali_lock);
+				gpu_answered = true;
+				g3d_lab_gpu_safe = true;
+			} else {
+				g3d_lab_trip(3);
+				say("g3d-lab: reinit after refused OFF failed: GPU submissions blocked\n");
+			}
+		}
+		say("g3d-lab: G3D OFF refused; domain ON, gpu_safe=%u fault=%u\n",
+		    g3d_lab_gpu_safe?1u:0u, g3d_lab_fault);
+		if (mali_irq && g3d_lab_gpu_safe)
+			(void)mali_irq_arm();
+	} else {
+		g3d_lab_trip(3);
+		g3d_awake = false;
+		g3d_lab_gpu_safe = false;    /* do not touch GPU MMIO in a partial PMU state */
+		say("g3d-lab: G3D PMU partial state %#x: GPU MMIO forbidden until recovery\n", state);
 	}
 	lck_mtx_unlock(&mali_job_lock);
 }
@@ -2536,8 +2670,15 @@ g3d_sleep_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 			    mali_gov, (uint32_t)(gov_on ? 1 : 0));
 			return ENODEV;
 		}
-		lck_mtx_lock(&mali_queue_lock);
+		lck_mtx_lock(&mali_job_lock);
+		if (g3d_lab_mv != 950 || g3d_lab_fault || !g3d_lab_gpu_safe) {
+			lck_mtx_unlock(&mali_job_lock);
+			return EBUSY; /* existing sysctl cannot bypass Lab rail/fault guards */
+		}
+		g3d_lab_gate = 0; /* direct legacy sysctl overrides Lab mode */
 		g3d_sleep = 1;
+		lck_mtx_unlock(&mali_job_lock);
+		lck_mtx_lock(&mali_queue_lock);
 		wakeup((caddr_t)&mali_queue_count);
 		lck_mtx_unlock(&mali_queue_lock);
 		say("mali: g3d_sleep=1: the gate is on after %u ms with no job and no frame (kern.hakios.g3d_sleep)\n",
@@ -2545,12 +2686,17 @@ g3d_sleep_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 		return 0;
 	}
 	lck_mtx_lock(&mali_job_lock);
+	if (g3d_awake && !g3d_lab_gpu_safe) {
+		lck_mtx_unlock(&mali_job_lock);
+		return EIO; /* use g3d_lab_reset for GPU reinit before dispatch */
+	}
 	if (g3d_sleep && !g3d_awake && !g3d_power_on()) {
 		lck_mtx_unlock(&mali_job_lock);
 		say("mali: g3d_sleep=0: the G3D did not come back: the gate stays on\n");
 		return EIO;
 	}
 	g3d_sleep = 0;
+	g3d_lab_gate = 0; /* direct legacy sysctl overrides Lab mode */
 	lck_mtx_unlock(&mali_job_lock);
 	say("mali: g3d_sleep=0: the gate is off (kern.hakios.g3d_sleep)\n");
 	return 0;
@@ -2580,6 +2726,8 @@ g3d_sleep_ms_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unu
 }
 SYSCTL_PROC(_kern_hakios, OID_AUTO, g3d_sleep_ms, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
     g3d_sleep_ms_sysctl, "I", "the screen-off grace for g3d_sleep=, ms (500..60000)");
+
+#include "hakios.mali_lab.h" /* new runtime sysctls and independent OFF-state sampler */
 
 /*
  * kern.hakios.mali_irq: mali_irq=, changed while the system runs (the USB console's
@@ -2671,7 +2819,7 @@ mali_worker(__unused void *parameter, __unused wait_result_t result)
 				lck_mtx_sleep(&mali_queue_lock, LCK_SLEEP_DEFAULT, (event_t)&mali_queue_count, THREAD_UNINT);
 				continue;               /* (the G3D is off: only a job wakes this thread) */
 			}
-			if (!gov_on || (gov_level == 0 && !g3d_sleep)) {
+			if (!gov_on || (gov_level == 0 && !g3d_sleep && g3d_lab_gate != 1)) {
 				lck_mtx_sleep(&mali_queue_lock, LCK_SLEEP_DEFAULT, (event_t)&mali_queue_count, THREAD_UNINT);
 				continue;
 			}
@@ -2707,6 +2855,7 @@ mali_worker(__unused void *parameter, __unused wait_result_t result)
 
 			if (status != 0) {
 				gMaliFailed++;
+				g3d_lab_restore_after_job_error(); /* optional voltage test: fail closed */
 			}
 			if (status == MALI_HUNG) {
 				lck_mtx_lock(&mali_queue_lock);
