@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include "../../drivers/power/exynos/hakios.p4_idle_math.h"
 #include "../../userland/src/s9_p4_frame_stats.h"
 #include "../../userland/src/s9_p4_thread_delta.h"
@@ -25,8 +26,10 @@ static void cpu_idle_tests(void) {
     assert(s9_p4_gap_bucket(120,17,50,120)==3);
 }
 static void frame_tests(void) {
-    struct s9_p4_frame_window w={0};
-    struct s9_p4_frame_event e={0};
+    struct s9_p4_frame_window w;
+    struct s9_p4_frame_event e;
+    memset(&w,0,sizeof(w));
+    memset(&e,0,sizeof(e));
     /* A sampled unchanged texture is not sufficient to assert the actual
      * framebuffer is unchanged. The helper produces candidate evidence. */
     e.gl_calls=120;e.gl_draws=23;e.gl_clears=1;
