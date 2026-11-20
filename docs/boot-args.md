@@ -2,13 +2,13 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **699 arguments**: 608 read by the kernel, 23 by the loader, 85 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **702 arguments**: 611 read by the kernel, 23 by the loader, 85 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
 Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl kern.bootargs`).
 
-## GPU and display (118)
+## GPU and display (121)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -110,8 +110,11 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `mali_mhz` | K | `hakios.mali.c` | `CONFIG_MALI_MHZ` |  |
 | `mali_nap_us` | K | `hakios.mali.c` | `CONFIG_MALI_NAP_US` |  |
 | `mali_pll` | K | `hakios.mali.c` | `CONFIG_MALI_PLL` |  |
+| `mali_probe` | K | `hakios.mali.c` | `CONFIG_MALI_PROBE` |  |
 | `mali_trace` | K | `hakios.mali.c` | `CONFIG_MALI_TRACE` |  |
 | `metal` | KU | `MiniIOMobileFramebuffer.cpp`, `inject_sb.c` | `CONFIG_METAL` |  |
+| `p3power` | K | `hakios.mali.c` | `CONFIG_P3POWER` |  |
+| `p3rail` | K | `hakios.mali.c` | `CONFIG_P3RAIL` |  |
 | `panel` | K | `hakios.s6e3ha8.c` | `CONFIG_PANEL` |  |
 | `panel_brightness` | K | `hakios.s6e3ha8.c` | `CONFIG_PANEL_BRIGHTNESS` |  |
 | `panel_gamma` | K | `hakios.s6e3ha8.c` | `CONFIG_PANEL_GAMMA` |  |

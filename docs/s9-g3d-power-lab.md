@@ -22,8 +22,10 @@ AFTER acquiring mali_job_lock, before OFF. A failed GPU reset now
 REFUSES OFF. A failed power-down with the domain still ON triggers
 reinitialization before GPU submission resumes. GPU submissions are
 blocked if safe recovery is not verified; g3d_lab_reset=1 or reboot
-is then necessary. The independent monitor reads PMU/CMU outside the
-power domain, never powered-off GPU registers.
+is then necessary. PMU ON alone is insufficient: DTZPC RESTORE and
+G3D bus dividers must also be verified before GPU MMIO or job submission.
+The independent monitor reads PMU/CMU outside the power domain, never
+powered-off GPU registers.
 
 The Exynos9810 APM voltage table advertises 260/600mV,
 455/662.5mV, 572/700mV and 598/706.25mV but those are NOT
@@ -43,7 +45,7 @@ trigger a 950mV restore attempt and fault latch.
 - g3d_lab_mv: only 950,925,900, max25mV per transition; OFF by default
 - g3d_lab_rail_probe: 0|1, optional B6CTRL/B6OUT read at most once/30s
 - g3d_lab_phase: 0..99, test marker only, changes no hardware state
-- g3d_lab_stats: READ ONLY, includes real PMU domain, GPU safe,
+- g3d_lab_stats: READ ONLY, includes real PMU domain, GPU safe, TZ verified,
   cumulative OFF time, number of OFF/wakes, last/max/mean wake latency,
   rejected/shadow opportunities, faults and latest voltage readback
 - g3d_lab_reset: WRITE 1 to power ON if needed, verify GPU core/MMU
@@ -146,7 +148,7 @@ If G3D domain is partial, fault!=0, gpu_safe=0, voltage readback
 differs from target, frame/texture corruption, job timeout, MMU fault,
 blank display, or exceptional thermal rise: immediately stop the
 current test, issue g3d_lab_reset=1 and verify domain ON,
-gpu_safe=1, voltage950, gate0. If not verified, reboot/rollback.
+gpu_safe=1, voltage950, gate0. If not verified (including tz_ok=1 when GPU is ON), reboot/rollback.
 Never weaken GPU thermal caps and never intentionally power-cycle
 at screen-on 10fps. Power savings in watts remain unproven without
 an external current/power measurement.

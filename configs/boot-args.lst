@@ -362,6 +362,7 @@ mali_max	k
 mali_mhz	k
 mali_nap_us	k
 mali_pll	k
+mali_probe	k
 mali_trace	k
 max77705	k
 max77705_diag	k
@@ -447,6 +448,8 @@ modem_wait	k
 modem_wda_off	k
 net_names	k
 net_trace	k
+p3power	k
+p3rail	k
 pan	k
 panel	k
 panel_brightness	k

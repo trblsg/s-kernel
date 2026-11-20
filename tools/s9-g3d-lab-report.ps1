@@ -25,7 +25,7 @@ foreach($s in $lines){
    $pw.Add([pscustomobject]@{
       t=[double]$Matches[1]/1000;phase=[int]$Matches[2]
       mode=[int](KV $s 'mode' '0');domain=[int](KV $s 'domain' '-1')
-      safe=[int](KV $s 'gpu_safe' '0');offMs=[double](KV $s 'off_total_ms' '0')
+      safe=[int](KV $s 'gpu_safe' '0');tz=[int](KV $s 'tz_ok' '0');offMs=[double](KV $s 'off_total_ms' '0')
       target=[int](KV $s 'target_mv' '0');rail=[int](KV $s 'rail_mv' '0')
       railValid=[int](KV $s 'rail_valid' '0')
       off=[int](KV $s 'off_count' '0');wake=[int](KV $s 'wake_count' '0')
@@ -89,7 +89,7 @@ for($i=0;$i -lt $timeline.Count;$i++){
    'C GLstage='+$gl+'ms/frame missed='+(Sm $g miss)+
    ' gpuClocks='+(@($g|Group-Object mhz|ForEach-Object{$_.Name+'MHz:'+ $_.Count}) -join ',')+
    ' offCountEnd='+$(if($q.Count){$endW.off}else{'N/A'})+' offDelta='+$offDelta+' offMs='+$offMsDelta+
-   ' unsafeWhileOn='+@($q|Where-Object{$_.domain -eq 1 -and $_.safe -eq 0}).Count+' wakes='+$wakeDelta+
+   ' unsafeWhileOn='+@($q|Where-Object{$_.domain -eq 1 -and ($_.safe -eq 0 -or $_.tz -eq 0)}).Count+' wakes='+$wakeDelta+
    ' wakeLastUs='+(Av $q wakeUs)+' posterCpu='+(Av $po cpu)+
    ' P0bad='+(Sm $p bad)+' faults='+@($q|Where-Object{$_.fault -ne 0}).Count)
 }

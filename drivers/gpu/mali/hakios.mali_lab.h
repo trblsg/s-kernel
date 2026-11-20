@@ -9,7 +9,7 @@ g3d_lab_mon(__unused void *arg, __unused wait_result_t why)
 		uint64_t deadline, up_ns, now, off_ns = 0, off_total_ns, wake_us;
 		uint32_t status, pll, mux, mode, phase, mv, fault, clocks, rail_probe, off_count;
 		uint32_t wakes, wake_failed, shadow, denied, jobs, rail_good, rail_mv;
-		uint32_t busy_cnt, gpu_safe, ctrl = 0;
+		uint32_t busy_cnt, gpu_safe, tz_ok, ctrl = 0;
 		int32_t temp_mc;
 
 		/* Timed kernel sleep, NOT delay(): do not burn a CPU spinning. */
@@ -35,6 +35,7 @@ g3d_lab_mon(__unused void *arg, __unused wait_result_t why)
 		mv = g3d_lab_mv;
 		fault = g3d_lab_fault;
 		gpu_safe = g3d_lab_gpu_safe ? 1u : 0u;
+		tz_ok = g3d_lab_protection_ok ? 1u : 0u;
 		clocks = ((status & G3D_ON) == G3D_ON && (pll & PLL_ENABLE) &&
 		    gov_level < GOV_LEVELS) ? g3d_rates[gov_level].mhz : 0;
 		off_count = g3d_lab_off_count;
@@ -69,8 +70,8 @@ g3d_lab_mon(__unused void *arg, __unused wait_result_t why)
 		busy_cnt = (status & G3D_ON) == G3D_ON ? 1u : 0u;
 		/* Includes true OFF samples: unlike mali-probe this independent
 		 * sampler survives when the G3D worker stops calling gov_window. */
-		say("g3d-lab: up=%llums phase=%u mode=%u domain=%u gpu_safe=%u pll=%u mux=%u clk=%uMHz target_mv=%u rail_read=%u rail_valid=%u rail_mv=%u rail_ctrl=%#x off_count=%u off_total_ms=%llu wake_count=%u wake_fail=%u wake_last_us=%llu off_pending_ms=%llu shadow=%u denied=%u job_faults=%u fault=%u g3d_mc=%d\n",
-		    up_ns / NSEC_PER_MSEC, phase, mode, busy_cnt, gpu_safe,
+		say("g3d-lab: up=%llums phase=%u mode=%u domain=%u gpu_safe=%u tz_ok=%u pll=%u mux=%u clk=%uMHz target_mv=%u rail_read=%u rail_valid=%u rail_mv=%u rail_ctrl=%#x off_count=%u off_total_ms=%llu wake_count=%u wake_fail=%u wake_last_us=%llu off_pending_ms=%llu shadow=%u denied=%u job_faults=%u fault=%u g3d_mc=%d\n",
+		    up_ns / NSEC_PER_MSEC, phase, mode, busy_cnt, gpu_safe, tz_ok,
 		    (pll & (PLL_ENABLE | PLL_STABLE)) == (PLL_ENABLE | PLL_STABLE) ? 1u : 0u,
 		    (mux & MUX_SEL) ? 1u : 0u, clocks, mv, rail_probe, rail_good, rail_mv, ctrl,
 		    off_count, off_total_ns/NSEC_PER_MSEC, wakes, wake_failed, wake_us, off_ns / NSEC_PER_MSEC,
@@ -110,11 +111,12 @@ g3d_lab_gate_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
 	if (reached < STEPS || !mali_gov || !gov_on)
 		return ENODEV;
 	lck_mtx_lock(&mali_job_lock);
-	if (value >= 2 && (g3d_lab_fault || g3d_lab_mv != 950 || gov_dvs)) {
+	if (value >= 2 && (g3d_lab_fault || g3d_lab_mv != 950 || gov_dvs ||
+	    !g3d_lab_gpu_safe || !g3d_lab_protection_ok)) {
 		lck_mtx_unlock(&mali_job_lock);
 		return EBUSY;
 	}
-	if (value <= 1 && g3d_awake && !g3d_lab_gpu_safe) {
+	if (value <= 1 && g3d_awake && (!g3d_lab_gpu_safe || !g3d_lab_protection_ok)) {
 		lck_mtx_unlock(&mali_job_lock);
 		say("g3d-lab: GPU needs verified g3d_lab_reset=1 before gate mode changes\n");
 		return EIO;
@@ -174,7 +176,8 @@ g3d_lab_mv_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
 	if (reached < STEPS || !mali_acpm || !acpm_ok || !b6out_known || !mali_gov || !gov_on)
 		return ENODEV;
 	lck_mtx_lock(&mali_job_lock);
-	if (!g3d_awake || !g3d_lab_gpu_safe || g3d_sleep || g3d_lab_gate >= 2 ||
+	if (!g3d_awake || !g3d_lab_gpu_safe || !g3d_lab_protection_ok ||
+	    g3d_sleep || g3d_lab_gate >= 2 ||
 	    (rd(pmu, PMU_G3D_STATUS) & G3D_ON) != G3D_ON || gov_dvs ||
 	    (g3d_lab_fault && value != 950)) {
 		lck_mtx_unlock(&mali_job_lock);
@@ -246,7 +249,7 @@ g3d_lab_stats_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
 	char line[512];
 	uint64_t active_off_ns = 0, now, total_off_ns;
 	uint64_t wake_last, wake_max, wake_avg;
-	uint32_t pmu_on = 0, pll_on = 0, live_rail_mv, gpu_safe;
+	uint32_t pmu_on = 0, pll_on = 0, live_rail_mv, gpu_safe, tz_ok;
 	lck_mtx_lock(&mali_job_lock);
 	now = mach_absolute_time();
 	if (pmu != 0)
@@ -262,9 +265,10 @@ g3d_lab_stats_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
 	wake_avg = g3d_lab_wake_count ? g3d_lab_total_wake_us/g3d_lab_wake_count : 0;
 	live_rail_mv = g3d_lab_rail_valid ? s9_g3d_lab_mv_from_vsel(g3d_lab_rail_vsel) : 0;
 	gpu_safe = g3d_lab_gpu_safe ? 1u : 0u;
+	tz_ok = g3d_lab_protection_ok ? 1u : 0u;
 	snprintf(line, sizeof(line),
-	    "phase=%u mode=%u grace_ms=%u requested_mv=%u domain=%u pll=%u gpu_safe=%u off_count=%u off_total_ms=%llu wake_count=%u wake_fail=%u wake_last_us=%llu wake_max_us=%llu wake_avg_us=%llu shadow=%u denied=%u job_faults=%u fault=%u rail_valid=%u rail_last_mv=%u",
-	    g3d_lab_phase, g3d_lab_gate, g3d_lab_idle_ms, g3d_lab_mv, pmu_on, pll_on, gpu_safe,
+	    "phase=%u mode=%u grace_ms=%u requested_mv=%u domain=%u pll=%u gpu_safe=%u tz_ok=%u off_count=%u off_total_ms=%llu wake_count=%u wake_fail=%u wake_last_us=%llu wake_max_us=%llu wake_avg_us=%llu shadow=%u denied=%u job_faults=%u fault=%u rail_valid=%u rail_last_mv=%u",
+	    g3d_lab_phase, g3d_lab_gate, g3d_lab_idle_ms, g3d_lab_mv, pmu_on, pll_on, gpu_safe, tz_ok,
 	    g3d_lab_off_count, total_off_ns/NSEC_PER_MSEC,
 	    g3d_lab_wake_count, g3d_lab_wake_failed, wake_last, wake_max, wake_avg,
 	    g3d_lab_shadow_count, g3d_lab_denied_count, g3d_lab_job_faults,
@@ -328,6 +332,18 @@ g3d_lab_reset_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
 		say("g3d-lab: RESET failed: BUCK6 not verified at 950mV, reboot/rollback needed\n");
 		return EIO;
 	}
+	if (g3d_awake && !g3d_lab_protection_ok) {
+		/* PMU can be ON even when the DTZPC restore failed. The SMC
+		 * and bus-divider restore MUST pass before GPU reset/MMIO. */
+		powered_here = true;
+		if (!step_dtzpc()) {
+			g3d_lab_trip(3);
+			lck_mtx_unlock(&mali_job_lock);
+			say("g3d-lab: RESET refused: DTZPC restore FAILED, no GPU MMIO permitted\n");
+			return EIO;
+		}
+		g3d_lab_protection_ok = true;
+	}
 	if (g3d_awake && !g3d_lab_gpu_safe) {
 		if (!gpu_reset() || !gpu_cores_on(&which)) {
 			g3d_lab_trip(3);
@@ -343,7 +359,8 @@ g3d_lab_reset_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
 		if (mali_irq)
 			(void)mali_irq_arm();
 	}
-	if ((rd(pmu, PMU_G3D_STATUS) & G3D_ON) != G3D_ON || !g3d_lab_gpu_safe) {
+	if ((rd(pmu, PMU_G3D_STATUS) & G3D_ON) != G3D_ON ||
+	    !g3d_lab_gpu_safe || !g3d_lab_protection_ok) {
 		g3d_lab_trip(3);
 		lck_mtx_unlock(&mali_job_lock);
 		return EIO;

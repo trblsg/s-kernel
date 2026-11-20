@@ -53,7 +53,12 @@ jobs:
           assert 'g3d_lab_stats_sysctl' in lab
           assert 'g3d_lab_restore_after_job_error' in k
           assert 'g3d_lab_gpu_safe' in k
-          assert 'gpu_safe=' in lab
+          assert 'g3d_lab_protection_ok' in k
+          assert 'g3d_lab_protection_ok' in lab
+          assert 'DTZPC restore not verified' in k
+          assert 'if (!g3d_lab_protection_ok)' in k
+          assert 'if (!step_dtzpc())' in lab
+          assert 'gpu_safe=' in lab and 'tz_ok=' in lab
           assert 's9_g3d_lab_eligible' in k
           assert 'clock_interval_to_deadline(5000, NSEC_PER_MSEC' in lab
           assert 'lck_mtx_sleep_deadline' in lab

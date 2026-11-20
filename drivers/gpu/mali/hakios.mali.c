@@ -25,6 +25,9 @@
  *   mali_trace=1        one line per job: "tl: j SEQ f|v q QUEUED b BEGAN e ENDED", in microseconds.
  *   mali_gov=1          the clock follows the load (see gov_window()). Needs mali_pll and mali_acpm.
  *   mali_gov_frame=MHZ  clock floor while frames are shown (default 572; 0: none).
+ *   mali_probe=1        sample five-second GPU busy and thermal governor counters
+ *   p3power=1           sample read-only G3D PMU and PLL state every five seconds
+ *   p3rail=1            read BUCK6 PMIC voltage at most once every thirty seconds
  *   g3d_sleep=1         after `g3d_sleep_ms` with no GPU job and no frame, power the G3D domain off and put BUCK6
  *                       back as it was found; the first job powers it on again. Needs mali_gov=1. Opt-in.
  *   g3d_sleep_ms=MS     the screen-off grace (500..60000, default 3000).
@@ -168,6 +171,7 @@ static bool gpu_answered;               /* step 4 read a G72: a soft reset befor
 static uint32_t g3d_sleep, g3d_sleep_ms = 3000;
 static bool g3d_awake;
 static bool g3d_lab_gpu_safe = true; /* false means no GPU job may be submitted until verified recovery */
+static bool g3d_lab_protection_ok = true; /* DTZPC must be restored before ANY GPU MMIO */
 static uint64_t g3d_last_busy;          /* the end of the last job, by mach_absolute_time */
 static uint64_t g3d_off_at;
 /* G3D Power Lab. Defaults are the existing production ON/950mV path.
@@ -921,6 +925,10 @@ smc(uint64_t function, uint64_t first, uint64_t second, uint64_t third)
 	return x0;
 }
 
+/* Forward declaration: the failed-PMU-OFF recovery must restore
+ * TrustZone protection and CMU bus dividers before GPU MMIO. */
+static bool step_dtzpc(void);
+
 /* Faults latch until a verified restore or reboot. Never clear g3d_sleep
  * while the domain may be OFF: that would allow GPU MMIO without wake. */
 static void
@@ -973,6 +981,8 @@ g3d_off(void)
 	}
 	answer = smc(DTZPC_SMC, DTZPC_SAVE, DTZPC_G3D, 0);
 	say("mali: SMC %#x (%u, %#x): the DTZPC save, returned %#llx\n", DTZPC_SMC, DTZPC_SAVE, DTZPC_G3D, answer);
+	if ((uint32_t)answer == 0)
+		g3d_lab_protection_ok = false; /* validated only after successful RESTORE */
 	if ((uint32_t)answer != 0) {
 		say("mali: the protection was not saved: the domain is left ON\n");
 		g3d_lab_trip(2);
@@ -989,8 +999,11 @@ g3d_off(void)
 		g3d_lab_gpu_safe = false;
 		wr(pmu, PMU_G3D_CONFIGURATION, rd(pmu, PMU_G3D_CONFIGURATION) | G3D_ON);
 		if (wait_for(pmu, PMU_G3D_STATUS, G3D_ON, G3D_ON, G3D_WAIT_US)) {
-			answer = smc(DTZPC_SMC, DTZPC_RESTORE, DTZPC_G3D, 0);
-			say("mali: on again; the DTZPC restore returned %#llx; the domain is left ON\n", answer);
+			/* Also validate bus dividers, not just the TZ SMC return code. */
+			powered_here = true;
+			g3d_lab_protection_ok = step_dtzpc();
+			say("mali: on again; the DTZPC/bus restore %s; domain ON, gpu_safe=%u\n",
+			    g3d_lab_protection_ok ? "verified" : "FAILED", g3d_lab_protection_ok ? 1u : 0u);
 		} else {
 			say("mali: NOT ON AGAIN EITHER: status %#x; nothing of the G3D is to be touched\n", rd(pmu, PMU_G3D_STATUS));
 		}
@@ -1313,12 +1326,19 @@ g3d_power_on(void)
 		return false;
 	}
 	g3d_lpm_restore();
+	/* After an incomplete PMU-OFF cycle, step_power() can observe the
+	 * domain already ON and leave powered_here=false. A pending DTZPC
+	 * restore must NEVER be skipped just because PMU reports ON. */
+	if (!g3d_lab_protection_ok)
+		powered_here = true;
 	if (!step_dtzpc()) {
+		g3d_lab_protection_ok = false;
 		g3d_lab_wake_failed++;
 		g3d_lab_trip(4);
 		say("mali: g3d_sleep: step 3 did not restore the protection: no job is run\n");
 		return false;
 	}
+	g3d_lab_protection_ok = true;
 	if (!gpu_reset()) {
 		g3d_lab_wake_failed++;
 		g3d_lab_trip(4);
@@ -1367,7 +1387,7 @@ static bool
 g3d_ensure_on(void)
 {
 	if (g3d_awake || !g3d_sleep) {
-		return g3d_lab_gpu_safe;
+		return g3d_lab_gpu_safe && g3d_lab_protection_ok;
 	}
 	/* A failed power-on is not safe to retry for every queued job. The
 	 * operator can issue g3d_lab_reset=1 or reboot with Lab defaults. */
@@ -2575,7 +2595,8 @@ g3d_idle_gate(void)
 	lck_mtx_unlock(&mali_queue_lock);
 	state = rd(pmu, PMU_G3D_STATUS) & G3D_ON;
 	reason = s9_g3d_lab_eligible(gate_mode, g3d_sleep, g3d_awake && gov_on &&
-	    state == G3D_ON, g3d_lab_fault, g3d_lab_mv, queued, job_age, frame_age, ms);
+	    state == G3D_ON && g3d_lab_gpu_safe && g3d_lab_protection_ok,
+	    g3d_lab_fault, g3d_lab_mv, queued, job_age, frame_age, ms);
 	if (reason != S9_G3D_LAB_ALLOW) {
 		g3d_lab_denied_count++;
 		lck_mtx_unlock(&mali_job_lock);
@@ -2616,7 +2637,7 @@ g3d_idle_gate(void)
 		say("g3d-lab: G3D domain OFF; next GPU job must restore SMC/PLL/MMU first\n");
 	} else if (state == G3D_ON) {
 		g3d_awake = true;
-		if (!g3d_lab_gpu_safe) {
+		if (!g3d_lab_gpu_safe && g3d_lab_protection_ok) {
 			/* A reset may have run before DTZPC SAVE refused.
 			 * Reconstruct cores and MMU before allowing ANY job. */
 			const char *which = NULL;
@@ -2633,6 +2654,11 @@ g3d_idle_gate(void)
 		}
 		say("g3d-lab: G3D OFF refused; domain ON, gpu_safe=%u fault=%u\n",
 		    g3d_lab_gpu_safe?1u:0u, g3d_lab_fault);
+		if (!g3d_lab_protection_ok) {
+			g3d_lab_trip(3);
+			g3d_lab_gpu_safe = false;
+			say("g3d-lab: DTZPC restore not verified: no GPU MMIO or submit before explicit reset\n");
+		}
 		if (mali_irq && g3d_lab_gpu_safe)
 			(void)mali_irq_arm();
 	} else {
@@ -2671,7 +2697,7 @@ g3d_sleep_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 			return ENODEV;
 		}
 		lck_mtx_lock(&mali_job_lock);
-		if (g3d_lab_mv != 950 || g3d_lab_fault || !g3d_lab_gpu_safe) {
+		if (g3d_lab_mv != 950 || g3d_lab_fault || !g3d_lab_gpu_safe || !g3d_lab_protection_ok) {
 			lck_mtx_unlock(&mali_job_lock);
 			return EBUSY; /* existing sysctl cannot bypass Lab rail/fault guards */
 		}
