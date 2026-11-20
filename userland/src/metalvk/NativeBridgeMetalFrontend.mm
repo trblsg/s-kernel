@@ -1026,6 +1026,17 @@ static bool s9P11TraceOn() {
  }();
  return enabled;
 }
+/* P1.2: record MPS dictionary reads without inventing a SIGSEGV fix. */
+static bool s9P12On() {
+ static const bool enabled=[] {
+  char args[4096]={};size_t len=sizeof(args)-1;
+  if(sysctlbyname("kern.bootargs",args,&len,nullptr,0)!=0)return false;
+  args[std::min(len,sizeof(args)-1)]=0;
+  return s9_has_boot_flag(args,"p12_diag=1")!=0;
+ }();
+ return enabled;
+}
+static std::atomic<uint64_t> gP12Logged{0};
 static void s9P11Trace(const char *event,id object,void *handle,id dictionary,bool stack) {
  if(!s9P11TraceOn())return;
  NBSAY(@"native-metal-p11: %s command=%p native=%p userdict=%p tid=%u",
@@ -1049,6 +1060,7 @@ static void s9P11Trace(const char *event,id object,void *handle,id dictionary,bo
  EncodedWork encodedWork;   // the command buffer's single encoder thread, not global counter deltas
  uint64_t createdUs;
  uint32_t createCpu,createTid,commitCpu,commitTid;
+ uint32_t p12Reads; /* per-command-buffer diagnostic only */
  BOOL earlyEligible;   // made by the render server's thread: its completed handlers may run at submission (see fireEarly)
 }
 @property(nonatomic) NmbCommandBuffer *handle;
@@ -1531,6 +1543,17 @@ extern "C" void NBWaitInFlight(uint64_t beforeUs);
    if(made==1 || made==100 || made==1000)
     NBSAY(@"native-metal: P1 userDictionary SPI: created=%llu reads=%llu (p1_userdict=1)",
      (unsigned long long)made,(unsigned long long)gP1UserDictReads.load());
+  }
+  if(s9P12On()) {
+   ++p12Reads;
+   const uint64_t serial=++gP12Logged;
+   if(serial<=48 || serial%256==0) {
+    const uint64_t age=nowUs()-createdUs;
+    NBSAY(@"native-metal-p12: get=%u age_us=%llu entries=%lu committed=%d queue=%p command=%p native=%p tid=%u global=%llu",
+      p12Reads,(unsigned long long)age,(unsigned long)_s9UserDictionary.count,
+      self.committed?1:0,(__bridge void *)_queue,(__bridge void *)self,(void *)_handle,
+      threadIdLow(),(unsigned long long)serial);
+   }
   }
   if(s9P11TraceOn())s9P11Trace("userdict-return",self,_handle,_s9UserDictionary,false);
   return _s9UserDictionary;
@@ -2208,9 +2231,31 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  return (id<MTLTexture>)texture;
 }
 - (id)newTextureLayoutWithDescriptor:(MTLTextureDescriptor *)d isHeapOrBufferBacked:(BOOL)backed {
- (void)backed;
+ /* P-Layout probe: keep the same Metal return value, but summarize repeated
+  * unsupported layout requests to reduce serial log overload. */
+ static std::atomic<uint64_t> pLayoutCalls{0};
+ static const bool pLayoutProbe=[] {
+  char args[4096]={};size_t len=sizeof(args)-1;
+  if(sysctlbyname("kern.bootargs",args,&len,nullptr,0)!=0)return false;
+  args[std::min(len,sizeof(args)-1)]=0;
+  return s9_has_boot_flag(args,"p_layout_probe=1")!=0;
+ }();
+ if(pLayoutProbe) {
+  const uint64_t n=++pLayoutCalls;
+  if(n==1 || n%64==0) {
+   NBSAY(@"native-metal-playout: calls=%llu enabled=%d width=%lu height=%lu depth=%lu fmt=%lu type=%lu mips=%lu backing=%d storage=%lu",
+    (unsigned long long)n,s9LayoutOn()?1:0,(unsigned long)d.width,(unsigned long)d.height,
+    (unsigned long)d.depth,(unsigned long)d.pixelFormat,(unsigned long)d.textureType,
+    (unsigned long)d.mipmapLevelCount,backed?1:0,(unsigned long)d.storageMode);
+   if(n==1) {
+    void *pc=__builtin_return_address(0);Dl_info at={};
+    if(dladdr(pc,&at))NBSAY(@"native-metal-playout: first-caller=%s+0x%llx",
+      at.dli_fname?at.dli_fname:"unknown",(unsigned long long)((uintptr_t)pc-(uintptr_t)at.dli_fbase));
+   }
+  }
+ }
  if(!s9LayoutOn()) {
-  NBLOG(@"native-metal: newTextureLayoutWithDescriptor:isHeapOrBufferBacked: is not implemented (Apple's layout object is not known)");
+  if(!pLayoutProbe)NBLOG(@"native-metal: newTextureLayoutWithDescriptor:isHeapOrBufferBacked: is not implemented (Apple's layout object is not known)");
   return nil;
  }
  s9LayoutRequests++;

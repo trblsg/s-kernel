@@ -13,6 +13,11 @@ struct s9_g2_state {
     uint32_t name[S9_G2_UNITS];
     uint8_t valid[S9_G2_UNITS];
     uint32_t attempts, skipped, executed, invalidations;
+    /* G2.1: read-only reason histogram; do not conflate normal forwarded
+     * driver bindings with raw/internal GLES binding invalidations. */
+    uint32_t client_same, client_different, cache_same, cache_different;
+    uint32_t cache_invalid, raw_binds, forwarded_binds, raw_deletes;
+    uint32_t other_target_or_unit;
     uint64_t verify_serial; /* persists across 60-frame counter resets */
 };
 static inline void s9_g2_invalidate(struct s9_g2_state *s) {
@@ -40,5 +45,8 @@ static inline void s9_g2_record(struct s9_g2_state *s,
 static inline void s9_g2_reset_counters(struct s9_g2_state *s) {
     if (!s) return;
     s->attempts = s->skipped = s->executed = s->invalidations = 0;
+    s->client_same = s->client_different = s->cache_same = s->cache_different = 0;
+    s->cache_invalid = s->raw_binds = s->forwarded_binds = s->raw_deletes = 0;
+    s->other_target_or_unit = 0;
 }
 #endif

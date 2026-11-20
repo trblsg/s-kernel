@@ -1,0 +1,82 @@
+name: S9 unified P1.2 G2.1 GLES IOSurface poster diagnostics
+
+on:
+  push:
+    branches:
+      - s9/p12-g21-unified-diagnostics
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test unified counters and exact flags in strict C11 and C++17
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -fsanitize=undefined -g \
+            userland/tests/test_s9_unified_diag.c -o /tmp/s9_diag_c
+          /tmp/s9_diag_c
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -fsanitize=undefined -g \
+            -x c++ userland/tests/test_s9_unified_diag.c -o /tmp/s9_diag_cpp
+          /tmp/s9_diag_cpp
+      - name: Previous P1 G1 G2 and frame-stage regressions
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            userland/tests/test_s9_p1_g1.c -o /tmp/s9_p1g1
+          /tmp/s9_p1g1
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            userland/tests/test_s9_g2_bind.c -o /tmp/s9_g2
+          /tmp/s9_g2
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            userland/tests/test_gl_stage_stats.c -o /tmp/s9_stage
+          /tmp/s9_stage
+          PYTHONPATH=userland python3 -m unittest discover \
+            -s userland/tests -p test_strip_widgets.py -v
+          bash -n userland/build.sh
+      - name: Protect default render path, SPI and thermal rules
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          e = Path("userland/src/eagl.c").read_text()
+          m = Path("userland/src/metalvk/NativeBridgeMetalFrontend.mm").read_text()
+          k = Path("drivers/gpu/mali/hakios.mali.c").read_text()
+          h = Path("userland/src/s9_gl_diag.h").read_text()
+          assert all(x in e for x in ("g21_diag=1", "glpath=1", "glhash=1",
+                                       "s9_gl_diag_sample16", "hakios-gl-g21:",
+                                       "hakios-gl-path:", "surface_changed(e, image)",
+                                       "surface_to_texture(e, image)", "glFinish();",
+                                       "glFlush();", "glDrawElements(mode, count, type, indices);"))
+          assert "if (g2_track_on) g2_forwarding++" in e
+          assert "g2_bind_on && !e->g2_fault" in e
+          assert "hash_sample" in e and "s9_gl_diag_reset_window" in e
+          assert "p12_diag=1" in m and "p_layout_probe=1" in m
+          assert 'if(!pLayoutProbe)NBLOG' in m
+          assert "doesNotRecognizeSelector:_cmd" in m
+          assert "GOV_CAP1_MC     85000" in k
+          assert "GOV_CAP2_MC     95000" in k
+          assert "hash_bytes" in h
+          print("S9 diagnostics opt-in, native render calls and thermal limits preserved")
+          PY
+
+  ios-syntax:
+    runs-on: macos-15
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - name: iOS arm64 GLES shim C syntax
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=gnu11 -fblocks -Wno-deprecated-declarations \
+            -fsyntax-only userland/src/eagl.c
+      - name: iOS arm64 Objective-C++ Metal frontend syntax
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun clang++ -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=c++17 -fobjc-arc -fblocks -x objective-c++ \
+            -Wno-deprecated-declarations -Itools/metal -fsyntax-only \
+            userland/src/metalvk/NativeBridgeMetalFrontend.mm

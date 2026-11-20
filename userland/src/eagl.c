@@ -84,6 +84,7 @@
 #include "gl_stage_stats.h"   /* opt-in glstage=1: host-side GLES/scanout timing buckets */
 #include "s9_gl_cost.h"       /* opt-in glcost=1: time/count EAGL slot calls, no GL changes */
 #include "s9_g2_bind.h"       /* opt-in g2_bind=1: skip proven redundant native texture binds */
+#include "s9_gl_diag.h"       /* opt-in glpath=1/glhash=1: sampled CPU path timings */
 #include "metalvk/s9_bootarg_flag.h"
 
 /* ---- OpenGL ES: the types, the few names used here, the library's functions --------------------- */
@@ -335,6 +336,7 @@ struct eagl {
 	struct s9_gl_cost glcost;               /* grouped GL slot timings; reset every 60 frames */
 	struct s9_g2_state g2;                  /* driver binding truth cache; all raw binds invalidate */
 	bool g2_fault;                          /* any verification mismatch fails this context closed */
+	struct s9_gl_diag diag;                 /* sampled path timings, read-only diagnostics */
 	const char *sources[256];       /* the text of the shaders being made, by name (modulo this) */
 	bool fragment[256];             /* ... and which of the two kinds each is */
 	unsigned plain_said;
@@ -344,6 +346,11 @@ static int glstage_on;                       /* boot-arg glstage=1: 60-frame tim
 static int glcost_on;                        /* boot-arg glcost=1: per-slot CPU wall timing */
 static int g2_bind_on;                        /* boot-arg g2_bind=1, otherwise legacy code path */
 static int g2_verify_on;                      /* boot-arg g2_verify=1: sample actual GL binding */
+static int g21_diag_on;                       /* boot-arg g21_diag=1: G2 reasons, even with skipping OFF */
+static int g2_track_on;                       /* g21_diag or g2_bind */
+static int glpath_on;                         /* boot-arg glpath=1: 1/16 bind+draw time breakdown */
+static int glhash_on;                         /* boot-arg glhash=1: 1/16 IOSurface checksum timing */
+static __thread unsigned g2_forwarding;      /* distinguishes forwarded external binds from internal raw binds */
 static __thread uint64_t glcost_begun[8];    /* nested-safe, avoids cross-thread start timestamp races */
 static __thread unsigned glcost_depth;
 static unsigned trace_first, trace_last;        /* the frames whose calls are written down */
@@ -368,11 +375,18 @@ static __thread struct eagl *current;
  * inspection. Their binding changes MUST invalidate our fast-path snapshot,
  * including the calls from frame_end, or it could skip a required bind. */
 static void s9_g2_internal_bind(GLenum target, GLuint name) {
-	if (g2_bind_on && current) s9_g2_invalidate(&current->g2);
+	if (g2_track_on && current) {
+		s9_g2_invalidate(&current->g2);
+		if (g2_forwarding) current->g2.forwarded_binds++;
+		else current->g2.raw_binds++;
+	}
 	glBindTexture(target, name);
 }
 static void s9_g2_internal_delete(GLsizei count, const GLuint *names) {
-	if (g2_bind_on && current) s9_g2_invalidate(&current->g2);
+	if (g2_track_on && current) {
+		s9_g2_invalidate(&current->g2);
+		current->g2.raw_deletes++;
+	}
 	glDeleteTextures(count, names);
 }
 #define glBindTexture s9_g2_internal_bind
@@ -1012,16 +1026,27 @@ surface_changed(struct eagl *e, struct image *image)
 	uint64_t sum = size, word;
 
 	if (image->looked == e->frames + 1 || base == NULL || IOSurfaceGetPlaneCount(surface) > 0) {
+		if (glhash_on) e->diag.hash_not_checked++;
 		return false;
 	}
 	if (still_seldom && image->unchanged >= STILL_LOOKS && (e->frames + IOSurfaceGetID(surface)) % STILL_EVERY != 0) {
+		if (glhash_on) e->diag.hash_not_checked++;
 		return false;
 	}
 	image->looked = e->frames + 1;
+	bool hash_sample = glhash_on && s9_gl_diag_sample16(&e->diag.hash_serial);
+	uint64_t hash_began = hash_sample ? now_us() : 0;
 	for (size_t at = 0; at + 8 <= size; at += 8) {
 		memcpy(&word, base + at, 8);
 		sum = (sum ^ word) * 0x9e3779b97f4a7c15ull;
 		sum ^= sum >> 29;
+	}
+	if (hash_sample) {
+		e->diag.hash_samples++;
+		e->diag.hash_us += now_us() - hash_began;
+		e->diag.hash_bytes += size;
+		if (sum == image->sum) e->diag.hash_same++;
+		else e->diag.hash_changed++;
 	}
 	if (sum == image->sum) {
 		image->unchanged += image->unchanged < STILL_LOOKS;
@@ -1697,7 +1722,28 @@ frame_end(struct eagl *e, bool finished)
 		say("hakios-gl-g2: up=%llu.%03llus frames=%u..%u attempted=%u skipped=%u driver=%u invalidated=%u fault=%u verify=%d\n",
 		    after/1000000,(after/1000)%1000,e->frames-59,e->frames,e->g2.attempts,
 		    e->g2.skipped,e->g2.executed,e->g2.invalidations,e->g2_fault?1:0,g2_verify_on);
-		s9_g2_reset_counters(&e->g2);
+	}
+	if (g21_diag_on && e->frames % 60 == 0) {
+		say("hakios-gl-g21: up=%llu.%03llus frames=%u..%u attempted=%u client_same=%u client_diff=%u cache_same=%u cache_diff=%u cache_invalid=%u raw=%u forwarded=%u deletes=%u other=%u\n",
+		    after/1000000,(after/1000)%1000,e->frames-59,e->frames,e->g2.attempts,
+		    e->g2.client_same,e->g2.client_different,e->g2.cache_same,e->g2.cache_different,
+		    e->g2.cache_invalid,e->g2.raw_binds,e->g2.forwarded_binds,e->g2.raw_deletes,
+		    e->g2.other_target_or_unit);
+	}
+	if (g2_track_on && e->frames % 60 == 0) s9_g2_reset_counters(&e->g2);
+	if (glpath_on) e->diag.flush_raw_us += e->flushing; /* already-timed real glFlush, no extra GPU calls */
+	if ((glpath_on || glhash_on) && e->frames % 60 == 0) {
+		const struct s9_gl_diag *d=&e->diag;
+		say("hakios-gl-path: up=%llu.%03llus frames=%u..%u bind_samples=%u bind_images=%u bind_checks=%u bind_dirty=%u native=%lluus lookup=%lluus check=%lluus upload=%lluus draw_samples=%u draw_native_calls=%u draw_native=%lluus draw_other=%lluus flush_raw=%lluus hash_samples=%u hash_bytes=%llu hash_us=%lluus hash_same=%u hash_changed=%u hash_skipped=%u\n",
+		    after/1000000,(after/1000)%1000,e->frames-59,e->frames,
+		    d->bind_samples,d->bind_with_image,d->bind_checks,d->bind_dirty,
+		    (unsigned long long)d->bind_native_us,(unsigned long long)d->bind_lookup_us,
+		    (unsigned long long)d->bind_check_us,(unsigned long long)d->bind_upload_us,
+		    d->draw_samples,d->draw_native_calls,(unsigned long long)d->draw_native_us,
+		    (unsigned long long)d->draw_other_us,(unsigned long long)d->flush_raw_us,
+		    d->hash_samples,(unsigned long long)d->hash_bytes,(unsigned long long)d->hash_us,
+		    d->hash_same,d->hash_changed,d->hash_not_checked);
+		s9_gl_diag_reset_window(&e->diag);
 	}
 	if (e->calls > e->most_calls) {
 		e->most_calls = e->calls;
@@ -1788,10 +1834,21 @@ my_glBindTexture(void *context, GLenum target, GLuint texture)
 	struct image *image;
 
 	EAGL_ENTER(e, 0x30);
+	bool path_sample = glpath_on && s9_gl_diag_sample16(&e->diag.bind_serial);
+	if (path_sample) e->diag.bind_samples++;
 	if (eagl_tracing) {
 		eagl_trace("glBindTexture(%#x, %u)\n", target, texture);
 	}
-	if (g2_bind_on && target == GL_TEXTURE_2D && e->unit < S9_G2_UNITS) e->g2.attempts++;
+	if (g2_track_on) {
+		if (target == GL_TEXTURE_2D && e->unit < S9_G2_UNITS) {
+			e->g2.attempts++;
+			if (e->bound[e->unit] == texture) e->g2.client_same++;
+			else e->g2.client_different++;
+			if (!e->g2.valid[e->unit]) e->g2.cache_invalid++;
+			else if (e->g2.name[e->unit] == texture) e->g2.cache_same++;
+			else e->g2.cache_different++;
+		} else e->g2.other_target_or_unit++;
+	}
 	bool skip = g2_bind_on && !e->g2_fault &&
 	    s9_g2_redundant(&e->g2,e->unit,target,texture,GL_TEXTURE_2D);
 	if (skip && g2_verify_on && ((++e->g2.verify_serial % 128u) == 0)) {
@@ -1807,8 +1864,12 @@ my_glBindTexture(void *context, GLenum target, GLuint texture)
 	}
 	if (skip) e->g2.skipped++;
 	else {
-		glBindTexture(target, texture);  /* raw wrapper invalidates; never skip IOSurface freshness below */
-		if (g2_bind_on) {
+		uint64_t native_began = path_sample ? now_us() : 0;
+		if (g2_track_on) g2_forwarding++;
+		glBindTexture(target, texture);  /* native call unchanged, all IOSurface checks still run */
+		if (g2_track_on) g2_forwarding--;
+		if (path_sample) e->diag.bind_native_us += now_us() - native_began;
+		if (g2_track_on) {
 			e->g2.executed++;
 			if (!e->g2_fault) s9_g2_record(&e->g2,e->unit,target,texture,GL_TEXTURE_2D);
 		}
@@ -1816,13 +1877,25 @@ my_glBindTexture(void *context, GLenum target, GLuint texture)
 	if (target == GL_TEXTURE_2D && e->unit < 8) {
 		e->bound[e->unit] = texture;
 	}
-	if (texture != 0 && e->image_count != 0 && (image = image_of(e, texture)) != NULL) {
-		image->used = e->frames + 1;
-		if (!image->shared && (!image->target ? IOSurfaceGetSeed(image->surface) != image->seed ||
-		    surface_changed(e, image) : image->wrapped && !image->painted && surface_changed(e, image))) {
-			surface_to_texture(e, image);
-			e->image_counts.refills++;
-			e->image_counts.refill_bytes += IOSurfaceGetBytesPerRow(image->surface) * (size_t)image->height;
+	if (texture != 0 && e->image_count != 0) {
+		uint64_t looked_at = path_sample ? now_us() : 0;
+		image = image_of(e, texture);
+		if (path_sample) e->diag.bind_lookup_us += now_us() - looked_at;
+		if (image != NULL) {
+			if (path_sample) e->diag.bind_with_image++;
+			image->used = e->frames + 1;
+			uint64_t checked_at = path_sample ? now_us() : 0;
+			/* Identical short-circuit logic to the pre-diagnostic renderer. */
+			bool dirty = !image->shared && (!image->target ? IOSurfaceGetSeed(image->surface) != image->seed ||
+			    surface_changed(e, image) : image->wrapped && !image->painted && surface_changed(e, image));
+			if (path_sample) { e->diag.bind_check_us += now_us() - checked_at; e->diag.bind_checks++; }
+			if (dirty) {
+				uint64_t filled_at = path_sample ? now_us() : 0;
+				surface_to_texture(e, image);
+				if (path_sample) { e->diag.bind_upload_us += now_us() - filled_at; e->diag.bind_dirty++; }
+				e->image_counts.refills++;
+				e->image_counts.refill_bytes += IOSurfaceGetBytesPerRow(image->surface) * (size_t)image->height;
+			}
 		}
 	}
 	EAGL_LEAVE(e, 0x30);
@@ -3768,6 +3841,8 @@ my_glDrawElements(void *context, GLenum mode, GLsizei count, GLenum type, const 
 	bool plain;
 
 	EAGL_ENTER(e, 0x220);
+	bool draw_sample = glpath_on && s9_gl_diag_sample16(&e->diag.draw_serial);
+	uint64_t draw_began = draw_sample ? now_us() : 0, draw_native = 0;
 	drawing(e);
 	count_spans(e, mode, count);
 	e->draws++;
@@ -3782,17 +3857,27 @@ my_glDrawElements(void *context, GLenum mode, GLsizei count, GLenum type, const 
 	if (skipping != 0 && skip_draw(e)) {
 		/* glskip=N: see my_glDrawArrays */
 	} else if (group_draw_begin(e, enabled)) {
+		uint64_t native_began = draw_sample ? now_us() : 0;
 		glDrawElements(mode, count, type, indices);
+		if (draw_sample) { draw_native += now_us() - native_began; e->diag.draw_native_calls++; }
 		group_draw_end(e, enabled);
 	} else {
 		plain = plain_draw_begin(e, enabled);
+		uint64_t native_began = draw_sample ? now_us() : 0;
 		glDrawElements(mode, count, type, indices);
+		if (draw_sample) { draw_native += now_us() - native_began; e->diag.draw_native_calls++; }
 		if (plain) {
 			plain_draw_end(e, enabled);
 		}
 	}
 	if (trace_listed) {
 		trace_placed_look(e);
+	}
+	if (draw_sample) {
+		uint64_t total = now_us() - draw_began;
+		e->diag.draw_samples++;
+		e->diag.draw_native_us += draw_native;
+		e->diag.draw_other_us += total >= draw_native ? total - draw_native : 0;
 	}
 	EAGL_LEAVE(e, 0x220);
 	if (eagl_tracing) {
@@ -4793,6 +4878,12 @@ install(void)
 		glcost_on = s9_has_boot_flag(arguments, "glcost=1");
 		g2_bind_on = s9_has_boot_flag(arguments, "g2_bind=1");
 		g2_verify_on = s9_has_boot_flag(arguments, "g2_verify=1");
+		g21_diag_on = s9_has_boot_flag(arguments, "g21_diag=1");
+		g2_track_on = g2_bind_on || g21_diag_on;
+		glpath_on = s9_has_boot_flag(arguments, "glpath=1");
+		glhash_on = s9_has_boot_flag(arguments, "glhash=1");
+		if(g21_diag_on) say("hakios-gl-g21: enabled; per-context texture bind reasons; g2_skip=%d\n",g2_bind_on);
+		if(glpath_on || glhash_on) say("hakios-gl-path: enabled; bind+draw 1/16=%d hash 1/16=%d no GL changes\n",glpath_on,glhash_on);
 		if (g2_bind_on) say("hakios-gl-g2: enabled; skip redundant GL_TEXTURE_2D native binds, preserve all IOSurface checks; verify=%d\n",g2_verify_on);
 		if (glcost_on) say("hakios-gl-cost: enabled; CPU wall time per EAGL slot, 60-frame groups; no GL state changes\n");
 		if (glstage_on) {
