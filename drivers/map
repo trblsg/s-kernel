@@ -70,6 +70,8 @@ power    bsd/dev/hakios.battery.c
 power    iokit/Kernel/hakios.battery.cpp
 power/max77705 bsd/dev/hakios.max77705.c
 power/exynos bsd/dev/hakios.exynos_cpufreq.c
+power/exynos bsd/dev/hakios.p4_idle_math.h
+power/exynos bsd/dev/hakios.p4_cpu_lab.h
 power/exynos bsd/dev/hakios.scion_gov.c
 power/exynos bsd/dev/hakios.exynos_tmu.c
 power/exynos bsd/dev/hakios.exynos_tmu.h

@@ -82,6 +82,7 @@
 
 #include "hakios.gl.h"
 #include "gl_stage_stats.h"   /* opt-in glstage=1: host-side GLES/scanout timing buckets */
+#include "s9_p4_frame_stats.h" /* runtime P4: passive frame/input evidence, no frame skipping */
 #include "s9_gl_cost.h"       /* opt-in glcost=1: time/count EAGL slot calls, no GL changes */
 #include "s9_g2_bind.h"       /* opt-in g2_bind=1: skip proven redundant native texture binds */
 #include "s9_gl_diag.h"       /* opt-in glpath=1/glhash=1: sampled CPU path timings */
@@ -334,6 +335,10 @@ struct eagl {
 	uint64_t all_calls, all_draws, all_triangles, readback_us, wait_us, attach_us, flush_us, frame_us;
 	unsigned most_calls, most_triangles;
 	struct s9_gl_stage_stats glstage;       /* 60-frame buckets, no per-frame console writes */
+	struct s9_p4_frame_window p4_window; /* P4: read-only per-frame evidence */
+	uint32_t p4_checked, p4_same, p4_changed, p4_skipped;
+	uint32_t p4_window_phase, p4_window_mode;
+	uint64_t p4_last_frame_end_us;
 	struct s9_gl_cost glcost;               /* grouped GL slot timings; reset every 60 frames */
 	struct s9_g2_state g2;                  /* driver binding truth cache; all raw binds invalidate */
 	bool g2_fault;                          /* any verification mismatch fails this context closed */
@@ -345,6 +350,7 @@ struct eagl {
 	unsigned plain_said;
 };
 
+static uint32_t p4_mode_cached, p4_phase_cached; /* periodic sysctl reads: no P4 bootarg */
 static int glstage_on;                       /* boot-arg glstage=1: 60-frame timing aggregates */
 static int glcost_on;                        /* boot-arg glcost=1: per-slot CPU wall timing */
 static int g2_bind_on;                        /* boot-arg g2_bind=1, otherwise legacy code path */
@@ -1033,10 +1039,12 @@ surface_changed(struct eagl *e, struct image *image)
 	bool p0_force_dirty = false;
 
 	if (image->looked == e->frames + 1 || base == NULL || IOSurfaceGetPlaneCount(surface) > 0) {
+		if (__atomic_load_n(&p4_mode_cached, __ATOMIC_RELAXED)) e->p4_skipped++; /* not proof of unchanged content */
 		if (glhash_on) e->diag.hash_not_checked++;
 		return false;
 	}
 	if (still_seldom && image->unchanged >= STILL_LOOKS && (e->frames + IOSurfaceGetID(surface)) % STILL_EVERY != 0) {
+		if (__atomic_load_n(&p4_mode_cached, __ATOMIC_RELAXED)) e->p4_skipped++; /* sampling alias explicitly recorded */
 		if (glhash_on) e->diag.hash_not_checked++;
 		return false;
 	}
@@ -1082,6 +1090,11 @@ surface_changed(struct eagl *e, struct image *image)
 		e->diag.hash_bytes += size;
 		if (sum == image->sum) e->diag.hash_same++;
 		else e->diag.hash_changed++;
+	}
+	if (__atomic_load_n(&p4_mode_cached, __ATOMIC_RELAXED)) {
+		e->p4_checked++;
+		if (sum == image->sum && !p0_force_dirty) e->p4_same++;
+		else e->p4_changed++;
 	}
 	if (sum == image->sum && !p0_force_dirty) {
 		image->unchanged += image->unchanged < STILL_LOOKS;
@@ -1609,8 +1622,93 @@ frame_begin(struct eagl *e)
  * library has been waited for already.
  */
 static void frame_functions(struct eagl *e);
+/*
+ * P4 runtime read-only observer. A sysctl read once per 60 frames (not
+ * every draw) lets the USB console change the diagnostic phase without
+ * rebooting. No GPU call, fence, hashing, or GL state is changed here.
+ *
+ * The origin recorded is the GL CALL that completed this context's frame,
+ * not the higher-level source of a CoreAnimation/vsync timer callback.
+ * A "candidate" is only a frame whose CHECKED IOSurface inputs were
+ * unchanged; unchecked inputs and procedural animations can still differ.
+ */
 static void
-frame_end(struct eagl *e, bool finished)
+p4_frame_observe(struct eagl *e, uint64_t after, unsigned presented,
+    unsigned in_place, unsigned copied, enum s9_p4_end_reason reason)
+{
+    uint32_t mode, phase;
+    struct s9_p4_frame_event ev;
+    struct s9_p4_frame_window *w = &e->p4_window;
+    if (e->frames % 60 == 1) {
+        int32_t value = 0;
+        size_t n = sizeof(value);
+        if (sysctlbyname("kern.hakios.p4_mode", &value, &n, NULL, 0) == 0 &&
+            n == sizeof(value) && value >= 0 && value <= 2)
+            __atomic_store_n(&p4_mode_cached, (uint32_t)value, __ATOMIC_RELEASE);
+        n = sizeof(value);
+        if (sysctlbyname("kern.hakios.p4_phase", &value, &n, NULL, 0) == 0 &&
+            n == sizeof(value) && value >= 0 && value <= 99)
+            __atomic_store_n(&p4_phase_cached, (uint32_t)value, __ATOMIC_RELEASE);
+    }
+    mode = __atomic_load_n(&p4_mode_cached, __ATOMIC_ACQUIRE);
+    phase = __atomic_load_n(&p4_phase_cached, __ATOMIC_ACQUIRE);
+    if (mode != 0) {
+        if (e->p4_window_mode != mode || e->p4_window_phase != phase) {
+            s9_p4_frame_reset(w);
+            e->p4_last_frame_end_us = 0;
+            e->p4_window_mode = mode;
+            e->p4_window_phase = phase;
+            say("p4-gl: observer armed phase=%u mode=%u at=%llu.%03llus (no draw/present changes)\n",
+                phase, mode, after / 1000000, (after / 1000) % 1000);
+        }
+        memset(&ev, 0, sizeof(ev));
+        ev.gl_calls = e->calls;
+        ev.gl_draws = e->draws;
+        ev.gl_clears = e->clears;
+        ev.gl_uploads = e->uploads;
+        ev.checked = e->p4_checked;
+        ev.same = e->p4_same;
+        ev.changed = e->p4_changed;
+        ev.skipped = e->p4_skipped;
+        ev.host_presents = presented;
+        ev.in_place = in_place;
+        ev.copied = copied;
+        ev.end_reason = (unsigned)reason;
+        ev.duration_us = after >= e->began ? after - e->began : 0;
+        ev.gap_us = e->p4_last_frame_end_us && after >= e->p4_last_frame_end_us ?
+            after - e->p4_last_frame_end_us : 0;
+        e->p4_last_frame_end_us = after;
+        s9_p4_frame_add(w, &ev);
+        if (w->frames >= 60) {
+            say("p4-gl: up=%llu.%03llus phase=%u mode=%u frames=%u..%u n=%u gl_calls=%llu draws=%llu clears=%llu uploads=%llu checked=%llu same=%llu changed=%llu skipped=%llu checked_frames=%u candidate=%u no_draw=%u unchecked=%u\n",
+                after / 1000000, (after / 1000) % 1000, phase, mode,
+                e->frames - w->frames + 1, e->frames, w->frames,
+                (unsigned long long)w->calls, (unsigned long long)w->draws,
+                (unsigned long long)w->clears, (unsigned long long)w->uploads,
+                (unsigned long long)w->checked, (unsigned long long)w->same,
+                (unsigned long long)w->changed, (unsigned long long)w->skipped,
+                w->frames_checked, w->frames_candidate, w->frames_no_draw,
+                w->frames_unchecked);
+            say("p4-gl-gap: up=%llu.%03llus phase=%u frame_n=%u gap_lt17=%u gap_17_50=%u gap_50_120=%u gap_ge120=%u gap_unknown=%u end_flush=%u end_finish=%u end_object=%u host_frames=%u host_calls=%llu copy_frames=%u copies=%llu inplace=%llu cpu_avg_us=%llu\n",
+                after / 1000000, (after / 1000) % 1000, phase,
+                w->frames,w->gap_lt17,w->gap_lt50,w->gap_lt120,
+                w->gap_ge120,w->gap_unknown,w->finish_flush,
+                w->finish_wait,w->finish_object,w->frames_host_present,
+                (unsigned long long)w->presented,w->frames_with_copy,
+                (unsigned long long)w->copies,(unsigned long long)w->in_place,
+                (unsigned long long)(w->elapsed_us / w->frames));
+            s9_p4_frame_reset(w);
+        }
+    } else if (e->p4_window_mode != 0) {
+        s9_p4_frame_reset(w);
+        e->p4_window_mode = 0;
+        e->p4_last_frame_end_us = 0;
+    }
+    e->p4_checked = e->p4_same = e->p4_changed = e->p4_skipped = 0;
+}
+
+static void
+frame_end(struct eagl *e, bool finished, enum s9_p4_end_reason end_reason)
 {
 	static unsigned unfollowed;
 	uint64_t before, sync_began, waited, after;
@@ -1670,6 +1768,7 @@ frame_end(struct eagl *e, bool finished)
 	after = now_us();
 	e->in_frame = false;
 	e->frames++;
+	p4_frame_observe(e, after, presented, in_place, copied, end_reason);
 	if (latency_lines) {
 		uint64_t tpidr;
 
@@ -3938,7 +4037,7 @@ my_glFinish(void *context)
 	}
 	clear_now(e);
 	glFinish();
-	frame_end(e, true);
+	frame_end(e, true, S9_P4_GL_FINISH);
 	EAGL_LEAVE(e, 0x2d0);
 }
 
@@ -3956,7 +4055,7 @@ my_glFlush(void *context)
 	began = now_us();
 	glFlush();
 	e->flushing += now_us() - began;
-	frame_end(e, false);
+	frame_end(e, false, S9_P4_GL_FLUSH);
 	EAGL_LEAVE(e, 0x2d8);
 }
 
@@ -3971,7 +4070,7 @@ my_glFinishObjectAPPLE(void *context, GLenum object, GLint name)
 	EAGL_ENTER(e, 0xeb8);
 	clear_now(e);
 	glFinish();
-	frame_end(e, true);
+	frame_end(e, true, S9_P4_GL_FINISH_OBJECT);
 	EAGL_LEAVE(e, 0xeb8);
 }
 

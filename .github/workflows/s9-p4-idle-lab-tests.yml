@@ -1,0 +1,97 @@
+name: S9 P4 Idle Compositor and CPU Residency Lab
+
+on:
+  push:
+    branches: [s9/p4-idle-compositor-cpu-lab]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Strict C11 C++17 UBSan P4 frame and per-core accounting
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror -pedantic -fsanitize=undefined \
+            tools/tests/test_s9_p4_idle_lab.c -o /tmp/s9_p4_c
+          /tmp/s9_p4_c
+          c++ -x c++ -std=c++17 -O2 -Wall -Wextra -Werror -pedantic -fsanitize=undefined \
+            tools/tests/test_s9_p4_idle_lab.c -o /tmp/s9_p4_cpp
+          /tmp/s9_p4_cpp
+      - name: Regression tests from existing P0, G3D, frame-cost pipelines
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            tools/tests/test_s9_g3d_lab_policy.c -o /tmp/s9_g3d
+          /tmp/s9_g3d
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            userland/tests/test_s9_ioshash4.c -o /tmp/s9_p0
+          /tmp/s9_p0
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            userland/tests/test_gl_stage_stats.c -o /tmp/s9_glstage
+          /tmp/s9_glstage
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            userland/tests/test_s9_unified_diag.c -o /tmp/s9_unified
+          /tmp/s9_unified
+          bash -n userland/build.sh
+      - name: P4 zero-side-effect guardrails, code path and XNU packaging assertions
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          m=Path('drivers/map').read_text()
+          k=Path('drivers/power/exynos/hakios.exynos_cpufreq.c').read_text()
+          kh=Path('drivers/power/exynos/hakios.p4_cpu_lab.h').read_text()
+          gl=Path('userland/src/eagl.c').read_text()
+          pc=Path('userland/src/poster_cost.c').read_text()
+          fr=Path('userland/src/s9_p4_frame_stats.h').read_text()
+          old=Path('drivers/gpu/mali/hakios.mali.c').read_text()
+          assert 'power/exynos bsd/dev/hakios.p4_cpu_lab.h' in m
+          assert 'power/exynos bsd/dev/hakios.p4_idle_math.h' in m
+          assert '#include "hakios.p4_cpu_lab.h"' in k
+          assert 'p4_cpu_probe(now);' in k
+          assert 'ml_cpu_idle_time((int)i,&idle)' in kh
+          assert 'deep=unmeasured' in kh
+          assert 's9_p4_idle_percent' in kh
+          assert 'SYSCTL_PROC(_kern_hakios, OID_AUTO, p4_mode,' in kh
+          assert 'SYSCTL_PROC(_kern_hakios, OID_AUTO, p4_stats,' in kh
+          assert 'SYSCTL_PROC(_kern_hakios, OID_AUTO, p4_phase,' in kh
+          assert 'SYSCTL_PROC(_kern_hakios, OID_AUTO, p4_threads,' in kh
+          assert 'SYSCTL_PROC(_kern_hakios, OID_AUTO, p4_log_ms,' in kh
+          assert 'p4_frame_observe(e, after, presented, in_place, copied, end_reason);' in gl
+          assert 'p4_frame_observe(' in gl
+          assert 'surface_changed(' in gl
+          assert 'frame_end(e, false, S9_P4_GL_FLUSH)' in gl
+          assert 'frame_end(e, true, S9_P4_GL_FINISH)' in gl
+          assert 'frame_end(e, true, S9_P4_GL_FINISH_OBJECT)' in gl
+          assert 's9_ioshash4_fast(base,size)' in gl # P0 unchanged
+          assert 'glDrawElements(mode, count, type, indices);' in gl
+          assert 'glFlush();' in gl and 'glFinish();' in gl
+          assert 'frames_candidate' in fr and 'NO GL calls' in fr
+          assert 'PROC_PIDLISTTHREADS' in pc and 'PROC_PIDTHREADINFO' in pc
+          assert 'p4-thread:' in pc and 'unit=uncalibrated' in pc
+          assert 'p4_threads>0' in pc
+          assert 'g3d_lab_gate' in old and 'g3d_lab_mv' in old
+          assert 'GOV_CAP1_MC     85000' in old
+          assert 'GOV_CAP2_MC     95000' in old
+          print('P4 kernel CPU idle/phase, userland GL and process profiling wired: source assertions PASS')
+          PY
+  ios-syntax:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax of newly instrumented poster_cost on iOS ARM64
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=gnu11 -Wall -Wextra -Wno-deprecated-declarations \
+            -fsyntax-only userland/src/poster_cost.c
+      - name: Syntax of P4 portable GLES statistics header on iOS ARM64
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          printf '#include "userland/src/s9_p4_frame_stats.h"\nint main(void){return 0;}\n' > p4_header_probe.c
+          xcrun clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=gnu11 -Wall -Wextra -Werror -fsyntax-only p4_header_probe.c

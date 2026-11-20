@@ -289,6 +289,9 @@ static struct {
 	uint64_t raise_sum, raise_max, top_sum, top_max, acpm_sum, acpm_max;
 } nums;
 
+SYSCTL_DECL(_kern_hakios);
+#include "hakios.p4_cpu_lab.h" /* P4: scheduler-idle and frame cadence, read-only */
+
 static bool
 boost_on(uint64_t last, uint64_t span, uint64_t now)
 {
@@ -301,6 +304,8 @@ hakios_exynos_cpufreq_touch(void)
 {
 	uint64_t now, before;
 
+	if (__atomic_load_n(&p4_mode, __ATOMIC_RELAXED) != 0)
+		__atomic_fetch_add(&p4_touch_count, 1, __ATOMIC_RELAXED);
 	if (!__atomic_load_n(&gov_running, __ATOMIC_ACQUIRE) || boost_span == 0) {
 		return;
 	}
@@ -354,6 +359,15 @@ hakios_exynos_cpufreq_frame(void)
 {
 	uint64_t now, before;
 
+	if (__atomic_load_n(&p4_mode, __ATOMIC_RELAXED) != 0) {
+		uint64_t tick = mach_absolute_time();
+		uint64_t old = __atomic_exchange_n(&p4_frame_prev, tick, __ATOMIC_RELAXED);
+		__atomic_fetch_add(&p4_frame_count, 1, __ATOMIC_RELAXED);
+		if (old && tick >= old) {
+			uint32_t bin = s9_p4_gap_bucket(tick - old, p4_gap17, p4_gap50, p4_gap120);
+			if (bin < 4) __atomic_fetch_add(&p4_frame_gap_bins[bin], 1, __ATOMIC_RELAXED);
+		}
+	}
 	if (!__atomic_load_n(&gov_running, __ATOMIC_ACQUIRE) || frame_span == 0) {
 		return;
 	}
@@ -1351,6 +1365,7 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 			ramp_check(mach_absolute_time());
 		}
 		measure(now - then > 0 ? now - then : 1);
+		p4_cpu_probe(now); /* on-demand 5s read-only, no new kernel thread */
 		absolutetime_to_nanoseconds(now - then, &ns);
 		span_ms = ns / NSEC_PER_MSEC;
 		then = now;
