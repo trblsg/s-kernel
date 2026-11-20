@@ -2173,6 +2173,14 @@ static uint32_t mali_gov;
  * Frame-floor tuning uses the EXISTING mali_gov_frame boot arg/sysctl.
  * Does not change PLL, BUCK6 voltage or thermal caps on its own. */
 static uint32_t mali_probe;
+/* P3 is read-only: PMU/CMU registers are outside the GPU power domain.
+ * Optional p3rail=1 reads BUCK6 with ACPM only once per 30s; default
+ * does not touch the PMIC at all. No power sequencing, clock, voltage
+ * or thermal limit is modified by the probe. */
+static uint32_t p3power, p3rail;
+static uint64_t p3rail_since;
+static uint8_t p3rail_vsel, p3rail_ctrl;
+static bool p3rail_valid;
 static uint64_t gov_probe_since, gov_probe_busy, gov_probe_elapsed;
 static uint32_t gov_probe_windows, gov_probe_frames, gov_probe_floor_forced, gov_probe_thermal;
 /*
@@ -2403,6 +2411,37 @@ gov_window(uint64_t now, uint64_t busy)
 			    gov_level < GOV_LEVELS ? g3d_rates[gov_level].mhz : 0,
 			    gov_level, g3d_rates[gov_cap].mhz, mc,
 			    gov_switches, gov_ups, gov_downs, gov_dvs ? 1 : 0);
+			if (p3power && pmu != 0 && cmu_g3d != 0) {
+				uint64_t frame_age_ns=0, job_age_ns=0;
+				const uint64_t frame_last=__atomic_load_n(&gov_frame_last,__ATOMIC_RELAXED);
+				const uint64_t job_last=__atomic_load_n(&g3d_last_busy,__ATOMIC_RELAXED);
+				const uint32_t domain_status=rd(pmu,PMU_G3D_STATUS);
+				const uint32_t domain_config=rd(pmu,PMU_G3D_CONFIGURATION);
+				const uint32_t pll0=rd(cmu_g3d,PLL_CON0);
+				const uint32_t mux=rd(cmu_g3d,MUX_G3D_USER);
+				if(frame_last && now>=frame_last)absolutetime_to_nanoseconds(now-frame_last,&frame_age_ns);
+				if(job_last && now>=job_last)absolutetime_to_nanoseconds(now-job_last,&job_age_ns);
+				/* This extra ACPM read is separate/opt-in, never a write. */
+				if(p3rail && acpm_ok) {
+					uint64_t span;
+					nanoseconds_to_absolutetime(30ull*NSEC_PER_SEC,&span);
+					if(p3rail_since==0 || now-p3rail_since>=span) {
+						uint8_t control=0,voltage=0;
+						const int err1=hakios_acpm_pmic_read(HAKIOS_ACPM_PMIC_PMIC,B6CTRL,&control);
+						const int err2=err1==0 ? hakios_acpm_pmic_read(HAKIOS_ACPM_PMIC_PMIC,B6OUT,&voltage) : err1;
+						p3rail_since=now;
+						p3rail_valid=err2==0;
+						if(p3rail_valid){p3rail_ctrl=control;p3rail_vsel=voltage;}
+					}
+				}
+				say("mali-power: up=%llums domain=%u status=%#x config=%#x awake=%u sleep=%u pll_en=%u pll_stable=%u mux=%u clock=%uMHz frame_age_ms=%llu job_age_ms=%llu frame_valid=%u job_valid=%u framefloor=%uMHz dvs=%u rail_read=%u rail_valid=%u rail_ctrl=%#x rail_mv_last=%u\n",
+				    uptime_ns / NSEC_PER_MSEC,(domain_status&G3D_ON)==G3D_ON?1:0,domain_status,domain_config,
+				    g3d_awake?1:0,g3d_sleep?1:0,(pll0&PLL_ENABLE)?1:0,(pll0&PLL_STABLE)?1:0,
+				    (mux&MUX_SEL)?1:0,gov_level<GOV_LEVELS?g3d_rates[gov_level].mhz:0,
+				    frame_age_ns/NSEC_PER_MSEC,job_age_ns/NSEC_PER_MSEC,frame_last?1:0,job_last?1:0,
+				    gov_frame_mhz,gov_dvs?1:0,p3rail?1:0,p3rail_valid?1:0,p3rail_ctrl,
+				    p3rail_valid?(300u+(unsigned)p3rail_vsel*25u/4u):0u);
+			}
 			gov_probe_since = now;
 			gov_probe_windows = gov_probe_frames = gov_probe_floor_forced = gov_probe_thermal = 0;
 			gov_probe_busy = gov_probe_elapsed = 0;
@@ -2912,6 +2951,15 @@ hakios_mali_init(void)
 	(void)PE_parse_boot_argn("mali_gov", &mali_gov, sizeof(mali_gov));
 	(void)PE_parse_boot_argn("mali_probe", &mali_probe, sizeof(mali_probe));
 	mali_probe = mali_probe != 0;
+	(void)PE_parse_boot_argn("p3power", &p3power, sizeof(p3power));
+	p3power = p3power != 0;
+	(void)PE_parse_boot_argn("p3rail", &p3rail, sizeof(p3rail));
+	p3rail = p3rail != 0;
+	if (p3power && !mali_probe) {
+		say("mali-power: p3power=1 also needs mali_probe=1 for existing 5s schedule; inactive\n");
+		p3power=0;
+	}
+	if(p3power) say("mali-power: P3 read-only PMU/CMU probe on existing 5s governor; rail_read=%u (0=no ACPM transactions), thermal caps unchanged\n",p3rail);
 	(void)PE_parse_boot_argn("g3d_sleep", &g3d_sleep, sizeof(g3d_sleep));
 	(void)PE_parse_boot_argn("g3d_sleep_ms", &g3d_sleep_ms, sizeof(g3d_sleep_ms));
 	g3d_sleep_ms = g3d_sleep_ms < 500 ? 500 : g3d_sleep_ms > 60000 ? 60000 : g3d_sleep_ms;

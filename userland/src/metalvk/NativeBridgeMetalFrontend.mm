@@ -1037,6 +1037,18 @@ static bool s9P12On() {
  return enabled;
 }
 static std::atomic<uint64_t> gP12Logged{0};
+/* P1 observation: capture dictionary key/value OBJECT CLASS only, not
+ * key text or values, at the second MPSImage lookup before SIGSEGV.
+ * No exception suppression, ownership or command-buffer change. */
+static bool s9P1MPSOn() {
+ static const bool enabled=[] {
+  char args[4096]={};size_t len=sizeof(args)-1;
+  if(sysctlbyname("kern.bootargs",args,&len,nullptr,0)!=0)return false;
+  args[std::min(len,sizeof(args)-1)]=0;
+  return s9_has_boot_flag(args,"p1_mps_diag=1")!=0;
+ }();
+ return enabled;
+}
 static void s9P11Trace(const char *event,id object,void *handle,id dictionary,bool stack) {
  if(!s9P11TraceOn())return;
  NBSAY(@"native-metal-p11: %s command=%p native=%p userdict=%p tid=%u",
@@ -1061,6 +1073,7 @@ static void s9P11Trace(const char *event,id object,void *handle,id dictionary,bo
  uint64_t createdUs;
  uint32_t createCpu,createTid,commitCpu,commitTid;
  uint32_t p12Reads; /* per-command-buffer diagnostic only */
+ uint32_t p1MPSReads; /* independent P1 shape probe */
  BOOL earlyEligible;   // made by the render server's thread: its completed handlers may run at submission (see fireEarly)
 }
 @property(nonatomic) NmbCommandBuffer *handle;
@@ -1554,6 +1567,19 @@ extern "C" void NBWaitInFlight(uint64_t beforeUs);
       self.committed?1:0,(__bridge void *)_queue,(__bridge void *)self,(void *)_handle,
       threadIdLow(),(unsigned long long)serial);
    }
+  }
+  if(s9P1MPSOn() && ++p1MPSReads==2) {
+   /* One bounded diagnostic per command buffer, after MPS stores an item. */
+   unsigned reported=0;
+   for(id key in _s9UserDictionary) {
+    id value=[_s9UserDictionary objectForKey:key];
+    NBSAY(@"native-metal-p1mps: command=%p read=%u entries=%lu item=%u key_class=%s value_class=%s committed=%d tid=%u",
+      (__bridge void *)self,p1MPSReads,(unsigned long)_s9UserDictionary.count,reported,
+      key?object_getClassName(key):"nil",value?object_getClassName(value):"nil",
+      self.committed?1:0,threadIdLow());
+    if(++reported>=3)break;
+   }
+   if(reported==0)NBSAY(@"native-metal-p1mps: command=%p read=%u EMPTY after second getter",(__bridge void *)self,p1MPSReads);
   }
   if(s9P11TraceOn())s9P11Trace("userdict-return",self,_handle,_s9UserDictionary,false);
   return _s9UserDictionary;

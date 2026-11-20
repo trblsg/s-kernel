@@ -85,6 +85,7 @@
 #include "s9_gl_cost.h"       /* opt-in glcost=1: time/count EAGL slot calls, no GL changes */
 #include "s9_g2_bind.h"       /* opt-in g2_bind=1: skip proven redundant native texture binds */
 #include "s9_gl_diag.h"       /* opt-in glpath=1/glhash=1: sampled CPU path timings */
+#include "s9_ioshash4.h"      /* P0: four independent hash lanes, exact scalar reference */
 #include "metalvk/s9_bootarg_flag.h"
 
 /* ---- OpenGL ES: the types, the few names used here, the library's functions --------------------- */
@@ -337,6 +338,8 @@ struct eagl {
 	struct s9_g2_state g2;                  /* driver binding truth cache; all raw binds invalidate */
 	bool g2_fault;                          /* any verification mismatch fails this context closed */
 	struct s9_gl_diag diag;                 /* sampled path timings, read-only diagnostics */
+	uint32_t p0_hashes,p0_verified,p0_mismatch,p0_scalar;
+	uint64_t p0_serial;                    /* verification schedule across 60-frame windows */
 	const char *sources[256];       /* the text of the shaders being made, by name (modulo this) */
 	bool fragment[256];             /* ... and which of the two kinds each is */
 	unsigned plain_said;
@@ -350,6 +353,9 @@ static int g21_diag_on;                       /* boot-arg g21_diag=1: G2 reasons
 static int g2_track_on;                       /* g21_diag or g2_bind */
 static int glpath_on;                         /* boot-arg glpath=1: 1/16 bind+draw time breakdown */
 static int glhash_on;                         /* boot-arg glhash=1: 1/16 IOSurface checksum timing */
+static int p0hash_on;                         /* boot-arg p0hash=1: 4-lane all-byte checksum */
+static int p0verify_on;                       /* boot-arg p0verify=1: verify 1/128 with scalar 4-lane checksum */
+static int p0hash_disabled;                   /* fail closed if optimized and scalar checksums disagree */
 static __thread unsigned g2_forwarding;      /* distinguishes forwarded external binds from internal raw binds */
 static __thread uint64_t glcost_begun[8];    /* nested-safe, avoids cross-thread start timestamp races */
 static __thread unsigned glcost_depth;
@@ -1024,6 +1030,7 @@ surface_changed(struct eagl *e, struct image *image)
 	    (size_t)image->width * bytes_a_pixel(image->format, image->type);
 	const uint8_t *base = IOSurfaceGetBaseAddress(surface);
 	uint64_t sum = size, word;
+	bool p0_force_dirty = false;
 
 	if (image->looked == e->frames + 1 || base == NULL || IOSurfaceGetPlaneCount(surface) > 0) {
 		if (glhash_on) e->diag.hash_not_checked++;
@@ -1036,10 +1043,38 @@ surface_changed(struct eagl *e, struct image *image)
 	image->looked = e->frames + 1;
 	bool hash_sample = glhash_on && s9_gl_diag_sample16(&e->diag.hash_serial);
 	uint64_t hash_began = hash_sample ? now_us() : 0;
-	for (size_t at = 0; at + 8 <= size; at += 8) {
-		memcpy(&word, base + at, 8);
-		sum = (sum ^ word) * 0x9e3779b97f4a7c15ull;
-		sum ^= sum >> 29;
+	if (p0hash_on) {
+		/* Both fast and fallback reference use the same digest for the full
+		 * byte range. Switching after a CPU verification failure does not
+		 * invalidate image->sum or hide subsequent dirty IOSurfaces. */
+		if (__atomic_load_n(&p0hash_disabled, __ATOMIC_RELAXED)) {
+			sum=s9_ioshash4_reference(base,size);
+			e->p0_scalar++;
+		} else {
+			sum=s9_ioshash4_fast(base,size);
+			e->p0_hashes++;
+			if (p0verify_on && (++e->p0_serial % 128u)==1u) {
+				const uint64_t scalar=s9_ioshash4_reference(base,size);
+				e->p0_verified++;
+				if (sum != scalar) {
+					/* A concurrent writer can change memory between passes.
+					 * Prefer the second result and fall back to reference. */
+					e->p0_mismatch++;
+					p0_force_dirty=true; /* never silently skip an update after a verification failure */
+					__atomic_store_n(&p0hash_disabled,1,__ATOMIC_RELAXED);
+					sum=scalar;
+					say("hakios-gl-p0: fast/scalar checksum mismatch for surface %u (%zu bytes): scalar fallback enabled\n",
+					    IOSurfaceGetID(surface),size);
+				}
+			}
+		}
+	} else {
+		/* Exact legacy checksum: preserve the previous experiment A/B. */
+		for (size_t at = 0; at + 8 <= size; at += 8) {
+			memcpy(&word, base + at, 8);
+			sum = (sum ^ word) * 0x9e3779b97f4a7c15ull;
+			sum ^= sum >> 29;
+		}
 	}
 	if (hash_sample) {
 		e->diag.hash_samples++;
@@ -1048,7 +1083,7 @@ surface_changed(struct eagl *e, struct image *image)
 		if (sum == image->sum) e->diag.hash_same++;
 		else e->diag.hash_changed++;
 	}
-	if (sum == image->sum) {
+	if (sum == image->sum && !p0_force_dirty) {
 		image->unchanged += image->unchanged < STILL_LOOKS;
 		return false;
 	}
@@ -1731,6 +1766,13 @@ frame_end(struct eagl *e, bool finished)
 		    e->g2.other_target_or_unit);
 	}
 	if (g2_track_on && e->frames % 60 == 0) s9_g2_reset_counters(&e->g2);
+	if (p0hash_on && e->frames % 60 == 0) {
+		say("hakios-gl-p0: up=%llu.%03llus frames=%u..%u fast=%u scalar=%u verified=%u mismatch=%u fallback=%d\n",
+		    after/1000000,(after/1000)%1000,e->frames-59,e->frames,
+		    e->p0_hashes,e->p0_scalar,e->p0_verified,e->p0_mismatch,
+		    __atomic_load_n(&p0hash_disabled,__ATOMIC_RELAXED));
+		e->p0_hashes=e->p0_scalar=e->p0_verified=e->p0_mismatch=0;
+	}
 	if (glpath_on) e->diag.flush_raw_us += e->flushing; /* already-timed real glFlush, no extra GPU calls */
 	if ((glpath_on || glhash_on) && e->frames % 60 == 0) {
 		const struct s9_gl_diag *d=&e->diag;
@@ -4882,6 +4924,9 @@ install(void)
 		g2_track_on = g2_bind_on || g21_diag_on;
 		glpath_on = s9_has_boot_flag(arguments, "glpath=1");
 		glhash_on = s9_has_boot_flag(arguments, "glhash=1");
+		p0hash_on = s9_has_boot_flag(arguments, "p0hash=1");
+		p0verify_on = s9_has_boot_flag(arguments, "p0verify=1");
+		if (p0hash_on) say("hakios-gl-p0: enabled 4-lane full-byte IOSurface checksum, scalar verification=%d, no seed/refresh changes\n",p0verify_on);
 		if(g21_diag_on) say("hakios-gl-g21: enabled; per-context texture bind reasons; g2_skip=%d\n",g2_bind_on);
 		if(glpath_on || glhash_on) say("hakios-gl-path: enabled; bind+draw 1/16=%d hash 1/16=%d no GL changes\n",glpath_on,glhash_on);
 		if (g2_bind_on) say("hakios-gl-g2: enabled; skip redundant GL_TEXTURE_2D native binds, preserve all IOSurface checks; verify=%d\n",g2_verify_on);

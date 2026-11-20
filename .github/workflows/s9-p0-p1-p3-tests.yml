@@ -1,0 +1,79 @@
+name: S9 P0 IOSurface checksum P1 MPS and P3 GPU power
+on:
+  push:
+    branches: [s9/ioshash4-p1mps-p3power]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Four-lane P0 checksum against reference on variable and 11MiB buffers
+        run: |
+          cc -std=c11 -O3 -Wall -Wextra -Werror -pedantic -fsanitize=undefined \
+            userland/tests/test_s9_ioshash4.c -o /tmp/s9_hash_c
+          /tmp/s9_hash_c
+          c++ -x c++ -std=c++17 -O3 -Wall -Wextra -Werror -pedantic -fsanitize=undefined \
+            userland/tests/test_s9_ioshash4.c -o /tmp/s9_hash_cpp
+          /tmp/s9_hash_cpp
+      - name: Previous GLES, Metal and widgetless regressions
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            userland/tests/test_s9_unified_diag.c -o /tmp/s9_unified
+          /tmp/s9_unified
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            userland/tests/test_s9_p1_g1.c -o /tmp/s9_p1
+          /tmp/s9_p1
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            userland/tests/test_s9_g2_bind.c -o /tmp/s9_g2
+          /tmp/s9_g2
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            userland/tests/test_gl_stage_stats.c -o /tmp/s9_stage
+          /tmp/s9_stage
+          PYTHONPATH=userland python3 -m unittest discover \
+            -s userland/tests -p test_strip_widgets.py -v
+          bash -n userland/build.sh
+      - name: Source invariants: P0 gated and P1/P3 observational, P2 unchanged
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          e=Path("userland/src/eagl.c").read_text()
+          m=Path("userland/src/metalvk/NativeBridgeMetalFrontend.mm").read_text()
+          k=Path("drivers/gpu/mali/hakios.mali.c").read_text()
+          assert 'p0hash=1' in e and 'p0verify=1' in e
+          assert 's9_ioshash4_fast(base,size)' in e
+          assert 's9_ioshash4_reference(base,size)' in e
+          assert 'p0_force_dirty=true' in e
+          assert 'for (size_t at = 0; at + 8 <= size; at += 8)' in e # original fallback
+          assert 'surface_to_texture(e, image)' in e
+          assert 'glDrawElements(mode, count, type, indices);' in e
+          assert 'glFinish();' in e and 'glFlush();' in e
+          assert 'p1_mps_diag=1' in m and 'native-metal-p1mps:' in m
+          assert 'doesNotRecognizeSelector:_cmd' in m and 'native-metal-p12:' in m
+          assert 'p3power' in k and 'mali-power:' in k
+          assert 'p3rail' in k and 'rd(pmu,PMU_G3D_STATUS)' in k
+          assert 'GOV_CAP1_MC     85000' in k and 'GOV_CAP2_MC     95000' in k
+          assert 'g3d_sleep=1' in k and 'PLL_CON0' in k
+          print("P0 opt-in / P1 and P3 observational / thermal and P2 unchanged")
+          PY
+  ios-syntax:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: iOS arm64 GLES shim C syntax
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=gnu11 -fblocks -Wno-deprecated-declarations \
+            -fsyntax-only userland/src/eagl.c
+      - name: iOS arm64 Objective-C++ Metal frontend syntax
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun clang++ -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=c++17 -fobjc-arc -fblocks -x objective-c++ \
+            -Wno-deprecated-declarations -Itools/metal -fsyntax-only \
+            userland/src/metalvk/NativeBridgeMetalFrontend.mm
