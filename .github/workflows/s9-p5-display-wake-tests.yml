@@ -77,6 +77,40 @@ jobs:
           print('P5 guards: no frame drop, no new GPU-domain MMIO while OFF, no power/thermal mutation: PASS')
           PY
 
+  putty-preview:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate PowerShell 5.1 PuTTY automation without sending serial commands
+        shell: pwsh
+        run: |
+          $file = (Resolve-Path 'tools/s9-p5-putty-auto.ps1').Path
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
+          if ($errors.Count -ne 0) { throw ('PowerShell parse errors: ' + ($errors -join '; ')) }
+          $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $file -Port COM125
+          if ($LASTEXITCODE -ne 0) { throw ('PuTTY dry run failed: ' + $LASTEXITCODE) }
+          $preview = $output -join "`n"
+          foreach ($required in @(
+            'mode=PREVIEW ONLY',
+            'PREVIEW SEND: sysctl kern.hakios.p5_phase=1',
+            'PREVIEW WAIT 120s: A1',
+            'PREVIEW SEND: sysctl kern.hakios.p5_phase=2',
+            'PREVIEW WAIT 180s: B1',
+            'PREVIEW SEND: sysctl kern.hakios.p5_phase=3',
+            'PREVIEW SEND: sysctl kern.hakios.p5_mode=2',
+            'PREVIEW SEND: sysctl kern.hakios.p5_phase=4',
+            'PREVIEW OPERATOR ACTION: Physically turn S9 display OFF',
+            'PREVIEW SEND: sysctl kern.hakios.p5_phase=6',
+            'PREVIEW SEND: sysctl kern.hakios.p5_mode=0',
+            'PREVIEW SEND: sysctl kern.hakios.p5_phase=7')) {
+            if (-not $preview.Contains($required)) { throw ('Missing preview stage: ' + $required) }
+          }
+          if ($preview.Contains('Sent to PuTTY PID')) { throw 'Unexpected input sent in preview mode' }
+          Write-Output 'P5 PuTTY COM125 dry-run stage and syntax checks PASS (no device attached)'
+
   ios-syntax:
     runs-on: macos-15
     timeout-minutes: 20

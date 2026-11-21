@@ -70,6 +70,24 @@ Enter these as **one single line** in the workflow. No `p5_*` boot arguments are
 
 Capture all output from boot, fixed 70 brightness, wallpaper, network, charge state, no touch except deliberate display power transition; wait >=420 seconds uptime for Poster to settle.
 
+### Automatic sequence through the existing PuTTY COM125 session (recommended)
+
+`tools/s9-p5-putty-auto.ps1` is a Windows PowerShell 5.1 keyboard automation for the **existing PuTTY window**. It does not open COM125 and therefore does not conflict with PuTTY's exclusive serial port; leave PuTTY running and its **session logging enabled**. The script must run on the **same interactive Windows desktop** as PuTTY, not on a remote workspace host that does not see COM125. PuTTY should show a logged-in shell prompt. The target window is selected by its title containing `COM125`, or by the explicitly supplied PuTTY PID when its title was customized.
+
+From a local checkout of `s9/p5-display-wake-gpu-lab`, open a separate local PowerShell console:
+
+```powershell
+# Dry-run first: prints ALL commands, waits, and physical actions, sends NOTHING.
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/s9-p5-putty-auto.ps1 -Port COM125
+
+# After verifying PuTTY session, its COM port, log file, and P5 kernel+SYSTEM:
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/s9-p5-putty-auto.ps1 -Port COM125 -Execute
+```
+
+Execution asks you to confirm `COM125`, first sends **only** `sysctl kern.hakios.p5_stats`, then requires a human check of the response (`READY`). The timed A1/B1/A2/B2 phases and their `p5_phase` markers are then automatic. On the OFF/ON phase it prompts you to press the **physical** display power button (the script cannot toggle screen power safely); wait 110 seconds with display OFF, then physically wake and press Enter promptly. It ends by sending `p5_mode=0`, `p5_threads=0` and `p4_mode=0` through the same verified window. These safe-exit commands are **best effort**, not a device acknowledgement, so check PuTTY output and run them manually if communication was lost. Keep the host desktop otherwise idle while running; keyboard automation may steal focus. If multiple PuTTY windows exist or the title hides the COM number, select an explicitly verified target with `-PuttyProcessId <PID>`.
+
+**Important limitations:** this is GUI keystroke automation, not a serial/RPC API with positive acknowledgement or reliable process isolation. If PuTTY loses focus, closes, or Windows blocks focus changes, the script aborts rather than type into another window. It cannot read PuTTY's terminal content for you, cannot turn the screen off/on, and cannot start PuTTY logging. Do not use `putty -m` for a serial connection; `-m` is for remote SSH commands. If `p5_stats` is an unknown OID, stop and deploy the matching P5 BOOT+SYSTEM first.
+
 **A1 — 120 seconds, display ON, P5 OFF (baseline)**
 
     sysctl kern.hakios.p4_mode=0
