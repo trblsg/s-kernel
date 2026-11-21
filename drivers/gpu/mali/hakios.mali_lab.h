@@ -21,7 +21,7 @@ g3d_lab_mon(__unused void *arg, __unused wait_result_t why)
 		/* P5 reuses this independent 5s worker across DISPLAY OFF.
 		 * Only PMU/CMU (outside G3D) are read; never touch GPU MMIO. */
 		if (!g3d_lab_gate && g3d_lab_mv == 950 && !g3d_lab_rail_probe &&
-		    !g3d_lab_fault && !g3d_lab_phase &&
+		    !g3d_lab_fault && !g3d_lab_phase && !__atomic_load_n(&p68_mode,__ATOMIC_RELAXED) &&
 		    !__atomic_load_n(&p5_mode,__ATOMIC_RELAXED))
 			continue;
 		if (pmu == 0 || cmu_g3d == 0)
@@ -87,6 +87,20 @@ g3d_lab_mon(__unused void *arg, __unused wait_result_t why)
 		 * no GPU jobs while the display is off. */
 		if (__atomic_load_n(&p5_mode,__ATOMIC_RELAXED))
 			p5_monitor_snapshot(now,up_ns,status,pll,mux,awake_state != 0);
+		if (__atomic_load_n(&p68_mode,__ATOMIC_RELAXED)) {
+			const uint64_t jf=__atomic_load_n(&g3d_last_busy,__ATOMIC_RELAXED);
+			const uint64_t ff=__atomic_load_n(&gov_frame_last,__ATOMIC_RELAXED);
+			const uint64_t job_age=jf?g3d_lab_age_ms(now,jf):0;
+			const uint64_t frame_age=ff?g3d_lab_age_ms(now,ff):0;
+			const uint32_t quiet=(jf && ff && job_age>=10000 && frame_age>=10000)?1u:0u;
+			const uint32_t domain=(status&G3D_ON)==G3D_ON?1u:0u;
+			say("p68-g3d: up=%llums phase=%u domain=%u pll=%u mux=%u awake_hint=%u clock_hint_mhz=%u job_valid=%u frame_valid=%u job_age_ms=%llu frame_age_ms=%llu quiet10s=%u could_shadow=%u actual_off=%u off_count=%u wakes=%u wake_fail=%u fault=%u source=PMU_5s_readback_not_watts_or_true_idle_residency\n",
+			    up_ns/NSEC_PER_MSEC,phase,domain,
+			    (pll&(PLL_ENABLE|PLL_STABLE))==(PLL_ENABLE|PLL_STABLE)?1u:0u,
+			    (mux&MUX_SEL)?1u:0u,awake_state,clocks,jf?1u:0u,ff?1u:0u,
+			    job_age,frame_age,quiet,quiet&&domain,
+			    !domain,off_count,wakes,wake_failed,fault);
+		}
 	}
 }
 
@@ -104,6 +118,25 @@ g3d_lab_monitor_start(void)
 		say("g3d-lab: WARNING: five-second independent sampler could not start; sysctl stats still work\n");
 	}
 }
+
+/* P6.8 uses the SAME existing G3D PMU sampler: read-only, no new
+ * clock, G3D-MMIO read or power operation. Mode=0 keeps old behavior. */
+static int
+p68_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
+    __unused int arg2,struct sysctl_req *req)
+{
+    int v=(int)__atomic_load_n(&p68_mode,__ATOMIC_RELAXED);
+    int err=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(err || req->newptr==USER_ADDR_NULL)return err;
+    if(v<0 || v>1)return EINVAL;
+    __atomic_store_n(&p68_mode,(uint32_t)v,__ATOMIC_RELEASE);
+    if(v)g3d_lab_monitor_start();
+    say("p68: read-only G3D quiet PMU sampler=%d; gate unchanged\n",v);
+    return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p68_mode,
+    CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,
+    p68_mode_sysctl,"I","P6.8 independent G3D 5s quiet vs PMU/PLL monitor, 0 off 1 on");
 
 /* 0 baseline / 1 shadow / 2 real gate after long no-frame quiet /
  * 3 real gate only when >=1.5s no-frame/no-job, with wake cooldown.

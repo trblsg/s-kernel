@@ -26,6 +26,7 @@
 #include <pexpert/pexpert.h>
 #include <sys/hakios.input.h>
 #include <sys/systm.h>
+#include <sys/sysctl.h>
 #include <sys/hakios.exynos_soc.h>
 #include <sys/hakios.log.h>
 #include <sys/hakios.xnu.h>
@@ -59,6 +60,19 @@ static struct key {
 };
 #define NKEYS (sizeof(keys) / sizeof(keys[0]))
 
+/* P6.9: exact periodic GPIO DAT-read iterations and stable power transitions.
+ * These do NOT prove physical CPU wakeups; no GPIO mode or timing changes. */
+static uint64_t p69_key_polls, p69_key_power_down, p69_key_power_up;
+static uint64_t p69_key_held_polls;
+SYSCTL_DECL(_kern_hakios);
+SYSCTL_QUAD(_kern_hakios, OID_AUTO, p69_key_polls, CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,
+    &p69_key_polls, "P6.9 10ms GPIO key polling loop calls; not CPU wakeups");
+SYSCTL_QUAD(_kern_hakios, OID_AUTO, p69_key_power_down, CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,
+    &p69_key_power_down, "P6.9 debounced POWER key down transitions");
+SYSCTL_QUAD(_kern_hakios, OID_AUTO, p69_key_power_up, CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,
+    &p69_key_power_up, "P6.9 debounced POWER key up transitions");
+SYSCTL_QUAD(_kern_hakios, OID_AUTO, p69_key_held_polls, CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,
+    &p69_key_held_polls, "P6.9 10ms polls while POWER GPIO read held low");
 static vm_offset_t alive;
 
 static inline uint32_t
@@ -78,6 +92,9 @@ static void
 keys_poll(void)
 {
 	uint32_t gpa0 = rd(BANK_GPA0 + BANK_DAT), gpa2 = rd(BANK_GPA2 + BANK_DAT);
+	__atomic_fetch_add(&p69_key_polls, 1, __ATOMIC_RELAXED);
+	if (keys[0].usable && key_held(&keys[0], gpa0, gpa2))
+		__atomic_fetch_add(&p69_key_held_polls, 1, __ATOMIC_RELAXED);
 
 	for (unsigned i = 0; i < NKEYS; i++) {
 		struct key *k = &keys[i];
@@ -99,6 +116,8 @@ keys_poll(void)
 		}
 		if (now != k->held) {
 			k->held = now;
+			if (i == 0)
+				__atomic_fetch_add(now ? &p69_key_power_down : &p69_key_power_up, 1, __ATOMIC_RELAXED);
 			if (now) {
 				k->presses++;
 			}

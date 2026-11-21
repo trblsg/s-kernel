@@ -115,6 +115,7 @@ static uint64_t irqs;                 /* interrupts taken (for the minute line a
 /* P6.1: source-specific IRQ handler and 4ms polling invocation counts;
  * neither is proof that a particular CPU exited WFI/CPD. */
 static uint64_t p6_touch_irq_handlers, p6_touch_poll_checks;
+static uint64_t p69_touch_pin_low, p69_touch_event_reads;
 static thread_t irq_thread;
 static struct {
 	uint64_t events, downs;
@@ -184,6 +185,10 @@ SYSCTL_QUAD(_kern_hakios, OID_AUTO, p6_touch_irqs, CTLFLAG_RD | CTLFLAG_LOCKED |
     &p6_touch_irq_handlers, "P6 count of S6SY761 GIC handler invocations; IRQ mode only");
 SYSCTL_QUAD(_kern_hakios, OID_AUTO, p6_touch_polls, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN,
     &p6_touch_poll_checks, "P6 S6SY761 periodic IRQ-pin poll checks; fallback mode only");
+SYSCTL_QUAD(_kern_hakios, OID_AUTO, p69_touch_pin_low, CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,
+    &p69_touch_pin_low, "P6.9 fallback 4ms polls that observed IRQ GPIO low");
+SYSCTL_QUAD(_kern_hakios, OID_AUTO, p69_touch_event_reads, CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,
+    &p69_touch_event_reads, "P6.9 fallback poll rounds that invoked read_events");
 
 /* tell the CPU governor how many fingers are down: its touch boost is held while any is (gov_policy=2) */
 static void
@@ -610,6 +615,8 @@ touch_thread(void *arg, __unused wait_result_t wr_)
 		for (unsigned tick = 1;; tick++) {
 			__atomic_fetch_add(&p6_touch_poll_checks, 1, __ATOMIC_RELAXED);
 			for (int rounds = 0; rounds < 4 && irq_low(); rounds++) {
+				if (rounds == 0) __atomic_fetch_add(&p69_touch_pin_low, 1, __ATOMIC_RELAXED);
+				__atomic_fetch_add(&p69_touch_event_reads, 1, __ATOMIC_RELAXED);
 				read_events();
 			}
 			if (tick % MINUTE_TICKS == 0) {

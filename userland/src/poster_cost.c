@@ -39,6 +39,13 @@ static const char *targets[]={"backboardd","CollectionsPoster","PosterBoard","Sp
 #define P6_TARGET_COUNT (sizeof(targets)/sizeof(targets[0]))
 static int p6_last_pid[P6_TARGET_COUNT];
 static uint32_t p6_pid_changes[P6_TARGET_COUNT],p6_missed[P6_TARGET_COUNT];
+/* P6.2 fix: same-name processes can coexist. Previous code compared one
+ * singleton PID per NAME and falsely reported hundreds of restarts.
+ * Use bounded PID sets across complete census iterations instead. */
+#define P6_MAX_IDENTITIES 8
+static int p6_pid_prev[P6_TARGET_COUNT][P6_MAX_IDENTITIES];
+static int p6_pid_cur[P6_TARGET_COUNT][P6_MAX_IDENTITIES];
+static unsigned p6_pid_prev_n[P6_TARGET_COUNT],p6_pid_cur_n[P6_TARGET_COUNT];
 /* P6.1 source-specific counters from matching S9 kernel drivers, not
  * actual CPU wakeup-residency events. Missing sysctl stays visibly invalid. */
 static const char *const p6_source_nodes[]={
@@ -48,6 +55,21 @@ static const char *const p6_source_nodes[]={
 };
 static uint64_t p6_source_prev[6];
 static uint32_t p6_source_prev_valid;
+/* P6.9 source-specific periodic callback/IRQ pin/key counts; 1s snapshots
+ * only when p69_mode=1. First sample is intentionally invalid. */
+static const char *const p69_source_nodes[]={
+    "kern.hakios.p69_usb_disconnected_ticks",
+    "kern.hakios.p69_usb_link_stopped_ticks",
+    "kern.hakios.p69_touch_pin_low",
+    "kern.hakios.p69_touch_event_reads",
+    "kern.hakios.p69_key_polls",
+    "kern.hakios.p69_key_power_down",
+    "kern.hakios.p69_key_power_up",
+    "kern.hakios.p69_key_held_polls"
+};
+static uint64_t p69_source_prev[8],p69_prev_up;
+static uint32_t p69_source_prev_valid;
+static int p69_prev_phase=-1;
 static struct snap prev[MAX_MATCHES],now[MAX_MATCHES];
 static int prev_count;
 
@@ -229,6 +251,39 @@ p6_sample_driver_sources(int phase,uint64_t uptime)
         (unsigned long long)delta[2],(unsigned long long)delta[3],
         (unsigned long long)delta[4],(unsigned long long)delta[5],mask,baseline);
 }
+static void
+p69_sample_driver_sources(int phase,uint64_t uptime)
+{
+    uint64_t delta[8]={0};
+    uint32_t present=0,valid=0;
+    uint64_t span=(p69_prev_up && uptime>=p69_prev_up)?
+        uptime-p69_prev_up:0;
+    /* Interrupted/moved phases must restart the counter timebase. */
+    if(p69_prev_phase!=phase || span==0 || span>3)
+        p69_source_prev_valid=0;
+    for(unsigned i=0;i<8;i++){
+        uint64_t now=0;
+        size_t n=sizeof(now);
+        if(sysctlbyname(p69_source_nodes[i],&now,&n,NULL,0)!=0 || n!=sizeof(now)){
+            p69_source_prev_valid&=~(1u<<i);
+            continue;
+        }
+        present|=1u<<i;
+        if((p69_source_prev_valid&(1u<<i)) && now>=p69_source_prev[i]){
+            delta[i]=now-p69_source_prev[i];
+            valid|=1u<<i;
+        }
+        p69_source_prev[i]=now;
+        p69_source_prev_valid|=1u<<i;
+    }
+    p69_prev_up=uptime;p69_prev_phase=phase;
+    printf("p69-source: up=%llus phase=%d span_s=%llu usb_disconnected=%llu usb_stopped=%llu touch_low=%llu touch_reads=%llu key_polls=%llu key_down=%llu key_up=%llu key_held=%llu present_mask=%#x delta_valid=%#x source=callback_GPIO_poll_transition_not_CPU_idle_exit\n",
+        (unsigned long long)uptime,phase,(unsigned long long)span,
+        (unsigned long long)delta[0],(unsigned long long)delta[1],
+        (unsigned long long)delta[2],(unsigned long long)delta[3],
+        (unsigned long long)delta[4],(unsigned long long)delta[5],
+        (unsigned long long)delta[6],(unsigned long long)delta[7],present,valid);
+}
 static int selected(const char *name) {
     /* Darwin proc_name may truncate an extension's long executable name.
      * Treat PridePosterExtension / PridePosterExten as ONE census identity;
@@ -266,7 +321,15 @@ int main(int argc,char **argv) {
     uint64_t beginning=mach_absolute_time(),previous_at=beginning;
     setvbuf(stdout,NULL,_IOLBF,0);
     printf("poster_cost: enabled; %us intervals, %u samples; CPU is process time, not GPU time\n",interval,looks);
-    for(unsigned look=0;look<=looks;look++) {
+    /* Fixed 480 iteration budget used to expire early when P6 switched 5s
+     * sampling to 1s. poster_probe=1 is an explicit lab bootarg: retain
+     * the observer for >=4h wall time, independent of sampling cadence.
+     * No additional thread or CPU tuning; dormant mode uses 5s sleeps. */
+    const uint64_t budget_s=(uint64_t)interval*looks>14400ull?
+        (uint64_t)interval*looks:14400ull;
+    printf("poster_cost: lab wall-time budget=%llus (fixed-sample exhaustion disabled)\n",
+        (unsigned long long)budget_s);
+    for(unsigned look=0;;look++) {
         const int bytes=proc_listpids(PROC_ALL_PIDS,0,pids,sizeof(pids));
         const uint64_t at=mach_absolute_time();
         const double elapsed=(double)(at-previous_at);
@@ -275,6 +338,7 @@ int main(int argc,char **argv) {
         const unsigned long long uptime=(unsigned long long)(at*
             (double)base.numer/base.denom/1e9);
         int count=0;unsigned mask=0;
+        memset(p6_pid_cur_n,0,sizeof(p6_pid_cur_n));
         int p4_mode=p4_sysctl_int("kern.hakios.p4_mode",0);
         int p4_threads=p4_mode>0?p4_sysctl_int("kern.hakios.p4_threads",0):0;
         int p4_phase=p4_mode>0?p4_sysctl_int("kern.hakios.p4_phase",0):0;
@@ -286,6 +350,7 @@ int main(int argc,char **argv) {
         int p6_phase=p6_mode?p4_sysctl_int("kern.hakios.p6_phase",0):0;
         int p6_ca=p6_mode>0 && (p6_flags&16)!=0;
         int p6_wake=p6_mode>=2 && (p6_flags&1)!=0;
+        int p69_mode=p4_sysctl_int("kern.hakios.p69_mode",0);
         int selected_threads=p4_threads>p5_threads?p4_threads:p5_threads;
         if((p6_ca || p6_wake) && selected_threads<1)selected_threads=1;
         p4_n_after=0;
@@ -303,11 +368,14 @@ int main(int argc,char **argv) {
             int target_idx=selected(name);
             mask|=1u<<(unsigned)target_idx;
             if(p6_mode && (p6_flags&2)) {
-                if(p6_last_pid[target_idx] && p6_last_pid[target_idx]!=pids[k]) {
-                    p6_pid_changes[target_idx]++;
-                    printf("p6-churn: up=%llus phase=%d name=%s prev_pid=%d new_pid=%d changes=%u missing_samples=%u crash=unverified\n",
-                        uptime,p6_phase,name,p6_last_pid[target_idx],pids[k],
-                        p6_pid_changes[target_idx],p6_missed[target_idx]);
+                unsigned n=p6_pid_cur_n[target_idx];
+                if(n<P6_MAX_IDENTITIES){
+                    p6_pid_cur[target_idx][n]=pids[k];
+                    p6_pid_cur_n[target_idx]=n+1;
+                } else if(n==P6_MAX_IDENTITIES){
+                    printf("p6-identity-overflow: up=%llus phase=%d name=%s max=%u churn=unmeasurable\n",
+                        uptime,p6_phase,name,(unsigned)P6_MAX_IDENTITIES);
+                    p6_pid_cur_n[target_idx]=n+1; /* flagged, no churn inference */
                 }
                 p6_last_pid[target_idx]=pids[k];
                 p6_missed[target_idx]=0;
@@ -340,6 +408,41 @@ int main(int argc,char **argv) {
                     uptime,p6_phase,name,pids[k],cpu,csw<0?0:csw,faults<0?0:faults,
                     pageins<0?0:pageins,(mach>0?mach:0)+(unix>0?unix:0),old?1u:0u);
         }
+        if(p6_mode && (p6_flags&2)) {
+            for(size_t i=0;i<P6_TARGET_COUNT;i++){
+                unsigned old_n=p6_pid_prev_n[i],new_n=p6_pid_cur_n[i];
+                if(old_n>P6_MAX_IDENTITIES || new_n>P6_MAX_IDENTITIES){
+                    p6_pid_prev_n[i]=new_n;
+                    if(new_n<=P6_MAX_IDENTITIES)
+                        memcpy(p6_pid_prev[i],p6_pid_cur[i],new_n*sizeof(int));
+                    continue;
+                }
+                /* Report true set replacements only, never alternating
+                 * enumeration among concurrently live same-name PIDs. */
+                for(unsigned j=0;j<old_n;j++){
+                    int lost=p6_pid_prev[i][j],still=0;
+                    for(unsigned k=0;k<new_n;k++)
+                        if(p6_pid_cur[i][k]==lost)still=1;
+                    if(still)continue;
+                    for(unsigned k=0;k<new_n;k++){
+                        int added=p6_pid_cur[i][k],existed=0;
+                        for(unsigned m=0;m<old_n;m++)
+                            if(p6_pid_prev[i][m]==added)existed=1;
+                        if(!existed){
+                            p6_pid_changes[i]++;
+                            printf("p6-churn: up=%llus phase=%d name=%s prev_pid=%d new_pid=%d changes=%u missing_samples=%u crash=unverified set_checked=1\n",
+                                uptime,p6_phase,targets[i],lost,added,
+                                p6_pid_changes[i],p6_missed[i]);
+                            break;
+                        }
+                    }
+                }
+                p6_pid_prev_n[i]=new_n;
+                memcpy(p6_pid_prev[i],p6_pid_cur[i],new_n*sizeof(int));
+            }
+        } else {
+            memset(p6_pid_prev_n,0,sizeof(p6_pid_prev_n));
+        }
         if(look)for(size_t i=0;i<sizeof(targets)/sizeof(targets[0]);i++)
             if(!(mask&(1u<<i))) {
                 if(i<6)printf("poster_cost: %llu s: %s missing\n",t,targets[i]);
@@ -349,16 +452,19 @@ int main(int argc,char **argv) {
             }
         if(p6_mode && (p6_flags&1))
             p6_sample_driver_sources(p6_phase,uptime);
+        if(p69_mode>0)
+            p69_sample_driver_sources(p6_phase,uptime);
+        else {p69_source_prev_valid=0;p69_prev_phase=-1;p69_prev_up=0;}
         if(selected_threads>0) {
             memcpy(p4_before,p4_after,(size_t)p4_n_after*sizeof(p4_before[0]));
             p4_n_before=p4_n_after;
         }
         memcpy(prev,now,(size_t)count*sizeof(now[0]));
         prev_count=count;previous_at=at;
-        if(look==looks)break;
+        if(t>=budget_s)break;
         /* P5 burst mode can resolve 1–3s screen-on spikes, at opt-in
          * 1s sampling overhead; mode0/1 preserves the 5s P4 baseline. */
-        sleep(((p5_mode>=2 && p5_threads>0) || (p6_mode>=2 && (p6_flags&17)))?1:interval);
+        sleep(((p5_mode>=2 && p5_threads>0) || (p6_mode>=2 && (p6_flags&17)) || p69_mode>0)?1:interval);
     }
     return 0;
 }

@@ -180,6 +180,7 @@ static uint32_t g3d_lab_gate, g3d_lab_idle_ms = 10000, g3d_lab_mv = 950;
 static uint32_t g3d_lab_phase; /* 0..99, user-set phase marker; NO hardware effect */
 /* P5: runtime-only read-only display/GPU diagnostics; never a boot arg. */
 static uint32_t p5_mode, p5_phase, p5_threads;
+static uint32_t p68_mode; /* read-only PMU/quiet-window correlation, independent of real G3D gating */
 static uint32_t g3d_lab_rail_probe, g3d_lab_fault, g3d_lab_monitor_started;
 static uint32_t g3d_lab_off_count, g3d_lab_wake_count, g3d_lab_wake_failed;
 static uint32_t g3d_lab_shadow_count, g3d_lab_denied_count, g3d_lab_job_faults;

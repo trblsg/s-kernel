@@ -1,0 +1,24 @@
+p6: PHASE=10 up=100000ms flags=31 (marker only)
+cpufreq_gov: 100 s: lit 455 MHz asked load 0% | big 650 MHz asked load 8% | temp big 74.0 lit 73.2 C
+p6: PHASE=11 up=160000ms flags=17 (marker only)
+p66: armed up=160.100s phase=11 target_id_is_IOSurface_not_framebuffer_hash writes=0
+p66-ca: up=166.100s phase=11 n=60 draws=1320 clears=0 uploads=0 checks=180 same=180 changed=0 skipped=0 single_target=60 multi_target=0 target_unknown=0 stable_target=59 switched_target=0 input_candidates=60 max_streak=60 unchecked_frames=0 skipped_frames=0 changed_frames=0 no_draw=0 not_presented=60 flush=60 long_gap=0 output_pixels=unverified skip_applied=0
+p66-ca: up=172.100s phase=11 n=60 draws=1400 clears=0 uploads=1 checks=120 same=119 changed=1 skipped=15 single_target=60 multi_target=0 target_unknown=0 stable_target=60 switched_target=0 input_candidates=20 max_streak=14 unchecked_frames=10 skipped_frames=3 changed_frames=1 no_draw=0 not_presented=60 flush=60 long_gap=0 output_pixels=unverified skip_applied=0
+p6: PHASE=12 up=280000ms flags=17 (marker only)
+p67-cost: up=286.100s phase=12 n=60 calls=8400 total_wall_us=375000 draw_us=165000 texture_us=72000 target_us=97000 shader_us=5000 state_us=2000 other_us=1000 top_slot=0x220 top_us=164000 source=EAGL_CPU_wall_slot_inclusive_not_GPU_time
+p67-path: up=286.100s phase=12 bind_samples=85 bind_images=42 bind_checks=41 bind_dirty=0 bind_native_us=160 bind_lookup_us=40 bind_check_us=920 bind_upload_us=0 draw_samples=85 draw_native_us=10900 draw_other_us=1350 flush_raw_us=16500 source=sampled_1in16_no_extra_GL_calls
+p6: PHASE=13 up=400000ms flags=9 (marker only)
+p68-g3d: up=405000ms phase=13 domain=1 pll=1 mux=1 awake_hint=1 clock_hint_mhz=455 job_valid=1 frame_valid=1 job_age_ms=17 frame_age_ms=18 quiet10s=0 could_shadow=0 actual_off=0 off_count=0 wakes=0 wake_fail=0 fault=0 source=PMU_5s_readback_not_watts_or_true_idle_residency
+p68-g3d: up=410000ms phase=13 domain=1 pll=1 mux=1 awake_hint=1 clock_hint_mhz=455 job_valid=1 frame_valid=1 job_age_ms=15 frame_age_ms=16 quiet10s=0 could_shadow=0 actual_off=0 off_count=0 wakes=0 wake_fail=0 fault=0 source=PMU_5s_readback_not_watts_or_true_idle_residency
+p6: PHASE=14 up=520000ms flags=9 (marker only)
+exynos_keys: power down
+exynos_keys: power up
+GenericARMPE: the display off (iOS's power request)
+p68-g3d: up=535000ms phase=14 domain=1 pll=1 mux=1 awake_hint=1 clock_hint_mhz=260 job_valid=1 frame_valid=1 job_age_ms=15000 frame_age_ms=15000 quiet10s=1 could_shadow=1 actual_off=0 off_count=0 wakes=0 wake_fail=0 fault=0 source=PMU_5s_readback_not_watts_or_true_idle_residency
+p6: PHASE=15 up=640000ms flags=1 (marker only)
+p69-source: up=640s phase=15 span_s=0 usb_disconnected=0 usb_stopped=0 touch_low=0 touch_reads=0 key_polls=0 key_down=0 key_up=0 key_held=0 present_mask=0xff delta_valid=0 source=callback_GPIO_poll_transition_not_CPU_idle_exit
+p69-source: up=641s phase=15 span_s=1 usb_disconnected=0 usb_stopped=0 touch_low=0 touch_reads=0 key_polls=100 key_down=1 key_up=1 key_held=3 present_mask=0xff delta_valid=0xff source=callback_GPIO_poll_transition_not_CPU_idle_exit
+p6-source: up=641s phase=15 usb_ticks=495 usb_connected=495 usb_overlap=0 touch_irq=0 touch_poll=250 wifi_irq=0 present_mask=0x3f delta_valid=0x3f
+p69-source: up=642s phase=15 span_s=1 usb_disconnected=0 usb_stopped=0 touch_low=1 touch_reads=1 key_polls=100 key_down=0 key_up=0 key_held=0 present_mask=0xff delta_valid=0xff source=callback_GPIO_poll_transition_not_CPU_idle_exit
+p6: PHASE=16 up=762000ms flags=1 (marker only)
+cpufreq_gov: 762 s: lit 455 MHz asked load 0% | big 650 MHz asked load 9% | temp big 75.0 lit 73.8 C

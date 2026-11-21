@@ -1,5 +1,7 @@
 # S9 P6.1–P6.5 unified diagnostics — ONE matching BOOT + SYSTEM image
 
+**P6.6–P6.9 follow-up:** See [extended frame attribution, GL wall cost, G3D residency and periodic source diagnostics](s9-p6-extended-66-69.md). The extended features require a newer *matching* BOOT + SYSTEM build but then use runtime `sysctl` phase switches without further flashing. The original P6.1–P6.5 steps below remain available.
+
 Branch: `s9/p6-unified-wake-thermal-display-lab` (based on P5 `75cdc6d`).
 All P0/P1/P3/P4/P5/G3D implementation retained. No new kernel boot
 arguments. P6 enables at runtime using `kern.hakios.p6_*`.
