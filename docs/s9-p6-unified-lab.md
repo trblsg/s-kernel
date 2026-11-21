@@ -11,7 +11,7 @@ PMIC voltages, scheduler affinity, framebuffer dirty regions or frame skipping.*
 | Module | Actual code | Cannot claim |
 |---|---|---|
 | P6.1 wake-source *proxies* | In existing cpufreq governor thread: 5s window of per-core scheduler idle, governor loop count, actual touch/frame notifications, requests to wake DVFS worker; in existing `poster_cost`: `proc_taskinfo` context switches, sampled threads (backboardd, USB/haptics daemons, chronod, PridePoster) | No global GIC IRQ, timer-callout origin, WFI, CPU_SUSPEND or core power-off residency. Actual kernel USB/haptics polling loops are NOT instrumented in this overlay. Do not label `csw` as IRQ or wakeups |
-| P6.2 background process churn | PID transition and disappearance census for Poster/chronod/SpringBoard/backboardd/known daemons; per-process CPU, context switches, faults, syscalls | PID change is **not** proof of SIGSEGV; correlate with real raw crash diagnostics and TMU |
+| P6.2 background process churn | PID transition and disappearance census for Poster/chronod/SpringBoard/backboardd/known daemons; per-process CPU, context switches, faults, syscalls. Matches abbreviated `PridePoster*` executable names and recognizes launchd-confirmed `PridePosterExtension` SIGSEGV exits offline | PID change is **not** proof of SIGSEGV; only explicit launchd signal messages are treated as confirmed exits |
 | P6.3 thermal DVFS/parking **shadow** | Exynos9810 BIG threshold 83/96C, G3D 88/95C, 5C hysteresis; M3 parking *candidate* using LITTLE/BIG load, touch, frame cadence. Same already-sampled TMU, no additional sensor timer | No Samsung IPA, no applied rate, no hotplug; suggested state never changes the governor. Unknown TMU retains prior cap |
 | P6.4 G3D shadow and optional real screen-OFF gate | Reuses existing `g3d_lab_gate=1`/2; PMU domain/PLL via existing 5s independent sampler (not GPU MMIO), GPU worker owner, faults and wake latency via P5; actual mode2 requires separate explicit human opt-in | No promise of watt savings. An OFF screen doesn't automatically make PMU G3D OFF. Mode2 can stall on hardware and requires rollback |
 | P6.5 CA/EAGL correlation | Per60-frame EAGL wall time/draw/IOSurface sampling, CPU percent of CA display thread via libproc; P5 owner/queue statistics during same timeline | No private CA stack or true timer/vsync origin, no proof unchanged final pixels, no new GL work or frame omission |
@@ -184,7 +184,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/s9-p5-report.ps1 -Log 
 
 P6 parser tolerates missing/garbled serial records; it doesn't repair
 raw interleaved lines or treat them as valid. It prints per-phase wake
-proxies, suspected PID churn, shadow decisions, G3D PMU OFF sample counts,
+proxies, suspected PID churn, launchd-confirmed PridePoster SIGSEGV exits, shadow decisions, G3D PMU OFF sample counts,
 GPU errors, CA rendering proxies, and raw crash-related strings.
 
 ## Test and rollback rules

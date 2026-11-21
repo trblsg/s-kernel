@@ -195,6 +195,10 @@ p4_sample_threads(int pid,const char *procname,unsigned setting,int phase,
 }
 
 static int selected(const char *name) {
+    /* Darwin proc_name may truncate an extension's long executable name.
+     * Treat PridePosterExtension / PridePosterExten as ONE census identity;
+     * a PID transition still is not itself evidence of SIGSEGV. */
+    if(!strncmp(name,"PridePoster",11))return 6;
     for(size_t i=0;i<sizeof(targets)/sizeof(targets[0]);i++)
         if(!strcmp(name,targets[i]))return (int)i;
     return -1;
@@ -275,7 +279,7 @@ int main(int argc,char **argv) {
             }
             if(selected_threads>0 && (p4_thread_target(selected_threads,name) ||
                 (p6_wake && (!strcmp(name,"usbmuxd") || !strcmp(name,"hapticsd") ||
-                    !strcmp(name,"chronod") || !strcmp(name,"PridePoster"))))) {
+                    !strcmp(name,"chronod") || !strncmp(name,"PridePoster",11))))) {
                 p4_sample_threads(pids[k],name,(unsigned)selected_threads,
                     p6_mode?p6_phase:(p5_mode>0?p5_phase:p4_phase),uptime,
                     at>=previous_at?at-previous_at:0,

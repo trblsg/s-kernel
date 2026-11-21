@@ -7,6 +7,7 @@ $lines=[IO.File]::ReadAllLines((Resolve-Path -LiteralPath $Log).Path)
 $ph=@();$wake=@();$shadow=@();$proc=@();$churn=@();$missing=@()
 $ca=@();$threads=@();$g3d=@();$gpu=@();$crashes=@()
 $off=0;$on=0;$skipped=0
+$prideSegv=@()
 function Token([string]$s,[string]$key,[string]$default='0'){
     $m=[regex]::Match($s,'(?<![A-Za-z0-9_])'+[regex]::Escape($key)+'=([^\s]+)')
     if($m.Success){return $m.Groups[1].Value}
@@ -88,6 +89,10 @@ foreach($s in $lines){
         } elseif($s -match 'GenericARMPE: the display on'){
             $on++
         }
+        # This is confirmed launchd-exit evidence, unlike a PID transition.
+        if($s -match 'com\.apple\.PridePoster\.PridePosterExtension \[(\d+)\].*exited due to SIGSEGV'){
+            $prideSegv += [int]$Matches[1]
+        }
         if($s -match '(?i)(SIGSEGV|EXC_BAD_ACCESS|fatal signal|crash report)' -and
             $s -match '(?i)(PridePoster|Poster|backboardd|SpringBoard|chronod)'){
             $crashes+=$s.Substring(0,[Math]::Min(240,$s.Length))
@@ -129,7 +134,8 @@ foreach($phase in ($ph|Select-Object -ExpandProperty p -Unique)){
     if($j.Count){Write-Output ("  GPU: completedJobs=$(Sum $j 'jobs') maxPeakJobs1s=$(($j|Measure-Object peak -Maximum).Maximum) jobErrors=$(Sum $j 'error') dropped=$(Sum $j 'dropped')")}
 }
 Write-Output ''
-Write-Output ("CRASH-RELATED RAW LINES=$($crashes.Count) (signal strings do NOT automatically prove process identity)")
+Write-Output ("CONFIRMED PridePoster SIGSEGV exits in launchd log=$($prideSegv.Count); pids=$($prideSegv -join ',')")
+Write-Output ("CRASH-RELATED RAW LINES=$($crashes.Count) (other signal strings do NOT automatically prove process identity)")
 foreach($line in ($crashes|Select-Object -First 15)){Write-Output ('  '+$line)}
 Write-Output 'NOT MEASURED: physical watts/voltage, GIC IRQ/callout origin, actual CPU deep-state residency, final framebuffer pixel identity.'
 Write-Output 'Compare A1/B1/B2/B3/B4/B5/B6/A2 under equivalent initial temperatures. No gate OFF result unless PMU domain=0; a frame gap alone is insufficient.'

@@ -49,6 +49,8 @@ jobs:
           assert 'g3d_idle_gate();' in gpu
           assert 'g3d_lab_gpu_safe' in gpu and 'g3d_lab_protection_ok' in gpu
           assert 'p6-churn:' in p and 'crash=unverified' in p
+          assert 'strncmp(name,"PridePoster",11)' in p
+          assert 'CONFIRMED PridePoster SIGSEGV exits' in Path('tools/s9-p6-report.ps1').read_text()
           assert 'p6-ca-thread:' in p and 'sampled_libproc_no_stack' in p
           assert 'p6-ca-gl:' in e and 'EAGL_wall_time_no_CA_stack' in e
           assert 'GateGuard' in serial and 'EnableActualG3D' in serial
@@ -87,7 +89,8 @@ jobs:
             'p6: PHASE=2 up=100000ms flags=1',
             'p6-wake: up=105000ms phase=2 span_ms=5000 gov_loops=125 boost_requests=1 touches=1 presents=50 idle_lit=91 idle_big=95 missing=0',
             'p6: PHASE=3 up=110000ms flags=3',
-            'p6-churn: up=115s phase=3 name=PridePoster prev_pid=100 new_pid=101 changes=1 missing_samples=0 crash=unverified',
+            'p6-churn: up=115s phase=3 name=PridePosterExtension prev_pid=100 new_pid=101 changes=1 missing_samples=0 crash=unverified',
+            'com.apple.xpc.launchd|2026-11-21 05:32:11.589808 (pid/137/com.apple.PridePoster.PridePosterExtension [101]) <Notice>: exited due to SIGSEGV | sent by exc handler[101]',
             'p6-proc: up=115s phase=3 name=PridePoster pid=101 cpu_pct=50.00 csw=120 faults=2 pageins=0 syscalls=200 valid_delta=1',
             'p6: PHASE=4 up=120000ms flags=5',
             'p6-shadow: up=125000ms phase=4 big_mc=83000 gpu_mc=88000 m3_load=10 lit_load=11 mhz=455/962 frames=50 gap_ms=100 park_candidate=1 big_step=1 gpu_step=1 changed=1 writes=0',
@@ -99,6 +102,7 @@ jobs:
           if($LASTEXITCODE -ne 0){throw 'P6 report failed'}
           $text=$report -join "`n"
           foreach($marker in @('PHASE=2:', 'WAKE-PROXY:', 'PID-CHURN PridePoster',
-            'SHADOW:', 'CA GL:', 'skipped-interleaved=0', 'NOT MEASURED:')){
+            'SHADOW:', 'CA GL:', 'CONFIRMED PridePoster SIGSEGV exits in launchd log=1',
+            'skipped-interleaved=0', 'NOT MEASURED:')){
             if(-not $text.Contains($marker)){throw "P6 report missing $marker"}
           }
