@@ -157,6 +157,24 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Preflight-only dry-run failed' }
           if (($minimal -join "`n").Contains('A1 screen ON baseline')) { throw 'Preflight-only mode attempted A1 phase' }
           Write-Output 'P5 direct USB CDC-ACM COM125 preview, ACK gate, log and preflight-only checks PASS (no device attached)'
+      - name: P5 offline report tolerates interrupted UART/USB log lines and still classifies OFF domain state
+        shell: pwsh
+        run: |
+          $testLog = Join-Path $env:RUNNER_TEMP 'p5-interleaved.log'
+          @'
+          p5: PHASE=5 up=1000ms marker-only
+          p5-gpu: up=8000ms phase=5 mode=2 domain=1 pmu_status=0x10000f awake=1 pll_en=1 pll_stable=1 mux=1 clock_hint=260MHz frame_age_ms=7000 job_age_ms=7000 submitted=0 completed=0 fragment=0 vertex=0 errors=0 dropped=0 owners=0 overflow=0 queue_peak=0 peak_jobs_1s=0 worker_wait_us_avg=0 worker_run_us_avg=0 deep=unmeasured voltage=unmeasured
+          p5-gl-burst: up=8.500s phase=5 n=60 min_gap_us=94490 max_gap_ms=104 max_draw=fps: 10 presented, 10 drawn
+          p5: PHASE=6 up=10000ms marker-only
+          p5-gpu: up=12000ms phase=6 mode=2 domain=1 pmu_status=0x10000f awake=1 pll_en=1 pll_stable=1 mux=1 clock_hint=455MHz frame_age_ms=0 job_age_ms=0 submitted=3348 completed=3348 fragment=1674 vertex=1674 errors=0 dropped=0 owners=1 overflow=0 queue_peak=19 peak_jobs_1s=1856 worker_wait_us_avg=1236 worker_run_us_avg=253 deep=unmeasured voltage=unmeasured
+          '@ | Set-Content -LiteralPath $testLog -Encoding ascii
+          $result = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/s9-p5-report.ps1 -Log $testLog 2>&1
+          if ($LASTEXITCODE -ne 0) { throw ('P5 offline parser failed: ' + ($result -join '; ')) }
+          $out = $result -join "`n"
+          foreach ($required in @('Skipped 1 interrupted/non-numeric', 'OFF_QUIET sampleN=1', 'domain_on=1/1', 'pll_enabled_stable=1/1', 'WAKE_GPU first_5s_jobs=3348', 'peak_jobs_1s=1856')) {
+            if (-not $out.Contains($required)) { throw ('Missing P5 offline parse guard: ' + $required) }
+          }
+          Write-Output 'P5 offline report: corrupted line skipped; OFF G3D and wake burst correctly preserved'
 
   ios-syntax:
     runs-on: macos-15

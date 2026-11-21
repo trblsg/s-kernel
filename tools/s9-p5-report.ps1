@@ -11,7 +11,7 @@ $burst=[Collections.Generic.List[object]]::new()
 $display=[Collections.Generic.List[object]]::new()
 $threads=[Collections.Generic.List[object]]::new()
 $bb=[Collections.Generic.List[object]]::new()
-$off=0;$on=0
+$off=0;$on=0;$invalidBurst=0
 function F([string]$s,[string]$key,[string]$default='0') {
  $m=[regex]::Match($s,'(?<![A-Za-z0-9_])'+[regex]::Escape($key)+'=([^\s]+)')
  if($m.Success){return $m.Groups[1].Value}
@@ -35,6 +35,8 @@ foreach($s in $lines){
   $gpu.Add([pscustomobject]@{
    t=[double]$Matches[1]/1000;ph=[int]$Matches[2];mode=[int]$Matches[3]
    domain=[int](F $s 'domain');awake=[int](F $s 'awake')
+   pll=[int](F $s 'pll_en');pllStable=[int](F $s 'pll_stable')
+   status=(F $s 'pmu_status')
    clock=[int]((F $s 'clock_hint').Replace('MHz',''))
    frameAge=[long](F $s 'frame_age_ms');jobAge=[long](F $s 'job_age_ms')
    submitted=[long](F $s 'submitted');jobs=[long](F $s 'completed')
@@ -69,9 +71,22 @@ foreach($s in $lines){
   })
  }
  elseif($s -match '^p5-gl-burst: up=([\d.]+)s phase=(\d+)'){
+  # USB/kernel log lines can interleave under concurrent producers. A genuine
+  # COM125 trace has 'max_draw=fps: 10 presented...' where a p5-gl-burst line
+  # was interrupted by an fps log. Reject this ONE broken record rather than
+  # treating 'fps:' as an integer or aborting the entire phase report.
+  $burstTime=[double]::Parse($Matches[1],[Globalization.CultureInfo]::InvariantCulture)
+  $burstPhase=[int]$Matches[2]
+  if((F $s 'max_draw') -notmatch '^\d+$' -or
+     (F $s 'max_uploads') -notmatch '^\d+$' -or
+     (F $s 'max_changed') -notmatch '^\d+$' -or
+     (F $s 'min_gap_us') -notmatch '^\d+$' -or
+     (F $s 'max_gap_ms') -notmatch '^\d+$'){
+   $invalidBurst++
+   continue
+  }
   $burst.Add([pscustomobject]@{
-   t=[double]::Parse($Matches[1],[Globalization.CultureInfo]::InvariantCulture)
-   ph=[int]$Matches[2];maxDraw=[int](F $s 'max_draw')
+   t=$burstTime;ph=$burstPhase;maxDraw=[int](F $s 'max_draw')
    maxUpload=[int](F $s 'max_uploads');changed=[int](F $s 'max_changed')
    maxGapMs=[long](F $s 'max_gap_ms');minGapUs=[long](F $s 'min_gap_us')
   })
@@ -102,6 +117,7 @@ foreach($s in $lines){
 }
 Write-Output ('S9 P5 report input='+$Log+' lines='+$lines.Count)
 Write-Output ('counts phases='+$ph.Count+' gpu='+$gpu.Count+' clients='+$owners.Count+' gl='+$gl.Count+' gl_burst='+$burst.Count+' display_thread='+$display.Count+' thread_lines='+$threads.Count+' bb='+$bb.Count+' displayOFF='+$off+' displayON='+$on)
+if($invalidBurst){Write-Warning ('Skipped '+$invalidBurst+' interrupted/non-numeric p5-gl-burst record(s); raw USB log remains unchanged.')}
 Write-Output 'WARN: GPU owner is a driver client number, not a confirmed PID. Worker-run includes GPU wait and kernel overhead, not pure shader cycles.'
 Write-Output 'WARN: P5 GL frame-end does not reveal original CoreAnimation timer/VSYNC trigger; checked IOSurfaces are a sparse sample and unchanged input does not imply identical pixels.'
 Write-Output 'WARN: libproc thread CPU percentage assumes nanosecond counters on this S9 build, calibrate; run state is snapshot NOT wakeup count. CMU/PMU observation is not watt measurement.'
@@ -138,5 +154,31 @@ for($i=0;$i -lt $phases.Count;$i++){
   $best=$br|Sort-Object maxDraw -Descending|Select-Object -First 1
   Write-Output ('  WAKE_BURST max_draw/frame='+$best.maxDraw+' max_upload='+$best.maxUpload+' max_changed='+$best.changed+' min_gap_us='+$best.minGapUs)
  }
+}
+# OFF-quiet summary must not classify all of phase 5 as screen OFF: phase 5
+# includes human button latency and the last few ON frames. Use sustained
+# zero-job, old-job-age samples only; power domain and PLL are PMU/CMU reads,
+# whereas clock_hint is NOT an independent physical frequency measurement.
+$quiet=@($gpu|Where-Object{$_.ph -eq 5 -and $_.jobs -eq 0 -and $_.jobAge -ge 5000})
+if($quiet.Count){
+ $quietSpan=[math]::Round(($quiet[-1].t-$quiet[0].t),1)
+ $quietDomainOn=@($quiet|Where-Object{$_.domain -eq 1 -and $_.awake -eq 1}).Count
+ $quietPllOn=@($quiet|Where-Object{$_.pll -eq 1 -and $_.pllStable -eq 1}).Count
+ $quietClock=($quiet|Group-Object clock|Sort-Object Count -Descending|Select-Object -First 1).Name
+ Write-Output ('OFF_QUIET sampleN='+$quiet.Count+' span_s='+$quietSpan+
+  ' domain_on='+$quietDomainOn+'/'+$quiet.Count+
+  ' pll_enabled_stable='+$quietPllOn+'/'+$quiet.Count+
+  ' zero_job_samples='+$quiet.Count+' clock_HINT_MHz='+$quietClock+
+  ' note=not_gated_in_sampled_idle;_no_watts_or_off_core_MMIO')
+}
+$firstWake=@($gpu|Where-Object{$_.ph -eq 6}|Sort-Object t|Select-Object -First 1)
+if($firstWake.Count){
+ Write-Output ('WAKE_GPU first_5s_jobs='+$firstWake[0].jobs+
+  ' peak_jobs_1s='+$firstWake[0].peak+
+  ' queue_depth='+$firstWake[0].maxQueue+
+  ' worker_wait_us_avg='+$firstWake[0].wait+
+  ' domain='+$firstWake[0].domain+
+  ' errors='+$firstWake[0].errors+
+  ' note=first_snapshot_after_phase6;_window_may_overlap_wake')
 }
 Write-Output 'SAFE EXIT: sysctl kern.hakios.p5_mode=0 ; sysctl kern.hakios.p5_threads=0'
