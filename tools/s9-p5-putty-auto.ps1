@@ -149,9 +149,15 @@ function Send-LabCommand([string]$Command) {
     # Commands contain only SendKeys-literal ASCII letters/digits/dots/underscores,
     # equals and spaces. No SendKeys metacharacters or clipboard injection.
     foreach ($char in $Command.ToCharArray()) {
-        Focus-VerifiedPutty
+        if (-not [Ioss9P5PuttyNative]::IsWindow($script:TargetHandle) -or
+            [Ioss9P5PuttyNative]::GetForegroundWindow() -ne $script:TargetHandle) {
+            throw 'PuTTY lost focus during slow typing; aborting without further keys.'
+        }
         [System.Windows.Forms.SendKeys]::SendWait([string]$char)
         Start-Sleep -Milliseconds $KeyDelayMs
+    }
+    if ([Ioss9P5PuttyNative]::GetForegroundWindow() -ne $script:TargetHandle) {
+        throw 'PuTTY lost focus before Enter; aborting.'
     }
     [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
     Start-Sleep -Milliseconds $CommandGapMs
