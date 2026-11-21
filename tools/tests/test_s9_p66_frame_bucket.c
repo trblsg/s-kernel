@@ -5,7 +5,8 @@
 #include "../../userland/src/s9_p66_frame_bucket.h"
 int main(void){
     struct s9_p66_bucket b;
-    struct s9_p66_event e={0};
+    struct s9_p66_event e;
+    memset(&e, 0, sizeof(e)); /* C11/C++17 -Wmissing-field-initializers safe */
     s9_p66_reset(&b);
     e.target_id=101;e.targets=1;e.draws=23;e.checked=3;
     e.same=3;e.presented=1;e.end_reason=1;
