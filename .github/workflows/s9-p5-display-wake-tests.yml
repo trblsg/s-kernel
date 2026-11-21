@@ -91,10 +91,31 @@ jobs:
       - name: Compile P5 GLES summary implementation as iOS ARM64 syntax
         run: |
           SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          # The normal SIOS GL build generates eagl_gen.h from Mesa's
+          # gl.xml/exported-gl.txt (userland/build.sh). A bare checkout
+          # does not contain this file, so generate a syntax-only table
+          # from the Khronos XML and the gl* calls already present in
+          # eagl.c. This is NOT a linked or exact-Mesa userland build.
+          curl --fail --location --retry 3 --retry-delay 2 \
+            https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/xml/gl.xml \
+            --output "$RUNNER_TEMP/p5-gl.xml"
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          source=Path('userland/src/eagl.c').read_text()
+          names=sorted(set(re.findall(r'(?<![A-Za-z0-9_])(gl[A-Z][A-Za-z0-9_]*)\s*\(',source)))
+          Path('p5-exported-gl.txt').write_text('\n'.join(names)+'\n')
+          print('P5 CI syntax-table exported symbols:',len(names))
+          PY
+          python3 userland/mkeagl.py \
+            userland/src/eagl_slots.txt "$RUNNER_TEMP/p5-gl.xml" \
+            p5-exported-gl.txt userland/src/eagl.c \
+            > "$RUNNER_TEMP/eagl_gen.h"
           set +e
           xcrun clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
             -std=gnu11 -Wall -Wextra -Wno-deprecated-declarations \
-            -Iuserland/src -fsyntax-only userland/src/eagl.c >p5-eagl-compiler.txt 2>&1
+            -Iuserland/src -I"$RUNNER_TEMP" -fsyntax-only \
+            userland/src/eagl.c >p5-eagl-compiler.txt 2>&1
           status=$?
           cat p5-eagl-compiler.txt
           python3 - <<'PY'
