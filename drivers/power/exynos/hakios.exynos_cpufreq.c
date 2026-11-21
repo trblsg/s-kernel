@@ -291,6 +291,7 @@ static struct {
 
 SYSCTL_DECL(_kern_hakios);
 #include "hakios.p4_cpu_lab.h" /* P4: scheduler-idle and frame cadence, read-only */
+#include "hakios.p6_lab.h" /* P6: integrated opt-in wake-proxy and policy shadow */
 
 static bool
 boost_on(uint64_t last, uint64_t span, uint64_t now)
@@ -306,6 +307,8 @@ hakios_exynos_cpufreq_touch(void)
 
 	if (__atomic_load_n(&p4_mode, __ATOMIC_RELAXED) != 0)
 		__atomic_fetch_add(&p4_touch_count, 1, __ATOMIC_RELAXED);
+	if (__atomic_load_n(&p6_mode, __ATOMIC_RELAXED) != 0)
+		__atomic_fetch_add(&p6_touch_events, 1, __ATOMIC_RELAXED);
 	if (!__atomic_load_n(&gov_running, __ATOMIC_ACQUIRE) || boost_span == 0) {
 		return;
 	}
@@ -314,6 +317,8 @@ hakios_exynos_cpufreq_touch(void)
 	__atomic_fetch_add(&touch_count, 1, __ATOMIC_RELAXED);
 	if (!boost_on(before, boost_span, now)) {
 		__atomic_store_n(&ramp_began, now, __ATOMIC_RELEASE);
+		if (__atomic_load_n(&p6_mode,__ATOMIC_RELAXED))
+			__atomic_fetch_add(&p6_boost_requests,1,__ATOMIC_RELAXED);
 		(void)thread_wakeup_prim((event_t)&boost_event, FALSE, THREAD_AWAKENED);
 	}
 }
@@ -349,6 +354,8 @@ hakios_exynos_cpufreq_fingers(uint32_t down)
 	}
 	if (down > before) {
 		__atomic_store_n(&finger_edge, now, __ATOMIC_RELEASE);
+		if (__atomic_load_n(&p6_mode,__ATOMIC_RELAXED))
+			__atomic_fetch_add(&p6_boost_requests,1,__ATOMIC_RELAXED);
 		(void)thread_wakeup_prim((event_t)&boost_event, FALSE, THREAD_AWAKENED);
 	}
 }
@@ -359,6 +366,8 @@ hakios_exynos_cpufreq_frame(void)
 {
 	uint64_t now, before;
 
+	if (__atomic_load_n(&p6_mode,__ATOMIC_RELAXED))
+		__atomic_fetch_add(&p6_frame_events,1,__ATOMIC_RELAXED);
 	if (__atomic_load_n(&p4_mode, __ATOMIC_RELAXED) != 0) {
 		uint64_t tick = mach_absolute_time();
 		uint64_t old = __atomic_exchange_n(&p4_frame_prev, tick, __ATOMIC_RELAXED);
@@ -379,6 +388,8 @@ hakios_exynos_cpufreq_frame(void)
 	}
 	__atomic_fetch_add(&frame_count, 1, __ATOMIC_RELAXED);
 	if (!boost_on(before, frame_span, now)) {
+		if (__atomic_load_n(&p6_mode,__ATOMIC_RELAXED))
+			__atomic_fetch_add(&p6_boost_requests,1,__ATOMIC_RELAXED);
 		(void)thread_wakeup_prim((event_t)&boost_event, FALSE, THREAD_AWAKENED);
 	}
 }
@@ -1366,6 +1377,10 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 		}
 		measure(now - then > 0 ? now - then : 1);
 		p4_cpu_probe(now); /* on-demand 5s read-only, no new kernel thread */
+		if (__atomic_load_n(&p6_mode,__ATOMIC_RELAXED)) {
+			__atomic_fetch_add(&p6_windows,1,__ATOMIC_RELAXED);
+			p6_probe(now);
+		}
 		absolutetime_to_nanoseconds(now - then, &ns);
 		span_ms = ns / NSEC_PER_MSEC;
 		then = now;

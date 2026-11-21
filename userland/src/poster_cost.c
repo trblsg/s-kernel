@@ -35,7 +35,10 @@ int proc_pidinfo(int, int, uint64_t, void *, int);
 int proc_name(int, void *, uint32_t);
 
 struct snap {int pid;char name[64];struct proc_taskinfo info;};
-static const char *targets[]={"backboardd","CollectionsPoster","PosterBoard","SpringBoard","chronod","poster_cost"};
+static const char *targets[]={"backboardd","CollectionsPoster","PosterBoard","SpringBoard","chronod","poster_cost","PridePoster","PhotosPosterProvider","GradientPosterExtension","EmojiPosterExtension","usbmuxd","hapticsd","powerlogd","progressd","wifid"};
+#define P6_TARGET_COUNT (sizeof(targets)/sizeof(targets[0]))
+static int p6_last_pid[P6_TARGET_COUNT];
+static uint32_t p6_pid_changes[P6_TARGET_COUNT],p6_missed[P6_TARGET_COUNT];
 static struct snap prev[MAX_MATCHES],now[MAX_MATCHES];
 static int prev_count;
 
@@ -99,7 +102,7 @@ p4_thread_target(int setting,const char *name)
 }
 static void
 p4_sample_threads(int pid,const char *procname,unsigned setting,int phase,
-    uint64_t uptime,uint64_t elapsed_ticks,double mach_to_ns,int warmup,int p5_mode)
+    uint64_t uptime,uint64_t elapsed_ticks,double mach_to_ns,int warmup,int p5_mode,int p6_ca,int p6_wake)
 {
     const int length=proc_pidinfo(pid,PROC_PIDLISTTHREADS,0,p4_thread_ids,sizeof(p4_thread_ids));
     if(length<=0){
@@ -130,7 +133,7 @@ p4_sample_threads(int pid,const char *procname,unsigned setting,int phase,
         char thread_name[sizeof(ti.name)+1];
         memcpy(thread_name,ti.name,sizeof(ti.name));
         thread_name[sizeof(ti.name)]=0; /* libproc may return a full non-NUL array */
-        if(p5_mode && !strcmp(procname,"backboardd") &&
+        if((p5_mode || p6_ca) && !strcmp(procname,"backboardd") &&
             strstr(thread_name,"coreanimation.display.primary")) {
             double ns=(double)elapsed_ticks*mach_to_ns;
             printf("p5-display-thread: up=%llus phase=%d tid=%llu u_ns=%llu s_ns=%llu cpu_if_ns=%.2f run=%d policy=%d curpri=%d sleep_hint=%d source=libproc_5s_or_1s_not_wakeup_trace\n",
@@ -139,6 +142,12 @@ p4_sample_threads(int pid,const char *procname,unsigned setting,int phase,
                 (unsigned long long)du,(unsigned long long)ds,
                 ns>0?100.0*(double)(du+ds)/ns:0.0,ti.run_state,
                 ti.policy,ti.curpri,ti.sleep_time);
+            if(p6_ca)
+                printf("p6-ca-thread: up=%llus phase=%d pid=%d tid=%llu cpu_ns=%.2f run=%d sleep_hint=%d policy=%d priority=%d source=sampled_libproc_no_stack_or_wakeup_origin\n",
+                    (unsigned long long)uptime,phase,pid,
+                    (unsigned long long)p4_thread_ids[k],
+                    ns>0?100.0*(double)(du+ds)/ns:0.0,
+                    ti.run_state,ti.sleep_time,ti.policy,ti.curpri);
         }
         if((du || ds) && hot<P4_MAX_TIDS){
             struct p4_thread_hot *h=&p4_hot[hot++];
@@ -153,6 +162,10 @@ p4_sample_threads(int pid,const char *procname,unsigned setting,int phase,
         }
     }
     qsort(p4_hot,hot,sizeof(p4_hot[0]),p4_hot_compare);
+    if(p6_wake)
+        printf("p6-thread-snapshot: up=%llus phase=%d name=%s pid=%d listed=%u read=%u active_state3=%u other_states=%u missing=%u source=sampled_states_not_wakeups\n",
+            (unsigned long long)uptime,phase,procname,pid,count,read,
+            active_states,asleep_states,missing);
     if(p5_mode)
         printf("p5-thread-state: up=%llus phase=%d name=%s pid=%d listed=%u read=%u active_state3=%u other_states=%u missing=%u source=sampled_run_state_not_wakeup_count\n",
             (unsigned long long)uptime,phase,procname,pid,count,read,
@@ -229,7 +242,13 @@ int main(int argc,char **argv) {
         int p5_mode=p4_sysctl_int("kern.hakios.p5_mode",0);
         int p5_threads=p5_mode>0?p4_sysctl_int("kern.hakios.p5_threads",0):0;
         int p5_phase=p5_mode>0?p4_sysctl_int("kern.hakios.p5_phase",0):0;
+        int p6_mode=p4_sysctl_int("kern.hakios.p6_mode",0);
+        int p6_flags=p6_mode?p4_sysctl_int("kern.hakios.p6_flags",0):0;
+        int p6_phase=p6_mode?p4_sysctl_int("kern.hakios.p6_phase",0):0;
+        int p6_ca=p6_mode>0 && (p6_flags&16)!=0;
+        int p6_wake=p6_mode>=2 && (p6_flags&1)!=0;
         int selected_threads=p4_threads>p5_threads?p4_threads:p5_threads;
+        if((p6_ca || p6_wake) && selected_threads<1)selected_threads=1;
         p4_n_after=0;
         if(selected_threads==0)p4_n_before=0;
         for(int k=0;k<(bytes>0?bytes/(int)sizeof(int):0) && count<MAX_MATCHES;k++) {
@@ -242,13 +261,26 @@ int main(int argc,char **argv) {
             const struct snap *old=previous(pids[k],name);
             struct snap *current=&now[count++];
             current->pid=pids[k];memcpy(current->name,name,sizeof(name));current->info=info;
-            mask|=1u<<(unsigned)selected(name);
-            if(selected_threads>0 && p4_thread_target(selected_threads,name)) {
+            int target_idx=selected(name);
+            mask|=1u<<(unsigned)target_idx;
+            if(p6_mode && (p6_flags&2)) {
+                if(p6_last_pid[target_idx] && p6_last_pid[target_idx]!=pids[k]) {
+                    p6_pid_changes[target_idx]++;
+                    printf("p6-churn: up=%llus phase=%d name=%s prev_pid=%d new_pid=%d changes=%u missing_samples=%u crash=unverified\n",
+                        uptime,p6_phase,name,p6_last_pid[target_idx],pids[k],
+                        p6_pid_changes[target_idx],p6_missed[target_idx]);
+                }
+                p6_last_pid[target_idx]=pids[k];
+                p6_missed[target_idx]=0;
+            }
+            if(selected_threads>0 && (p4_thread_target(selected_threads,name) ||
+                (p6_wake && (!strcmp(name,"usbmuxd") || !strcmp(name,"hapticsd") ||
+                    !strcmp(name,"chronod") || !strcmp(name,"PridePoster"))))) {
                 p4_sample_threads(pids[k],name,(unsigned)selected_threads,
-                    p5_mode>0?p5_phase:p4_phase,uptime,
+                    p6_mode?p6_phase:(p5_mode>0?p5_phase:p4_phase),uptime,
                     at>=previous_at?at-previous_at:0,
                     (double)base.numer/(double)base.denom,
-                    !look || p4_n_before==0,p5_mode>0 && p5_threads>0);
+                    !look || p4_n_before==0,p5_mode>0 && p5_threads>0,p6_ca,p6_wake);
             }
             if(!look)continue;
             const uint64_t used=info.pti_total_user+info.pti_total_system;
@@ -264,9 +296,18 @@ int main(int argc,char **argv) {
                 (unsigned long long)(info.pti_virtual_size>>20),
                 faults<0?0:faults,pageins<0?0:pageins,csw<0?0:csw,mach<0?0:mach,unix<0?0:unix,
                 uptime,old?"sample":"new-pid");
+            if(p6_mode && (p6_flags&3))
+                printf("p6-proc: up=%llus phase=%d name=%s pid=%d cpu_pct=%.2f csw=%d faults=%d pageins=%d syscalls=%d valid_delta=%u source=process_counters_not_IRQ\n",
+                    uptime,p6_phase,name,pids[k],cpu,csw<0?0:csw,faults<0?0:faults,
+                    pageins<0?0:pageins,(mach>0?mach:0)+(unix>0?unix:0),old?1u:0u);
         }
         if(look)for(size_t i=0;i<sizeof(targets)/sizeof(targets[0]);i++)
-            if(!(mask&(1u<<i)))printf("poster_cost: %llu s: %s missing\n",t,targets[i]);
+            if(!(mask&(1u<<i))) {
+                if(i<6)printf("poster_cost: %llu s: %s missing\n",t,targets[i]);
+                if(p6_mode && (p6_flags&2) && p6_last_pid[i] && ++p6_missed[i]==1)
+                    printf("p6-missing: up=%llus phase=%d name=%s last_pid=%d missing=1 crash=unverified\n",
+                        uptime,p6_phase,targets[i],p6_last_pid[i]);
+            }
         if(selected_threads>0) {
             memcpy(p4_before,p4_after,(size_t)p4_n_after*sizeof(p4_before[0]));
             p4_n_before=p4_n_after;
@@ -276,7 +317,7 @@ int main(int argc,char **argv) {
         if(look==looks)break;
         /* P5 burst mode can resolve 1–3s screen-on spikes, at opt-in
          * 1s sampling overhead; mode0/1 preserves the 5s P4 baseline. */
-        sleep(p5_mode>=2 && p5_threads>0?1:interval);
+        sleep(((p5_mode>=2 && p5_threads>0) || (p6_mode>=2 && (p6_flags&17)))?1:interval);
     }
     return 0;
 }

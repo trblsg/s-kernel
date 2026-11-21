@@ -1,0 +1,104 @@
+name: S9 P6 Unified Wake / Thermal / G3D / CA Lab
+on:
+  push:
+    branches: [s9/p6-unified-wake-thermal-display-lab]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: P6 shadow thermal and CPU parking classifiers C11/C++17 UBSan
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror -pedantic -fsanitize=undefined tools/tests/test_s9_p6_policy.c -o /tmp/p6_c
+          /tmp/p6_c
+          c++ -x c++ -std=c++17 -O2 -Wall -Wextra -Werror -pedantic -fsanitize=undefined tools/tests/test_s9_p6_policy.c -o /tmp/p6_cpp
+          /tmp/p6_cpp
+      - name: Retain P5, P4 and G3D regressions
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror -pedantic -fsanitize=undefined tools/tests/test_s9_p5_frame_lab.c -o /tmp/p5
+          /tmp/p5
+          cc -std=c11 -O2 -Wall -Wextra -Werror -pedantic -fsanitize=undefined tools/tests/test_s9_p4_idle_lab.c -o /tmp/p4
+          /tmp/p4
+          cc -std=c11 -O2 -Wall -Wextra -Werror -pedantic tools/tests/test_s9_g3d_lab_policy.c -o /tmp/g3d
+          /tmp/g3d
+          bash -n userland/build.sh
+      - name: P6 source integration and no-write / safe-exit guards
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          cpu=Path('drivers/power/exynos/hakios.exynos_cpufreq.c').read_text()
+          k=Path('drivers/power/exynos/hakios.p6_lab.h').read_text()
+          e=Path('userland/src/eagl.c').read_text()
+          p=Path('userland/src/poster_cost.c').read_text()
+          gpu=Path('drivers/gpu/mali/hakios.mali.c').read_text()
+          g=Path('drivers/gpu/mali/hakios.mali_lab.h').read_text()
+          m=Path('drivers/map').read_text()
+          serial=Path('tools/s9-p6-serial-auto.ps1').read_text()
+          for f in ('hakios.p6_lab.h','hakios.p6_policy.h'):
+              assert f in m
+          for s in ('#include "hakios.p6_lab.h"','p6_probe(now)','p6_frame_events','p6_touch_events'):
+              assert s in cpu
+          for s in ('SYSCTL_PROC(_kern_hakios,OID_AUTO,p6_mode','SYSCTL_PROC(_kern_hakios,OID_AUTO,p6_phase','SYSCTL_PROC(_kern_hakios,OID_AUTO,p6_flags','SYSCTL_PROC(_kern_hakios,OID_AUTO,p6_stats','source=governor_and_scheduler_proxy_not_IRQ','writes=0'):
+              assert s in k
+          assert 'g3d_lab_gate = (uint32_t)value;' in g
+          assert 'g3d_sleep = value >= 2 ? 1u : 0u;' in g
+          assert 'g3d_idle_gate();' in gpu
+          assert 'g3d_lab_gpu_safe' in gpu and 'g3d_lab_protection_ok' in gpu
+          assert 'p6-churn:' in p and 'crash=unverified' in p
+          assert 'p6-ca-thread:' in p and 'sampled_libproc_no_stack' in p
+          assert 'p6-ca-gl:' in e and 'EAGL_wall_time_no_CA_stack' in e
+          assert 'GateGuard' in serial and 'EnableActualG3D' in serial
+          assert "g3d_lab_reset=1" in serial and 'GATE' in serial
+          assert 'p6_mode=0' in serial and 'p5_mode=0' in serial
+          assert 'mali_dvs=1' not in serial and 'g3d_lab_mv=900' not in serial
+          print('P6 source/rollback guards PASS')
+          PY
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: PowerShell 5.1 parsing and safe COM125 previews (no COM connection)
+        shell: powershell
+        run: |
+          foreach($file in @('tools/s9-p6-serial-auto.ps1','tools/s9-p6-report.ps1')){
+            $t=$null;$e=$null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file).Path,[ref]$t,[ref]$e)
+            if($e.Count){throw "$file errors: $($e -join '; ')"}
+          }
+          $preview=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/s9-p6-serial-auto.ps1 -EnableActualG3D
+          if($LASTEXITCODE -ne 0){throw 'P6 dry-run failed'}
+          $text=$preview -join "`n"
+          foreach($marker in @('PREVIEW SEND/VERIFY: sysctl kern.hakios.p6_phase=0',
+            'p6_flags=1','p6_flags=3','p6_flags=5','p6_flags=9',
+            'g3d_lab_gate=1','PREVIEW REQUIRE:', 'g3d_lab_gate=2',
+            'p6_flags=17','p6_phase=8','PREVIEW complete')){
+              if(-not $text.Contains($marker)){throw "Missing phase/guard $marker"}
+          }
+      - name: P6 offline reporter handles mixed partial GPU serial noise
+        shell: powershell
+        run: |
+          $file=Join-Path $env:TEMP 's9-p6-ci-test.log'
+          @(
+            'p6: PHASE=2 up=100000ms flags=1',
+            'p6-wake: up=105000ms phase=2 span_ms=5000 gov_loops=125 boost_requests=1 touches=1 presents=50 idle_lit=91 idle_big=95 missing=0',
+            'p6: PHASE=3 up=110000ms flags=3',
+            'p6-churn: up=115s phase=3 name=PridePoster prev_pid=100 new_pid=101 changes=1 missing_samples=0 crash=unverified',
+            'p6-proc: up=115s phase=3 name=PridePoster pid=101 cpu_pct=50.00 csw=120 faults=2 pageins=0 syscalls=200 valid_delta=1',
+            'p6: PHASE=4 up=120000ms flags=5',
+            'p6-shadow: up=125000ms phase=4 big_mc=83000 gpu_mc=88000 m3_load=10 lit_load=11 mhz=455/962 frames=50 gap_ms=100 park_candidate=1 big_step=1 gpu_step=1 changed=1 writes=0',
+            'p6: PHASE=7 up=130000ms flags=17',
+            'p6-ca-gl: up=135.000s phase=7 n=60 avg_wall_us=200 draws=1200 target_draws=800 uploads=2 changed=0 unchecked=1 same=99 flush=60 finish=0',
+            'p5-gl-burst: up=135.000s phase=7 max_draw=fps: 60 presented'
+          ) | Set-Content -LiteralPath $file -Encoding ASCII
+          $report=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/s9-p6-report.ps1 -Log $file
+          if($LASTEXITCODE -ne 0){throw 'P6 report failed'}
+          $text=$report -join "`n"
+          foreach($marker in @('PHASE=2:', 'WAKE-PROXY:', 'PID-CHURN PridePoster',
+            'SHADOW:', 'CA GL:', 'skipped-interleaved=0', 'NOT MEASURED:')){
+            if(-not $text.Contains($marker)){throw "P6 report missing $marker"}
+          }

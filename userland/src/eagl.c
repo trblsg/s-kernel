@@ -356,6 +356,7 @@ struct eagl {
 
 static uint32_t p4_mode_cached, p4_phase_cached; /* periodic sysctl reads: no P4 bootarg */
 static uint32_t p5_mode_cached, p5_phase_cached; /* P5 runtime sysctl; read once per 60 frames */
+static uint32_t p6_ca_cached,p6_phase_cached; /* P6.5 independent observer; 60-frame cadence */
 static int glstage_on;                       /* boot-arg glstage=1: 60-frame timing aggregates */
 static int glcost_on;                        /* boot-arg glcost=1: per-slot CPU wall timing */
 static int g2_bind_on;                        /* boot-arg g2_bind=1, otherwise legacy code path */
@@ -1099,7 +1100,8 @@ surface_changed(struct eagl *e, struct image *image)
 		else e->diag.hash_changed++;
 	}
 	if (__atomic_load_n(&p4_mode_cached, __ATOMIC_RELAXED) ||
-	    __atomic_load_n(&p5_mode_cached,__ATOMIC_RELAXED)) {
+	    __atomic_load_n(&p5_mode_cached,__ATOMIC_RELAXED) ||
+            __atomic_load_n(&p6_ca_cached,__ATOMIC_RELAXED)) {
 		e->p4_checked++;
 		if (sum == image->sum && !p0_force_dirty) e->p4_same++;
 		else e->p4_changed++;
@@ -1653,9 +1655,21 @@ p5_frame_observe(struct eagl *e,uint64_t after,
         if(sysctlbyname("kern.hakios.p5_phase",&value,&n,NULL,0)==0 &&
             n==sizeof(value) && value>=0 && value<=99)
             __atomic_store_n(&p5_phase_cached,(uint32_t)value,__ATOMIC_RELEASE);
+        int32_t p6mode=0,p6flags=0;
+        n=sizeof(p6mode);
+        if(sysctlbyname("kern.hakios.p6_mode",&p6mode,&n,NULL,0)!=0 || n!=sizeof(p6mode))p6mode=0;
+        n=sizeof(p6flags);
+        if(sysctlbyname("kern.hakios.p6_flags",&p6flags,&n,NULL,0)!=0 || n!=sizeof(p6flags))p6flags=0;
+        __atomic_store_n(&p6_ca_cached,p6mode>0 && (p6flags&16)?(uint32_t)p6mode:0u,__ATOMIC_RELEASE);
+        n=sizeof(value);
+        if(sysctlbyname("kern.hakios.p6_phase",&value,&n,NULL,0)==0 &&
+            n==sizeof(value) && value>=0 && value<=99)
+            __atomic_store_n(&p6_phase_cached,(uint32_t)value,__ATOMIC_RELEASE);
     }
     mode=__atomic_load_n(&p5_mode_cached,__ATOMIC_ACQUIRE);
-    phase=__atomic_load_n(&p5_phase_cached,__ATOMIC_ACQUIRE);
+    phase=mode?__atomic_load_n(&p5_phase_cached,__ATOMIC_ACQUIRE):
+        __atomic_load_n(&p6_phase_cached,__ATOMIC_ACQUIRE);
+    if(!mode)mode=__atomic_load_n(&p6_ca_cached,__ATOMIC_ACQUIRE);
     if(!mode){
         if(e->p5_group_mode){
             s9_p5_frame_reset(w);
@@ -1705,6 +1719,15 @@ p5_frame_observe(struct eagl *e,uint64_t after,
             w->gl_flush,w->gl_finish,w->gl_finish_object,w->fast_17ms,
             w->fast_33ms,w->slow_120ms,
             (unsigned long long)(w->elapsed_us/w->frames));
+        if(__atomic_load_n(&p6_ca_cached,__ATOMIC_ACQUIRE)) {
+            say("p6-ca-gl: up=%llu.%03llus phase=%u n=%u avg_wall_us=%llu draws=%llu target_draws=%u uploads=%llu changed=%llu unchecked=%u same=%llu flush=%u finish=%u cpu_note=EAGL_wall_time_no_CA_stack_or_dirty_proof\n",
+                after/1000000,(after/1000)%1000,
+                __atomic_load_n(&p6_phase_cached,__ATOMIC_RELAXED),w->frames,
+                (unsigned long long)(w->elapsed_us/w->frames),
+                (unsigned long long)w->draws,w->large_target_draws,
+                (unsigned long long)w->uploads,(unsigned long long)w->changed,
+                w->unchecked_frames,(unsigned long long)w->same,w->gl_flush,w->gl_finish);
+        }
         if(mode>=2){
             say("p5-gl-burst: up=%llu.%03llus phase=%u n=%u min_gap_us=%llu max_gap_ms=%llu max_draw=%u max_uploads=%u max_changed=%u max_skipped=%u top_frame=%u top_draws=%u top_uploads=%u top_changed=%u top_large_draws=%u cpu_note=wall_time_not_core_cycles\n",
                 after/1000000,(after/1000)%1000,phase,w->frames,
@@ -2052,7 +2075,8 @@ drawing(struct eagl *e)
 	if (e->framebuffer != 0 && e->colour != 0 && (image = image_of(e, e->colour)) != NULL && image->target) {
 		/* Reuse the target lookup already required by drawing(), avoiding
 		 * a second image_of() call per draw in the hot path. */
-		if (__atomic_load_n(&p5_mode_cached,__ATOMIC_RELAXED)) {
+		if (__atomic_load_n(&p5_mode_cached,__ATOMIC_RELAXED) ||
+            __atomic_load_n(&p6_ca_cached,__ATOMIC_RELAXED)) {
 			if (image->width >= 1000 && image->height >= 2000)
 				e->p5_large_target_draws++;
 			else
@@ -2069,7 +2093,8 @@ drawing(struct eagl *e)
 				e->line.surface = IOSurfaceGetID(image->surface);
 			}
 		}
-	} else if (__atomic_load_n(&p5_mode_cached,__ATOMIC_RELAXED)) {
+	} else if (__atomic_load_n(&p5_mode_cached,__ATOMIC_RELAXED) ||
+            __atomic_load_n(&p6_ca_cached,__ATOMIC_RELAXED)) {
 		e->p5_other_draws++;
 	}
 }
