@@ -9,7 +9,7 @@ g3d_lab_mon(__unused void *arg, __unused wait_result_t why)
 		uint64_t deadline, up_ns, now, off_ns = 0, off_total_ns, wake_us;
 		uint32_t status, pll, mux, mode, phase, mv, fault, clocks, rail_probe, off_count;
 		uint32_t wakes, wake_failed, shadow, denied, jobs, rail_good, rail_mv;
-		uint32_t busy_cnt, gpu_safe, tz_ok, ctrl = 0;
+		uint32_t busy_cnt, gpu_safe, tz_ok, awake_state, ctrl = 0;
 		int32_t temp_mc;
 
 		/* Timed kernel sleep, NOT delay(): do not burn a CPU spinning. */
@@ -18,8 +18,11 @@ g3d_lab_mon(__unused void *arg, __unused wait_result_t why)
 		(void)lck_mtx_sleep_deadline(&mali_queue_lock, LCK_SLEEP_DEFAULT,
 		    (event_t)&g3d_lab_monitor_started, THREAD_UNINT, deadline);
 		lck_mtx_unlock(&mali_queue_lock);
+		/* P5 reuses this independent 5s worker across DISPLAY OFF.
+		 * Only PMU/CMU (outside G3D) are read; never touch GPU MMIO. */
 		if (!g3d_lab_gate && g3d_lab_mv == 950 && !g3d_lab_rail_probe &&
-		    !g3d_lab_fault && !g3d_lab_phase)
+		    !g3d_lab_fault && !g3d_lab_phase &&
+		    !__atomic_load_n(&p5_mode,__ATOMIC_RELAXED))
 			continue;
 		if (pmu == 0 || cmu_g3d == 0)
 			continue;
@@ -35,6 +38,7 @@ g3d_lab_mon(__unused void *arg, __unused wait_result_t why)
 		mv = g3d_lab_mv;
 		fault = g3d_lab_fault;
 		gpu_safe = g3d_lab_gpu_safe ? 1u : 0u;
+		awake_state = g3d_awake ? 1u : 0u; /* driver hint, separate from PMU status */
 		tz_ok = g3d_lab_protection_ok ? 1u : 0u;
 		clocks = ((status & G3D_ON) == G3D_ON && (pll & PLL_ENABLE) &&
 		    gov_level < GOV_LEVELS) ? g3d_rates[gov_level].mhz : 0;
@@ -70,12 +74,19 @@ g3d_lab_mon(__unused void *arg, __unused wait_result_t why)
 		busy_cnt = (status & G3D_ON) == G3D_ON ? 1u : 0u;
 		/* Includes true OFF samples: unlike mali-probe this independent
 		 * sampler survives when the G3D worker stops calling gov_window. */
+		/* Do not emit G3D Lab lines when P5 is the only observer. */
+		if (g3d_lab_gate || g3d_lab_mv != 950 || g3d_lab_rail_probe ||
+		    g3d_lab_fault || g3d_lab_phase)
 		say("g3d-lab: up=%llums phase=%u mode=%u domain=%u gpu_safe=%u tz_ok=%u pll=%u mux=%u clk=%uMHz target_mv=%u rail_read=%u rail_valid=%u rail_mv=%u rail_ctrl=%#x off_count=%u off_total_ms=%llu wake_count=%u wake_fail=%u wake_last_us=%llu off_pending_ms=%llu shadow=%u denied=%u job_faults=%u fault=%u g3d_mc=%d\n",
 		    up_ns / NSEC_PER_MSEC, phase, mode, busy_cnt, gpu_safe, tz_ok,
 		    (pll & (PLL_ENABLE | PLL_STABLE)) == (PLL_ENABLE | PLL_STABLE) ? 1u : 0u,
 		    (mux & MUX_SEL) ? 1u : 0u, clocks, mv, rail_probe, rail_good, rail_mv, ctrl,
 		    off_count, off_total_ns/NSEC_PER_MSEC, wakes, wake_failed, wake_us, off_ns / NSEC_PER_MSEC,
 		    shadow, denied, jobs, fault, temp_mc);
+		/* Same monotonic uptime as P4/GL; this still executes with
+		 * no GPU jobs while the display is off. */
+		if (__atomic_load_n(&p5_mode,__ATOMIC_RELAXED))
+			p5_monitor_snapshot(now,up_ns,status,pll,mux,awake_state != 0);
 	}
 }
 

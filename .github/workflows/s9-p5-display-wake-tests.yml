@@ -1,0 +1,96 @@
+name: S9 P5 Display Wake and GPU Attribution Lab
+
+on:
+  push:
+    branches: [s9/p5-display-wake-gpu-lab]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: P5 10fps idle, 60fps wake and gap accounting in strict C11/C++17 UBSan
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror -pedantic -fsanitize=undefined \
+            tools/tests/test_s9_p5_frame_lab.c -o /tmp/p5_c
+          /tmp/p5_c
+          c++ -x c++ -std=c++17 -O2 -Wall -Wextra -Werror -pedantic -fsanitize=undefined \
+            tools/tests/test_s9_p5_frame_lab.c -o /tmp/p5_cpp
+          /tmp/p5_cpp
+      - name: Regressions P4 per-core and P0/G3D paths
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror -pedantic -fsanitize=undefined \
+            tools/tests/test_s9_p4_idle_lab.c -o /tmp/p4_c
+          /tmp/p4_c
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            tools/tests/test_s9_g3d_lab_policy.c -o /tmp/g3d
+          /tmp/g3d
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            userland/tests/test_s9_ioshash4.c -o /tmp/p0
+          /tmp/p0
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            userland/tests/test_gl_stage_stats.c -o /tmp/gl
+          /tmp/gl
+          bash -n userland/build.sh
+      - name: P5 source integration and non-invasive guardrails
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          g=Path('drivers/gpu/mali/hakios.mali.c').read_text()
+          m=Path('drivers/gpu/mali/hakios.mali_lab.h').read_text()
+          h=Path('drivers/gpu/mali/hakios.p5_lab.h').read_text()
+          e=Path('userland/src/eagl.c').read_text()
+          p=Path('userland/src/poster_cost.c').read_text()
+          mapping=Path('drivers/map').read_text()
+          assert 'gpu/mali bsd/dev/hakios.p5_lab.h' in mapping
+          assert '#include "hakios.p5_lab.h"' in g
+          assert 'p5_queue_added_locked(owner,mali_queue_count)' in g
+          assert 'p5_queue_completed_locked(owner,fragment,dropped,p5_job_status,' in g
+          assert 'p5_monitor_snapshot(now,up_ns,status,pll,mux,awake_state != 0)' in m
+          assert '!__atomic_load_n(&p5_mode,__ATOMIC_RELAXED)' in m
+          assert 'if (g3d_lab_gate || g3d_lab_mv != 950 || g3d_lab_rail_probe ||' in m
+          assert 'no_gpu' not in h or 'No GPU-domain MMIO' in h
+          assert 'PMU_G3D_STATUS' in m and 'PLL_CON0' in m
+          assert 'deep=unmeasured voltage=unmeasured' in h
+          assert 'SYSCTL_PROC(_kern_hakios,OID_AUTO,p5_mode,' in h
+          assert 'SYSCTL_PROC(_kern_hakios,OID_AUTO,p5_phase,' in h
+          assert 'SYSCTL_PROC(_kern_hakios,OID_AUTO,p5_threads,' in h
+          assert 'SYSCTL_PROC(_kern_hakios,OID_AUTO,p5_stats,' in h
+          assert 'p5_frame_observe(e,after,end_reason)' in e
+          assert 'p4_frame_observe(e, after, presented, in_place, copied, end_reason)' in e
+          assert 'surface_changed(' in e
+          assert 'p5-gl-resume:' in e
+          assert 'p5-gl-burst:' in e
+          assert 's9_ioshash4_fast(base,size)' in e
+          assert 'glDrawElements(mode, count, type, indices);' in e
+          assert 'glFlush();' in e and 'glFinish();' in e
+          assert 'PROC_PIDTHREADINFO' in p
+          assert 'p5-display-thread:' in p
+          assert 'p5-thread-state:' in p
+          assert 'p5_mode>=2 && p5_threads>0?1:interval' in p
+          assert 'GOV_CAP1_MC     85000' in g and 'GOV_CAP2_MC     95000' in g
+          print('P5 guards: no frame drop, no new GPU-domain MMIO while OFF, no power/thermal mutation: PASS')
+          PY
+
+  ios-syntax:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile poster_cost per-thread observer as iOS ARM64 syntax
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=gnu11 -Wall -Wextra -Wno-deprecated-declarations \
+            -fsyntax-only userland/src/poster_cost.c
+      - name: Compile P5 GLES summary implementation as iOS ARM64 syntax
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=gnu11 -Wall -Wextra -Wno-deprecated-declarations \
+            -Iuserland/src -fsyntax-only userland/src/eagl.c

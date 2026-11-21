@@ -178,6 +178,8 @@ static uint64_t g3d_off_at;
  * No new boot arguments are required: USB sysctl selects each phase. */
 static uint32_t g3d_lab_gate, g3d_lab_idle_ms = 10000, g3d_lab_mv = 950;
 static uint32_t g3d_lab_phase; /* 0..99, user-set phase marker; NO hardware effect */
+/* P5: runtime-only read-only display/GPU diagnostics; never a boot arg. */
+static uint32_t p5_mode, p5_phase, p5_threads;
 static uint32_t g3d_lab_rail_probe, g3d_lab_fault, g3d_lab_monitor_started;
 static uint32_t g3d_lab_off_count, g3d_lab_wake_count, g3d_lab_wake_failed;
 static uint32_t g3d_lab_shadow_count, g3d_lab_denied_count, g3d_lab_job_faults;
@@ -192,6 +194,8 @@ static void g3d_idle_gate(void);
 static void gov_rebase(void);
 static uint32_t pll_mhz(void);
 static void g3d_lab_monitor_start(void);
+static void p5_monitor_snapshot(uint64_t now,uint64_t up_ns,uint32_t status,
+    uint32_t pll,uint32_t mux,bool awake);
 static void g3d_lab_trip(uint32_t fault);
 static void g3d_lab_restore_after_job_error(void);
 /*
@@ -2753,7 +2757,8 @@ g3d_sleep_ms_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unu
 SYSCTL_PROC(_kern_hakios, OID_AUTO, g3d_sleep_ms, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
     g3d_sleep_ms_sysctl, "I", "the screen-off grace for g3d_sleep=, ms (500..60000)");
 
-#include "hakios.mali_lab.h" /* new runtime sysctls and independent OFF-state sampler */
+#include "hakios.mali_lab.h" /* G3D independent OFF-state sampler, reused by P5 */
+#include "hakios.p5_lab.h"   /* P5 per-client/PMU read-only probes; mode0 off */
 
 /*
  * kern.hakios.mali_irq: mali_irq=, changed while the system runs (the USB console's
@@ -2864,6 +2869,7 @@ mali_worker(__unused void *parameter, __unused wait_result_t result)
 		seq = mali_queue[mali_queue_head].seq;
 		uint64_t queued = mali_queue[mali_queue_head].queued, job_began = mach_absolute_time();
 		uint32_t owner = mali_queue[mali_queue_head].owner;
+		uint32_t p5_job_status = 0;
 		bool dropped = owner_drops(owner, seq);
 
 		fragment = mali_queue[mali_queue_head].fragment;
@@ -2878,6 +2884,7 @@ mali_worker(__unused void *parameter, __unused wait_result_t result)
 			uint64_t began = mach_absolute_time(), now, ns;
 
 			uint32_t status = hakios_mali_submit(chain, fragment);
+			p5_job_status = status;
 
 			if (status != 0) {
 				gMaliFailed++;
@@ -2940,6 +2947,9 @@ mali_worker(__unused void *parameter, __unused wait_result_t result)
 		sec_jobs++;
 		sec_busy += ended - job_began;
 		sec_queued += job_began - queued;
+		p5_queue_completed_locked(owner,fragment,dropped,p5_job_status,
+		    job_began>=queued?job_began-queued:0,
+		    ended>=job_began?ended-job_began:0,ended);
 		lck_mtx_unlock(&mali_queue_lock);
 		wakeup((caddr_t)&mali_done_seq);
 		wakeup((caddr_t)&mali_queue_head);       /* (room in the queue) */
@@ -2980,6 +2990,7 @@ hakios_mali_enqueue_for(uint64_t chain, bool fragment, uint32_t owner)
 	mali_queue[at].seq = seq;
 	mali_queue[at].queued = mach_absolute_time();
 	mali_queue_count++;
+	p5_queue_added_locked(owner,mali_queue_count); /* only counters; already queue-locked */
 	lck_mtx_unlock(&mali_queue_lock);
 	wakeup((caddr_t)&mali_queue_count);
 	return seq;

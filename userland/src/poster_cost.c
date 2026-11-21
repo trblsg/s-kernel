@@ -60,7 +60,7 @@ struct p4_threadinfo {
 struct p4_thread_last {int pid;uint64_t tid,user,system;};
 struct p4_thread_hot {
     uint64_t tid,du,ds;
-    int32_t run_state,sleep_hint,flags;
+    int32_t run_state,sleep_hint,flags,policy,curpri,priority;
     char name[64];
 };
 static struct p4_thread_last p4_before[P4_MAX_LAST],p4_after[P4_MAX_LAST];
@@ -99,7 +99,7 @@ p4_thread_target(int setting,const char *name)
 }
 static void
 p4_sample_threads(int pid,const char *procname,unsigned setting,int phase,
-    uint64_t uptime,uint64_t elapsed_ticks,double mach_to_ns,int warmup)
+    uint64_t uptime,uint64_t elapsed_ticks,double mach_to_ns,int warmup,int p5_mode)
 {
     const int length=proc_pidinfo(pid,PROC_PIDLISTTHREADS,0,p4_thread_ids,sizeof(p4_thread_ids));
     if(length<=0){
@@ -109,12 +109,16 @@ p4_sample_threads(int pid,const char *procname,unsigned setting,int phase,
     }
     unsigned count=(unsigned)length/sizeof(p4_thread_ids[0]);
     if(count>P4_MAX_TIDS)count=P4_MAX_TIDS;
-    unsigned read=0,hot=0,missing=0;
+    unsigned read=0,hot=0,missing=0,active_states=0,asleep_states=0;
     for(unsigned k=0;k<count;k++){
         struct p4_threadinfo ti;
         int got=proc_pidinfo(pid,PROC_PIDTHREADINFO,p4_thread_ids[k],&ti,sizeof(ti));
         if(got!=(int)sizeof(ti)){missing++;continue;}
         read++;
+        /* run_state is a point-in-time libproc snapshot, NOT a count
+         * of scheduler wakeups, core residency or thread migrations. */
+        active_states += ti.run_state == 3;
+        asleep_states += ti.run_state != 3;
         if(p4_n_after<P4_MAX_LAST){
             struct p4_thread_last *cur=&p4_after[p4_n_after++];
             cur->pid=pid;cur->tid=p4_thread_ids[k];
@@ -123,10 +127,24 @@ p4_sample_threads(int pid,const char *procname,unsigned setting,int phase,
         const struct p4_thread_last *old=p4_prev_thread(pid,p4_thread_ids[k]);
         if(warmup || !old)continue;
         uint64_t du=s9_p4_delta(old->user,ti.user),ds=s9_p4_delta(old->system,ti.system);
+        char thread_name[sizeof(ti.name)+1];
+        memcpy(thread_name,ti.name,sizeof(ti.name));
+        thread_name[sizeof(ti.name)]=0; /* libproc may return a full non-NUL array */
+        if(p5_mode && !strcmp(procname,"backboardd") &&
+            strstr(thread_name,"coreanimation.display.primary")) {
+            double ns=(double)elapsed_ticks*mach_to_ns;
+            printf("p5-display-thread: up=%llus phase=%d tid=%llu u_ns=%llu s_ns=%llu cpu_if_ns=%.2f run=%d policy=%d curpri=%d sleep_hint=%d source=libproc_5s_or_1s_not_wakeup_trace\n",
+                (unsigned long long)uptime,phase,
+                (unsigned long long)p4_thread_ids[k],
+                (unsigned long long)du,(unsigned long long)ds,
+                ns>0?100.0*(double)(du+ds)/ns:0.0,ti.run_state,
+                ti.policy,ti.curpri,ti.sleep_time);
+        }
         if((du || ds) && hot<P4_MAX_TIDS){
             struct p4_thread_hot *h=&p4_hot[hot++];
             h->tid=p4_thread_ids[k];h->du=du;h->ds=ds;
             h->run_state=ti.run_state;h->sleep_hint=ti.sleep_time;h->flags=ti.flags;
+            h->policy=ti.policy;h->curpri=ti.curpri;h->priority=ti.priority;
             memcpy(h->name,ti.name,sizeof(h->name));
             h->name[sizeof(h->name)-1]=0;
             for(unsigned c=0;c<sizeof(h->name) && h->name[c];c++)
@@ -135,6 +153,10 @@ p4_sample_threads(int pid,const char *procname,unsigned setting,int phase,
         }
     }
     qsort(p4_hot,hot,sizeof(p4_hot[0]),p4_hot_compare);
+    if(p5_mode)
+        printf("p5-thread-state: up=%llus phase=%d name=%s pid=%d listed=%u read=%u active_state3=%u other_states=%u missing=%u source=sampled_run_state_not_wakeup_count\n",
+            (unsigned long long)uptime,phase,procname,pid,count,read,
+            active_states,asleep_states,missing);
     printf("p4-threads: up=%llus phase=%d name=%s pid=%d listed=%u read=%u missing=%u hot=%u truncated=%u unit=uncalibrated\n",
         (unsigned long long)uptime,phase,procname,pid,count,read,missing,hot,
         (unsigned)(length==(int)sizeof(p4_thread_ids)));
@@ -149,6 +171,13 @@ p4_sample_threads(int pid,const char *procname,unsigned setting,int phase,
             (unsigned long long)h->tid,h->name[0]?h->name:"(unnamed)",
             (unsigned long long)h->du,(unsigned long long)h->ds,
             cpu_mach,cpu_ns,h->run_state,h->sleep_hint,(unsigned)h->flags);
+        if(p5_mode)
+            printf("p5-thread: up=%llus phase=%d proc=%s pid=%d tid=%llu thr=%s u_ns=%llu s_ns=%llu cpu_if_ns=%.2f policy=%d curpri=%d priority=%d run=%d sleep_hint=%d flags=%#x source=sampled_libproc_not_core_trace\n",
+                (unsigned long long)uptime,phase,procname,pid,
+                (unsigned long long)h->tid,h->name[0]?h->name:"(unnamed)",
+                (unsigned long long)h->du,(unsigned long long)h->ds,cpu_ns,
+                h->policy,h->curpri,h->priority,h->run_state,
+                h->sleep_hint,(unsigned)h->flags);
     }
 }
 
@@ -197,8 +226,12 @@ int main(int argc,char **argv) {
         int p4_mode=p4_sysctl_int("kern.hakios.p4_mode",0);
         int p4_threads=p4_mode>0?p4_sysctl_int("kern.hakios.p4_threads",0):0;
         int p4_phase=p4_mode>0?p4_sysctl_int("kern.hakios.p4_phase",0):0;
+        int p5_mode=p4_sysctl_int("kern.hakios.p5_mode",0);
+        int p5_threads=p5_mode>0?p4_sysctl_int("kern.hakios.p5_threads",0):0;
+        int p5_phase=p5_mode>0?p4_sysctl_int("kern.hakios.p5_phase",0):0;
+        int selected_threads=p4_threads>p5_threads?p4_threads:p5_threads;
         p4_n_after=0;
-        if(p4_threads==0)p4_n_before=0;
+        if(selected_threads==0)p4_n_before=0;
         for(int k=0;k<(bytes>0?bytes/(int)sizeof(int):0) && count<MAX_MATCHES;k++) {
             if(pids[k]<=0)continue;
             char name[64]={0};
@@ -210,11 +243,12 @@ int main(int argc,char **argv) {
             struct snap *current=&now[count++];
             current->pid=pids[k];memcpy(current->name,name,sizeof(name));current->info=info;
             mask|=1u<<(unsigned)selected(name);
-            if(p4_threads>0 && p4_thread_target(p4_threads,name)) {
-                p4_sample_threads(pids[k],name,(unsigned)p4_threads,p4_phase,uptime,
+            if(selected_threads>0 && p4_thread_target(selected_threads,name)) {
+                p4_sample_threads(pids[k],name,(unsigned)selected_threads,
+                    p5_mode>0?p5_phase:p4_phase,uptime,
                     at>=previous_at?at-previous_at:0,
                     (double)base.numer/(double)base.denom,
-                    !look || p4_n_before==0);
+                    !look || p4_n_before==0,p5_mode>0 && p5_threads>0);
             }
             if(!look)continue;
             const uint64_t used=info.pti_total_user+info.pti_total_system;
@@ -233,14 +267,16 @@ int main(int argc,char **argv) {
         }
         if(look)for(size_t i=0;i<sizeof(targets)/sizeof(targets[0]);i++)
             if(!(mask&(1u<<i)))printf("poster_cost: %llu s: %s missing\n",t,targets[i]);
-        if(p4_threads>0) {
+        if(selected_threads>0) {
             memcpy(p4_before,p4_after,(size_t)p4_n_after*sizeof(p4_before[0]));
             p4_n_before=p4_n_after;
         }
         memcpy(prev,now,(size_t)count*sizeof(now[0]));
         prev_count=count;previous_at=at;
         if(look==looks)break;
-        sleep(interval);
+        /* P5 burst mode can resolve 1–3s screen-on spikes, at opt-in
+         * 1s sampling overhead; mode0/1 preserves the 5s P4 baseline. */
+        sleep(p5_mode>=2 && p5_threads>0?1:interval);
     }
     return 0;
 }

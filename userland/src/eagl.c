@@ -83,6 +83,7 @@
 #include "hakios.gl.h"
 #include "gl_stage_stats.h"   /* opt-in glstage=1: host-side GLES/scanout timing buckets */
 #include "s9_p4_frame_stats.h" /* runtime P4: passive frame/input evidence, no frame skipping */
+#include "s9_p5_frame_lab.h"  /* P5: bounded frame origin/proxy + wake burst (no new GL calls) */
 #include "s9_gl_cost.h"       /* opt-in glcost=1: time/count EAGL slot calls, no GL changes */
 #include "s9_g2_bind.h"       /* opt-in g2_bind=1: skip proven redundant native texture binds */
 #include "s9_gl_diag.h"       /* opt-in glpath=1/glhash=1: sampled CPU path timings */
@@ -336,6 +337,9 @@ struct eagl {
 	unsigned most_calls, most_triangles;
 	struct s9_gl_stage_stats glstage;       /* 60-frame buckets, no per-frame console writes */
 	struct s9_p4_frame_window p4_window; /* P4: read-only per-frame evidence */
+	struct s9_p5_frame_group p5_window; /* P5: bounded aggregate/wake samples */
+	uint64_t p5_last_frame_end_us;
+	uint32_t p5_group_phase,p5_group_mode,p5_large_target_draws,p5_other_draws;
 	uint32_t p4_checked, p4_same, p4_changed, p4_skipped;
 	uint32_t p4_window_phase, p4_window_mode;
 	uint64_t p4_last_frame_end_us;
@@ -351,6 +355,7 @@ struct eagl {
 };
 
 static uint32_t p4_mode_cached, p4_phase_cached; /* periodic sysctl reads: no P4 bootarg */
+static uint32_t p5_mode_cached, p5_phase_cached; /* P5 runtime sysctl; read once per 60 frames */
 static int glstage_on;                       /* boot-arg glstage=1: 60-frame timing aggregates */
 static int glcost_on;                        /* boot-arg glcost=1: per-slot CPU wall timing */
 static int g2_bind_on;                        /* boot-arg g2_bind=1, otherwise legacy code path */
@@ -1039,12 +1044,14 @@ surface_changed(struct eagl *e, struct image *image)
 	bool p0_force_dirty = false;
 
 	if (image->looked == e->frames + 1 || base == NULL || IOSurfaceGetPlaneCount(surface) > 0) {
-		if (__atomic_load_n(&p4_mode_cached, __ATOMIC_RELAXED)) e->p4_skipped++; /* not proof of unchanged content */
+		if (__atomic_load_n(&p4_mode_cached, __ATOMIC_RELAXED) ||
+		    __atomic_load_n(&p5_mode_cached,__ATOMIC_RELAXED)) e->p4_skipped++; /* not proof of unchanged content */
 		if (glhash_on) e->diag.hash_not_checked++;
 		return false;
 	}
 	if (still_seldom && image->unchanged >= STILL_LOOKS && (e->frames + IOSurfaceGetID(surface)) % STILL_EVERY != 0) {
-		if (__atomic_load_n(&p4_mode_cached, __ATOMIC_RELAXED)) e->p4_skipped++; /* sampling alias explicitly recorded */
+		if (__atomic_load_n(&p4_mode_cached, __ATOMIC_RELAXED) ||
+		    __atomic_load_n(&p5_mode_cached,__ATOMIC_RELAXED)) e->p4_skipped++; /* sampling alias explicitly recorded */
 		if (glhash_on) e->diag.hash_not_checked++;
 		return false;
 	}
@@ -1091,7 +1098,8 @@ surface_changed(struct eagl *e, struct image *image)
 		if (sum == image->sum) e->diag.hash_same++;
 		else e->diag.hash_changed++;
 	}
-	if (__atomic_load_n(&p4_mode_cached, __ATOMIC_RELAXED)) {
+	if (__atomic_load_n(&p4_mode_cached, __ATOMIC_RELAXED) ||
+	    __atomic_load_n(&p5_mode_cached,__ATOMIC_RELAXED)) {
 		e->p4_checked++;
 		if (sum == image->sum && !p0_force_dirty) e->p4_same++;
 		else e->p4_changed++;
@@ -1623,6 +1631,95 @@ frame_begin(struct eagl *e)
  */
 static void frame_functions(struct eagl *e);
 /*
+ * P5 frame boundary observer. This is **not** the underlying source of
+ * CoreAnimation's 10Hz timer; the only proven event is the EAGL
+ * glFlush/glFinish call completing this context's frame. No GL operations,
+ * display synchronization or surface CRC is introduced by P5.
+ */
+static void
+p5_frame_observe(struct eagl *e,uint64_t after,
+    enum s9_p4_end_reason reason)
+{
+    uint32_t mode,phase;
+    struct s9_p5_frame_event event;
+    struct s9_p5_frame_group *w=&e->p5_window;
+    if(e->frames%60==1){
+        int32_t value=0;
+        size_t n=sizeof(value);
+        if(sysctlbyname("kern.hakios.p5_mode",&value,&n,NULL,0)==0 &&
+            n==sizeof(value) && value>=0 && value<=2)
+            __atomic_store_n(&p5_mode_cached,(uint32_t)value,__ATOMIC_RELEASE);
+        n=sizeof(value);
+        if(sysctlbyname("kern.hakios.p5_phase",&value,&n,NULL,0)==0 &&
+            n==sizeof(value) && value>=0 && value<=99)
+            __atomic_store_n(&p5_phase_cached,(uint32_t)value,__ATOMIC_RELEASE);
+    }
+    mode=__atomic_load_n(&p5_mode_cached,__ATOMIC_ACQUIRE);
+    phase=__atomic_load_n(&p5_phase_cached,__ATOMIC_ACQUIRE);
+    if(!mode){
+        if(e->p5_group_mode){
+            s9_p5_frame_reset(w);
+            e->p5_last_frame_end_us=0;
+            e->p5_group_mode=0;
+        }
+        e->p5_large_target_draws=e->p5_other_draws=0;
+        return;
+    }
+    if(e->p5_group_mode!=mode || e->p5_group_phase!=phase){
+        s9_p5_frame_reset(w);
+        e->p5_group_mode=mode;e->p5_group_phase=phase;
+        e->p5_last_frame_end_us=0;
+        say("p5-gl: armed up=%llu.%03llus phase=%u mode=%u source=EAGL_frame_end_not_CA_timer no_render_changes=1\n",
+            after/1000000,(after/1000)%1000,phase,mode);
+    }
+    memset(&event,0,sizeof(event));
+    event.draws=e->draws;
+    event.clears=e->clears;
+    event.uploads=e->uploads;
+    event.large_target_draws=e->p5_large_target_draws;
+    event.other_draws=e->p5_other_draws;
+    event.checked=e->p4_checked;event.same=e->p4_same;
+    event.changed=e->p4_changed;event.skipped=e->p4_skipped;
+    event.frame_end=(uint32_t)reason;
+    event.duration_us=after>=e->began?after-e->began:0;
+    event.gap_us=e->p5_last_frame_end_us && after>=e->p5_last_frame_end_us?
+        after-e->p5_last_frame_end_us:0;
+    e->p5_last_frame_end_us=after;
+    /* First GL after prolonged absence: useful for correlating
+     * GenericARMPE display on, NOT proof why the timer fired. */
+    if(event.gap_us>=2000000ull) {
+        say("p5-gl-resume: up=%llu.%03llus phase=%u gap_ms=%llu draws=%u clears=%u uploads=%u checked=%u changed=%u large_draws=%u source=EAGL_after_quiet\n",
+            after/1000000,(after/1000)%1000,phase,event.gap_us/1000,
+            event.draws,event.clears,event.uploads,event.checked,
+            event.changed,event.large_target_draws);
+    }
+    s9_p5_frame_add(w,&event,e->frames);
+    if(w->frames==60){
+        say("p5-gl: up=%llu.%03llus phase=%u mode=%u frames=%u..%u n=%u draws=%llu large_draws=%u other_draws=%u clears=%llu uploads=%llu checked=%llu same=%llu changed=%llu skipped=%llu changed_frames=%u unchecked_frames=%u large_target_frames=%u upload_frames=%u flush=%u finish=%u finish_obj=%u fast17=%u fast33=%u slow120=%u cpu_avg_us=%llu source=EAGL_not_CA_timer\n",
+            after/1000000,(after/1000)%1000,phase,mode,e->frames-59,e->frames,
+            w->frames,(unsigned long long)w->draws,w->large_target_draws,
+            w->other_draws,(unsigned long long)w->clears,(unsigned long long)w->uploads,
+            (unsigned long long)w->checked,(unsigned long long)w->same,
+            (unsigned long long)w->changed,(unsigned long long)w->skipped,
+            w->changed_frames,w->unchecked_frames,w->large_target_frames,w->upload_frames,
+            w->gl_flush,w->gl_finish,w->gl_finish_object,w->fast_17ms,
+            w->fast_33ms,w->slow_120ms,
+            (unsigned long long)(w->elapsed_us/w->frames));
+        if(mode>=2){
+            say("p5-gl-burst: up=%llu.%03llus phase=%u n=%u min_gap_us=%llu max_gap_ms=%llu max_draw=%u max_uploads=%u max_changed=%u max_skipped=%u top_frame=%u top_draws=%u top_uploads=%u top_changed=%u top_large_draws=%u cpu_note=wall_time_not_core_cycles\n",
+                after/1000000,(after/1000)%1000,phase,w->frames,
+                (unsigned long long)w->min_gap_us,
+                (unsigned long long)(w->max_gap_us/1000),
+                w->max_draws,w->max_uploads,w->max_changed,w->max_skipped,
+                w->max_draw_frame,w->top_draws,w->top_uploads,
+                w->top_changed,w->top_target_draws);
+        }
+        s9_p5_frame_reset(w);
+    }
+    e->p5_large_target_draws=e->p5_other_draws=0;
+}
+
+/*
  * P4 runtime read-only observer. A sysctl read once per 60 frames (not
  * every draw) lets the USB console change the diagnostic phase without
  * rebooting. No GPU call, fence, hashing, or GL state is changed here.
@@ -1768,6 +1865,7 @@ frame_end(struct eagl *e, bool finished, enum s9_p4_end_reason end_reason)
 	after = now_us();
 	e->in_frame = false;
 	e->frames++;
+	p5_frame_observe(e,after,end_reason); /* before P4 clears sampled IOSurface deltas */
 	p4_frame_observe(e, after, presented, in_place, copied, end_reason);
 	if (latency_lines) {
 		uint64_t tpidr;
@@ -1952,6 +2050,14 @@ drawing(struct eagl *e)
 
 	frame_begin(e);
 	if (e->framebuffer != 0 && e->colour != 0 && (image = image_of(e, e->colour)) != NULL && image->target) {
+		/* Reuse the target lookup already required by drawing(), avoiding
+		 * a second image_of() call per draw in the hot path. */
+		if (__atomic_load_n(&p5_mode_cached,__ATOMIC_RELAXED)) {
+			if (image->width >= 1000 && image->height >= 2000)
+				e->p5_large_target_draws++;
+			else
+				e->p5_other_draws++;
+		}
 		image->drawn = image->painted = true;
 		if (frame_lines && image->width >= 1000 && image->height >= 2000) {
 			/* the display's picture (a surface of its size): where this frame first draws into it */
@@ -1963,6 +2069,8 @@ drawing(struct eagl *e)
 				e->line.surface = IOSurfaceGetID(image->surface);
 			}
 		}
+	} else if (__atomic_load_n(&p5_mode_cached,__ATOMIC_RELAXED)) {
+		e->p5_other_draws++;
 	}
 }
 
