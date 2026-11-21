@@ -74,6 +74,8 @@ jobs:
           assert 'g3d_lab_rail_probe=1' in serial and 'g3d_lab_rail_probe=0' in serial
           assert 'p6_mode=0' in serial and 'p5_mode=0' in serial
           assert 'mali_dvs=1' not in serial and 'g3d_lab_mv=900' not in serial
+          assert 'Get-P6DisplayEvidence' in serial and 'FRAME_PROXY' in serial
+          assert 'if($Execute -and -not $script:OnEventProven)' in serial and 'ResumeCAOnly' in serial
           print('P6 source/rollback guards PASS')
           PY
   windows:
@@ -97,6 +99,20 @@ jobs:
             'g3d_lab_gate=1','g3d_lab_rail_probe=1', 'PREVIEW REQUIRE:', 'g3d_lab_gate=2',
             'p6_flags=17','p6_phase=8','PREVIEW complete')){
               if(-not $text.Contains($marker)){throw "Missing phase/guard $marker"}
+          }
+          $evidence=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/s9-p6-serial-auto.ps1 -TestDisplayEvidence
+          if($LASTEXITCODE -ne 0 -or ($evidence -join "`n") -notmatch '9 deterministic tests PASS'){
+            throw 'P6 screen ON evidence regression failed'
+          }
+          $resume=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/s9-p6-serial-auto.ps1 -ResumeCAOnly
+          if($LASTEXITCODE -ne 0){throw 'P6 CA-only preview failed'}
+          $resumeText=$resume -join "`n"
+          foreach($marker in @('RESUME P6.5 ONLY','p6_mode=2','p6_flags=17','p6_phase=7','p6_phase=8','PREVIEW complete')){
+            if(-not $resumeText.Contains($marker)){throw "P6 CA resume missing $marker"}
+          }
+          if($resumeText.Contains('p6_phase=1') -or $resumeText.Contains('p6_phase=5') -or
+             $resumeText.Contains('g3d_lab_gate=2')){
+            throw 'P6 CA-only resume replayed unrelated diagnostic/power phases'
           }
       - name: P6 offline reporter handles mixed partial GPU serial noise
         shell: powershell

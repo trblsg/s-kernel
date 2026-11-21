@@ -94,6 +94,50 @@ consistent; do not compare a hot second pass directly to a cold first pass.
 Wait >=420s after boot to reduce initial Poster launch noise; nevertheless
 record any PridePoster crash events around boot separately.
 
+### P6.4 display ON confirmation and recoverable host-script failure
+
+The Windows host script initially required one literal
+`GenericARMPE: the display on` line within 60s. A real run ending at
+`putty-P6-unified-20261121-103114.log` reached G3D shadow mode1 and
+reported `frame_age_ms=168034`, `job_age_ms=168034`, `domain=1`,
+`rail_mv=950`, `fault=0`, `off_count=0`, then exited because no ON
+marker arrived. That is **not** evidence of G3D actual gating or a GPU
+fault. It also does **not** establish whether the operator's power-key
+press lit the panel: frame timing had not restarted in that snapshot.
+
+Newer `s9-p6-serial-auto.ps1` (host-only, no reflashing) allows
+120s to confirm ON and makes a second audible reminder to physically
+press the key. It first looks for `GenericARMPE` ON; if missing, two
+distinct recent `p5-gpu` samples with `frame_age_ms <= 1500`, or
+one such sample plus a `p6-wake` record with nonzero `presents`,
+are explicitly labeled **FRAME_PROXY**. That proves frame activity
+resumed, **not** that panel illumination or power actually changed.
+If no evidence exists, it still aborts safely rather than claiming
+successful wake. A frame proxy **never authorizes** `-EnableActualG3D`
+to proceed to real mode2. Existing P6.1–P6.4 data remain valid for
+offline analysis even if this host-side display check stops the run.
+
+If the screen becomes visibly ON again, do **not** repeat earlier
+phases: run the CA-only continuation on the same BOOT + SYSTEM,
+which checks serial ACK and asks for operator visual confirmation:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/s9-p6-serial-auto.ps1 -ResumeCAOnly
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/s9-p6-serial-auto.ps1 -Port COM125 -ResumeCAOnly -Execute
+```
+
+This collects P6.5 (phase7) and a reversal (phase8), without touching
+actual G3D gate mode2, voltage, or earlier A/B phases. A missing
+`GenericARMPE` ON plus a steadily increasing `frame_age_ms`
+indicates **no observed frame recovery**; check physical button,
+touch/panel functionality and bootargs before running CA-only tests.
+Script unit tests without COM are available via `-TestDisplayEvidence`.
+
+The raw log in the user's Downloads folder is not automatically
+copied into the project workspace. Run the existing offline reporter
+on that exact file to retain all P6.1–P6.4 results; do not rerun
+the previous ten-minute test simply to generate a completed log.
+
 P6.4 real G3D gate is **NOT** default. Only on a dedicated recovery-ready
 device with correct 950mV, no G3D fault, safe MMU/TZ and DVS off, use:
 

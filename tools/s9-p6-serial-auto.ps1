@@ -13,9 +13,11 @@ param(
     [ValidateRange(3,45)][int]$AckTimeoutSeconds=18,
     [ValidateRange(30,3600)][int]$PhaseSeconds=120,
     [ValidateRange(30,3600)][int]$ScreenOffSeconds=110,
-    [ValidateRange(10,180)][int]$DisplayTimeoutSeconds=60,
+    [ValidateRange(10,300)][int]$DisplayTimeoutSeconds=120,
     [string]$LogPath='',
     [switch]$SkipDisplay,
+    [switch]$ResumeCAOnly,
+    [switch]$TestDisplayEvidence,
     [switch]$EnableActualG3D,
     [switch]$PreflightOnly,
     [switch]$Execute
@@ -27,6 +29,7 @@ $script:Serial=$null;$script:Log=$null
 $script:Buf=New-Object byte[] 16384
 $script:Recent='';$script:Partial=''
 $script:ActualAttempted=$false
+$script:OnEventProven=$false
 function Say([string]$s){Write-Host ('[{0:HH:mm:ss}] {1}' -f (Get-Date),$s)}
 function Pump {
     if($null -eq $script:Serial){return}
@@ -87,19 +90,72 @@ function Rest([string]$stage,[int]$seconds){
     $until=[DateTime]::UtcNow.AddSeconds($seconds)
     while([DateTime]::UtcNow -lt $until){Pump}
 }
-function Display([string]$state){
-    Say ('PHYSICAL ACTION: display '+$state+' NOW')
+# Cross-check independent ON evidence if the one-shot GenericARMPE line was
+# dropped/interleaved on USB. This is *compositor activity*, NOT proof the
+# physical panel lit. Never use this fallback to authorize real G3D gating.
+function Get-P6DisplayEvidence([string]$state,[string]$logText){
+    if($logText.Contains('GenericARMPE: the display '+$state)){
+        return 'KERNEL_EVENT'
+    }
+    if($state -ne 'on'){return 'NONE'} # OFF requires direct hardware/request marker
+    $frames=0
+    $latestUp=[long]-1
+    $samples=[regex]::Matches($logText,'(?m)^p5-gpu: up=(\d+)ms[^\r\n]*?frame_age_ms=(\d+)')
+    foreach($m in $samples){
+        $up=[long]$m.Groups[1].Value
+        $age=[long]$m.Groups[2].Value
+        if($up -gt $latestUp){
+            if($age -le 1500){$frames++}else{$frames=0}
+            $latestUp=$up
+        }
+    }
+    # 2 distinct five-second snapshots; merely a single short frame age may
+    # be a transient or an interleaved serial line.
+    if($frames -ge 2){return 'FRAME_PROXY'}
+    $wake=[regex]::Matches($logText,'(?m)^p6-wake: up=(\d+)ms[^\r\n]*?presents=(\d+)')
+    $presentUp=[long]-1
+    foreach($m in $wake){
+        if([long]$m.Groups[2].Value -gt 0){
+            $presentUp=[long]$m.Groups[1].Value
+        }
+    }
+    if($frames -ge 1 -and $presentUp -gt 0 -and
+        [math]::Abs($latestUp-$presentUp) -le 15000){return 'FRAME_PROXY'}
+    return 'NONE'
+}
+function Display([ValidateSet('on','off')][string]$state){
+    $script:OnEventProven=$false
+    Say ('PHYSICAL ACTION: press the S9 power button to turn display '+$state+
+        ' NOW; confirm actual panel state (this script does not press the key)')
     if(-not $Execute){return}
     Drain 200
     $script:Recent=''
     try{[Console]::Beep(960,160)}catch{}
-    $expected='GenericARMPE: the display '+$state
     $until=[DateTime]::UtcNow.AddSeconds($DisplayTimeoutSeconds)
+    $reminded=$false
     while([DateTime]::UtcNow -lt $until){
         Pump
-        if($script:Recent.Contains($expected)){Say ('CONFIRMED physical display '+$state);return}
+        $evidence=Get-P6DisplayEvidence $state $script:Recent
+        if($evidence -eq 'KERNEL_EVENT'){
+            if($state -eq 'on'){$script:OnEventProven=$true}
+            Say ('CONFIRMED display '+$state+' via GenericARMPE kernel request marker')
+            return
+        }
+        if($state -eq 'on' -and $evidence -eq 'FRAME_PROXY'){
+            Say 'WARNING: GenericARMPE display ON marker MISSING, but two independent frame-activity observations resumed.'
+            Say 'PROXY ONLY: physical panel power state is UNVERIFIED; real G3D gate phase will be DISABLED.'
+            return
+        }
+        if(-not $reminded -and [DateTime]::UtcNow -gt $until.AddSeconds(-[math]::Ceiling($DisplayTimeoutSeconds/2))){
+            $reminded=$true
+            Say ('STILL WAITING for display '+$state+'. Check screen; press physical power key if it stayed off.')
+            try{[Console]::Beep(1120,200)}catch{}
+        }
     }
-    throw ('Display '+$state+' not confirmed in serial log')
+    $lastGpu=[regex]::Matches($script:Recent,'(?m)^p5-gpu: up=(\d+)ms[^\r\n]*?frame_age_ms=(\d+)') |
+        Select-Object -Last 1
+    $lastAge=if($null -ne $lastGpu){$lastGpu.Groups[2].Value}else{'unmeasured'}
+    throw ("Display $state NOT CONFIRMED in kernel log or frame-activity telemetry within $DisplayTimeoutSeconds seconds; last frame_age_ms=$lastAge. Data for earlier phases is intact; do not infer successful wake. Use -ResumeCAOnly after physically restoring screen ON.")
 }
 function GateGuard {
     # Read status immediately before the REAL gate, never trust earlier output.
@@ -125,7 +181,37 @@ function Exit-Safe {
         'sysctl kern.hakios.p5_threads=0','sysctl kern.hakios.p4_mode=0','sysctl kern.hakios.p6_phase=9','sysctl kern.hakios.p6_stats')
     foreach($cmd in $commands){try{Send $cmd}catch{Write-Warning ('UNCONFIRMED safe exit: '+$cmd+' '+$_.Exception.Message)}}
 }
+function Run-CAStage {
+    if($ResumeCAOnly){
+        Say 'RESUME P6.5 ONLY: previous A/B/C phases are NOT repeated.'
+        if($Execute){
+            $visual=Read-Host 'Ensure screen is PHYSICALLY ON and interactive. Type ON to continue or anything else to abort'
+            if($visual -cne 'ON'){throw 'CA-only resume canceled; screen ON not confirmed by operator'}
+        }
+        Send 'sysctl kern.hakios.g3d_lab_gate=0'
+        Send 'sysctl kern.hakios.g3d_lab_rail_probe=0'
+        Send 'sysctl kern.hakios.p4_mode=0'
+        Send 'sysctl kern.hakios.p5_mode=0'
+        Send 'sysctl kern.hakios.p5_threads=0'
+        Send 'sysctl kern.hakios.p6_mode=2'
+    }
+    Send 'sysctl kern.hakios.p6_flags=17'
+    Send 'sysctl kern.hakios.p6_phase=7'
+    Send 'sysctl kern.hakios.p5_phase=7'
+    Send 'sysctl kern.hakios.p5_mode=2'
+    Send 'sysctl kern.hakios.p5_threads=1'
+    Rest 'B6 P6.5 CA static frame and thread work; no touches' $PhaseSeconds
+    Say 'Optional controlled 10-20s swipe test NOW (same wallpaper/apps); other settings unchanged'
+    Rest 'B6 CA interactions/wake burst' 30
+    Send 'sysctl kern.hakios.p6_mode=0'
+    Send 'sysctl kern.hakios.p5_mode=0'
+    Send 'sysctl kern.hakios.p5_threads=0'
+    Send 'sysctl kern.hakios.p4_mode=0'
+    Send 'sysctl kern.hakios.p6_phase=8'
+    Rest 'A2 reversal observer OFF' 60
+}
 function Run-Phases {
+    if($ResumeCAOnly){Run-CAStage;return}
     Send 'sysctl kern.hakios.g3d_lab_gate=0'
     Send 'sysctl kern.hakios.p6_mode=0'
     Send 'sysctl kern.hakios.p4_mode=0'
@@ -163,6 +249,7 @@ function Run-Phases {
         Rest 'B4 wake again' 30
         Send 'sysctl kern.hakios.g3d_lab_stats'
         if($EnableActualG3D){
+            if($Execute -and -not $script:OnEventProven){throw 'G3D real gate REFUSED: ON proxy only, missing GenericARMPE kernel event'}
             GateGuard
             Send 'sysctl kern.hakios.p6_phase=6'
             Send 'sysctl kern.hakios.p5_phase=6'
@@ -177,23 +264,28 @@ function Run-Phases {
             Send 'sysctl kern.hakios.g3d_lab_stats'
         }
     }else{Say 'SCREEN phases skipped: cannot claim G3D OFF residency'}
-
-    Send 'sysctl kern.hakios.p6_flags=17'
-    Send 'sysctl kern.hakios.p6_phase=7'
-    Send 'sysctl kern.hakios.p5_phase=7'
-    Send 'sysctl kern.hakios.p5_mode=2'
-    Send 'sysctl kern.hakios.p5_threads=1'
-    Rest 'B6 P6.5 CA static frame and thread work; no touches' $PhaseSeconds
-    Say 'Optional controlled 10-20s swipe test NOW (same wallpaper/apps); other settings unchanged'
-    Rest 'B6 CA interactions/wake burst' 30
-
-    Send 'sysctl kern.hakios.p6_mode=0'
-    Send 'sysctl kern.hakios.p5_mode=0'
-    Send 'sysctl kern.hakios.p5_threads=0'
-    Send 'sysctl kern.hakios.p4_mode=0'
-    Send 'sysctl kern.hakios.p6_phase=8'
-    Rest 'A2 reversal observer OFF' 60
+    Run-CAStage
 }
+if($TestDisplayEvidence){
+    $cases=@(
+        @('on',"GenericARMPE: the display on (iOS's power request)",'KERNEL_EVENT'),
+        @('off',"GenericARMPE: the display off (iOS's power request)",'KERNEL_EVENT'),
+        @('on',"p5-gpu: up=1000ms phase=5 frame_age_ms=75 job_age_ms=0`np5-gpu: up=6000ms phase=5 frame_age_ms=99 job_age_ms=0",'FRAME_PROXY'),
+        @('on',"p5-gpu: up=1000ms phase=5 frame_age_ms=75`np6-wake: up=5500ms phase=5 presents=50",'FRAME_PROXY'),
+        @('on',"p5-gpu: up=1000ms phase=5 frame_age_ms=168034`np5-gpu: up=6000ms phase=5 frame_age_ms=173034",'NONE'),
+        @('on',"p5-gpu: up=1000ms frame_age_ms=60`np5-gpu: up=6000ms frame_age_ms=60`np5-gpu: up=11000ms frame_age_ms=6000",'NONE'),
+        @('on',"p5-gpu: up=1000ms phase=5 frame_age_ms=75",'NONE'),
+        @('off',"p5-gpu: up=1000ms phase=5 frame_age_ms=500000`np5-gpu: up=6000ms phase=5 frame_age_ms=505000",'NONE'),
+        @('on',"GenericARMPE: the display off",'NONE')
+    )
+    foreach($c in $cases){
+        $got=Get-P6DisplayEvidence $c[0] $c[1]
+        if($got -cne $c[2]){throw "Display evidence test FAILED for $($c[0]): expected=$($c[2]), got=$got"}
+    }
+    Say ('P6 display evidence: '+$cases.Count+' deterministic tests PASS; no COM opened or commands sent')
+    return
+}
+if($ResumeCAOnly -and $EnableActualG3D){throw '-ResumeCAOnly cannot request hardware G3D gating'}
 Say ('S9 P6 unified COM one-image lab: '+$(if($Execute){'EXECUTE'}else{'PREVIEW ONLY'}))
 if($EnableActualG3D){Say 'WARNING: ACTUAL G3D trial requested; runtime confirmation still required'}
 else{Say 'G3D uses SHADOW only. Actual gating disabled by default.'}
