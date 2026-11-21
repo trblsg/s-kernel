@@ -300,7 +300,7 @@ int main(int argc,char **argv) {
                 (unsigned long long)(info.pti_virtual_size>>20),
                 faults<0?0:faults,pageins<0?0:pageins,csw<0?0:csw,mach<0?0:mach,unix<0?0:unix,
                 uptime,old?"sample":"new-pid");
-            if(p6_mode && (p6_flags&3))
+            if(p6_mode && (p6_flags&2))
                 printf("p6-proc: up=%llus phase=%d name=%s pid=%d cpu_pct=%.2f csw=%d faults=%d pageins=%d syscalls=%d valid_delta=%u source=process_counters_not_IRQ\n",
                     uptime,p6_phase,name,pids[k],cpu,csw<0?0:csw,faults<0?0:faults,
                     pageins<0?0:pageins,(mach>0?mach:0)+(unix>0?unix:0),old?1u:0u);

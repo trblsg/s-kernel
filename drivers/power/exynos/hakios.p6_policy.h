@@ -37,8 +37,7 @@ s9_p6_shadow_eval(struct s9_p6_shadow s, int32_t big_mc, int32_t gpu_mc,
      * taking M3s out will meet a real UI deadline. Ignore uninitialized
      * load (UINT32_MAX). A 10Hz static compositor is not 60Hz motion. */
     s.park_candidate = big_busy <= 25 && little_busy <= 70 &&
-        touches == 0 && (frames == 0 ||
-        (frames <= 60 && frame_gap_ms >= 70)) &&
+        touches == 0 && (frames == 0 || frame_gap_ms >= 70) &&
         big_busy != UINT32_MAX && little_busy != UINT32_MAX;
     s.changed = (prev_big!=s.big_hot || prev_gpu!=s.gpu_hot ||
         prev_park!=s.park_candidate);

@@ -22,7 +22,7 @@ param(
 )
 Set-StrictMode -Version 2
 $ErrorActionPreference='Stop'
-$script:Allowed='^sysctl kern\.hakios\.(?:(?:p6_mode|p6_flags|p6_phase|p6_log_ms|p4_mode|p5_mode|p5_threads|p5_phase|g3d_lab_gate|g3d_lab_idle_ms|g3d_lab_phase|g3d_lab_reset)=[0-9]{1,5}|(?:p6_stats|p5_stats|g3d_lab_stats))$'
+$script:Allowed='^sysctl kern\.hakios\.(?:(?:p6_mode|p6_flags|p6_phase|p6_log_ms|p4_mode|p5_mode|p5_threads|p5_phase|g3d_lab_gate|g3d_lab_idle_ms|g3d_lab_rail_probe|g3d_lab_phase|g3d_lab_reset)=[0-9]{1,5}|(?:p6_stats|p5_stats|g3d_lab_stats))$'
 $script:Serial=$null;$script:Log=$null
 $script:Buf=New-Object byte[] 16384
 $script:Recent='';$script:Partial=''
@@ -103,13 +103,13 @@ function Display([string]$state){
 }
 function GateGuard {
     # Read status immediately before the REAL gate, never trust earlier output.
-    if(-not $Execute){Say 'PREVIEW REQUIRE: g3d_lab_stats requested_mv=950, fault=0, domain=1, gpu_safe=1, tz_ok=1';return}
+    if(-not $Execute){Say 'PREVIEW REQUIRE: g3d_lab_stats requested_mv=950 rail_valid=1 rail_last_mv=950 fault=0 domain=1 gpu_safe=1 tz_ok=1';return}
     Send 'sysctl kern.hakios.g3d_lab_stats'
     $line=[regex]::Matches($script:Recent,'usb: kern\.hakios\.g3d_lab_stats = ([^\r\n]+)') |
         Select-Object -Last 1
     if($null -eq $line -or $line.Count -eq 0){throw 'Cannot parse G3D status: gate refused'}
     $values=$line[0].Groups[1].Value
-    foreach($pair in @('requested_mv=950','fault=0','domain=1','gpu_safe=1','tz_ok=1','mode=1')){
+    foreach($pair in @('requested_mv=950','rail_valid=1','rail_last_mv=950','fault=0','domain=1','gpu_safe=1','tz_ok=1','mode=1')){
         if($values -notmatch ('(?:^|\s)'+[regex]::Escape($pair)+'(?:\s|$)')){throw "Gate refused: status missing $pair : $values"}
     }
     $confirm=Read-Host 'Danger: actual G3D OFF/ON changes hardware. Type GATE to proceed or Enter to skip'
@@ -121,7 +121,7 @@ function Exit-Safe {
     $commands=@()
     if($script:ActualAttempted){$commands+=@('sysctl kern.hakios.g3d_lab_gate=0','sysctl kern.hakios.g3d_lab_reset=1','sysctl kern.hakios.g3d_lab_stats')}
     else{$commands+='sysctl kern.hakios.g3d_lab_gate=0'}
-    $commands+=@('sysctl kern.hakios.p6_mode=0','sysctl kern.hakios.p5_mode=0',
+    $commands+=@('sysctl kern.hakios.g3d_lab_rail_probe=0','sysctl kern.hakios.p6_mode=0','sysctl kern.hakios.p5_mode=0',
         'sysctl kern.hakios.p5_threads=0','sysctl kern.hakios.p4_mode=0','sysctl kern.hakios.p6_phase=9','sysctl kern.hakios.p6_stats')
     foreach($cmd in $commands){try{Send $cmd}catch{Write-Warning ('UNCONFIRMED safe exit: '+$cmd+' '+$_.Exception.Message)}}
 }
@@ -155,6 +155,7 @@ function Run-Phases {
         Send 'sysctl kern.hakios.p5_phase=5'
         Send 'sysctl kern.hakios.g3d_lab_idle_ms=10000'
         Send 'sysctl kern.hakios.g3d_lab_gate=1'
+        Send 'sysctl kern.hakios.g3d_lab_rail_probe=1'
         Send 'sysctl kern.hakios.g3d_lab_phase=5'
         Display 'off'
         Rest 'B4 P6.4 G3D shadow while physically OFF' $ScreenOffSeconds

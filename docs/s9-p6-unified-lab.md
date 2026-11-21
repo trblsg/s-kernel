@@ -97,7 +97,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/s9-p6-serial-auto.ps1 
 ```
 
 Before mode2, the script re-reads `g3d_lab_stats`, requires mode1
-shadow, `requested_mv=950 fault=0 domain=1 gpu_safe=1 tz_ok=1` and
+shadow, measured `rail_valid=1 rail_last_mv=950`, requested_mv=950,
+`fault=0 domain=1 gpu_safe=1 tz_ok=1` and
 explicitly prompts `GATE`. Do not use mode3 here: 10fps still
 produces frame activity and power cycling risks. Watch GPU job failures,
 queue, PMU domain, PLL, wake latency, battery and thermal. If safety is not
@@ -136,6 +137,7 @@ sysctl kern.hakios.p5_mode=2
 sysctl kern.hakios.p5_phase=5
 sysctl kern.hakios.g3d_lab_idle_ms=10000
 sysctl kern.hakios.g3d_lab_gate=1
+sysctl kern.hakios.g3d_lab_rail_probe=1
 sysctl kern.hakios.g3d_lab_phase=5
 ```
 
@@ -149,6 +151,7 @@ and returns to 1 before resumed jobs after physical wake. To exit:
 ```text
 sysctl kern.hakios.g3d_lab_gate=0
 sysctl kern.hakios.g3d_lab_reset=1
+sysctl kern.hakios.g3d_lab_rail_probe=0
 sysctl kern.hakios.g3d_lab_stats
 ```
 Note: `g3d_lab_reset=1` **writes and verifies 950mV**; it is a safety

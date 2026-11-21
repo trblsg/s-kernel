@@ -10,6 +10,9 @@ int main(void)
     /* Cold static compositor ~10fps: candidate only, no actuation. */
     s=s9_p6_shadow_eval(s,72000,65000,10,12,0,50,100);
     assert(s.park_candidate==1 && s.big_hot==0 && s.gpu_hot==0);
+    /* Same 10fps must remain classified static in a longer 30s window. */
+    s=s9_p6_shadow_eval(s,72000,65000,10,12,0,300,100);
+    assert(s.park_candidate==1);
     /* Interactive 60Hz output must never qualify for M3 parking. */
     s=s9_p6_shadow_eval(s,72000,65000,10,12,0,300,16);
     assert(s.park_candidate==0);
