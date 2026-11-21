@@ -28,6 +28,7 @@
 #include <sys/hakios.lx.h>
 #include <sys/hakios.net.h>
 #include <sys/systm.h>
+#include <sys/sysctl.h>
 #include <vm/memory_types.h>
 #include <vm/vm_kern.h>
 #include <sys/hakios.xnu.h>
@@ -556,6 +557,12 @@ static struct {
 	bool attached;
 } lx_vector[LX_VECTORS];
 static uint32_t lx_irq_first;                   /* the GIC's number of vector 0; 0: no interrupts */
+/* P6.1: handler invocations for the bridge's own IRQ vectors; not CPU
+ * wake counts and never including unrelated GIC devices. */
+static uint64_t p6_wifi_irq_handlers;
+SYSCTL_DECL(_kern_hakios);
+SYSCTL_QUAD(_kern_hakios, OID_AUTO, p6_wifi_irqs, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN,
+    &p6_wifi_irq_handlers, "P6 Wi-Fi bridge GIC handler invocations; not all system IRQs");
 static uint32_t lx_irq_pending;                 /* the vectors that have fired and are not dealt with yet */
 static uint32_t lx_irq_running;                 /* the vectors whose function the thread is in */
 static thread_t lx_irq_thread;
@@ -565,6 +572,7 @@ static LCK_MTX_DECLARE(lx_irq_lock, &lx_lock_group);
 static void
 lx_irq_arrived(__unused void *context, uint32_t intid)
 {
+	__atomic_fetch_add(&p6_wifi_irq_handlers, 1, __ATOMIC_RELAXED);
 	gic_v3_spi_mask(intid);
 	os_atomic_or(&lx_irq_pending, 1u << (intid - lx_irq_first), relaxed);
 	thread_wakeup((event_t)&lx_irq_pending);

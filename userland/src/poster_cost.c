@@ -39,6 +39,15 @@ static const char *targets[]={"backboardd","CollectionsPoster","PosterBoard","Sp
 #define P6_TARGET_COUNT (sizeof(targets)/sizeof(targets[0]))
 static int p6_last_pid[P6_TARGET_COUNT];
 static uint32_t p6_pid_changes[P6_TARGET_COUNT],p6_missed[P6_TARGET_COUNT];
+/* P6.1 source-specific counters from matching S9 kernel drivers, not
+ * actual CPU wakeup-residency events. Missing sysctl stays visibly invalid. */
+static const char *const p6_source_nodes[]={
+    "kern.hakios.p6_usb_ticks","kern.hakios.p6_usb_connected_ticks",
+    "kern.hakios.p6_usb_overlap_ticks","kern.hakios.p6_touch_irqs",
+    "kern.hakios.p6_touch_polls","kern.hakios.p6_wifi_irqs"
+};
+static uint64_t p6_source_prev[6];
+static uint32_t p6_source_prev_valid;
 static struct snap prev[MAX_MATCHES],now[MAX_MATCHES];
 static int prev_count;
 
@@ -194,6 +203,32 @@ p4_sample_threads(int pid,const char *procname,unsigned setting,int phase,
     }
 }
 
+static void
+p6_sample_driver_sources(int phase,uint64_t uptime)
+{
+    uint64_t delta[6]={0};
+    uint32_t mask=0,baseline=0;
+    for(unsigned i=0;i<6;i++){
+        uint64_t now=0;
+        size_t size=sizeof(now);
+        if(sysctlbyname(p6_source_nodes[i],&now,&size,NULL,0)!=0 || size!=sizeof(now)){
+            p6_source_prev_valid &= ~(1u<<i);
+            continue;
+        }
+        mask|=1u<<i;
+        if((p6_source_prev_valid&(1u<<i)) && now>=p6_source_prev[i]){
+            delta[i]=now-p6_source_prev[i];
+            baseline|=1u<<i;
+        }
+        p6_source_prev[i]=now;
+        p6_source_prev_valid|=1u<<i;
+    }
+    printf("p6-source: up=%llus phase=%d usb_ticks=%llu usb_connected=%llu usb_overlap=%llu touch_irq=%llu touch_poll=%llu wifi_irq=%llu present_mask=%#x delta_valid=%#x source=USB_thread_call_touch_GIC_handler_or_poll_not_all_CPU_wakeups\n",
+        (unsigned long long)uptime,phase,
+        (unsigned long long)delta[0],(unsigned long long)delta[1],
+        (unsigned long long)delta[2],(unsigned long long)delta[3],
+        (unsigned long long)delta[4],(unsigned long long)delta[5],mask,baseline);
+}
 static int selected(const char *name) {
     /* Darwin proc_name may truncate an extension's long executable name.
      * Treat PridePosterExtension / PridePosterExten as ONE census identity;
@@ -312,6 +347,8 @@ int main(int argc,char **argv) {
                     printf("p6-missing: up=%llus phase=%d name=%s last_pid=%d missing=1 crash=unverified\n",
                         uptime,p6_phase,targets[i],p6_last_pid[i]);
             }
+        if(p6_mode && (p6_flags&1))
+            p6_sample_driver_sources(p6_phase,uptime);
         if(selected_threads>0) {
             memcpy(p4_before,p4_after,(size_t)p4_n_after*sizeof(p4_before[0]));
             p4_n_before=p4_n_after;

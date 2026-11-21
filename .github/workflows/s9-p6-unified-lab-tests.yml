@@ -34,6 +34,10 @@ jobs:
           k=Path('drivers/power/exynos/hakios.p6_lab.h').read_text()
           e=Path('userland/src/eagl.c').read_text()
           p=Path('userland/src/poster_cost.c').read_text()
+          usb=Path('drivers/usb/hakios.dwc3.c').read_text()
+          touch=Path('drivers/input/touch/hakios.s6sy761.c').read_text()
+          wifi=Path('drivers/wifi/lx/hakios.lx.c').read_text()
+          report=Path('tools/s9-p6-report.ps1').read_text()
           gpu=Path('drivers/gpu/mali/hakios.mali.c').read_text()
           g=Path('drivers/gpu/mali/hakios.mali_lab.h').read_text()
           m=Path('drivers/map').read_text()
@@ -49,6 +53,17 @@ jobs:
           assert 'g3d_idle_gate();' in gpu
           assert 'g3d_lab_gpu_safe' in gpu and 'g3d_lab_protection_ok' in gpu
           assert 'p6-churn:' in p and 'crash=unverified' in p
+          for field in ('p6_usb_ticks','p6_usb_connected_ticks','p6_usb_overlap_ticks'):
+              assert f'SYSCTL_QUAD(_kern_hakios, OID_AUTO, {field}' in usb
+          for field in ('p6_touch_irqs','p6_touch_polls'):
+              assert f'SYSCTL_QUAD(_kern_hakios, OID_AUTO, {field}' in touch
+          assert '__atomic_fetch_add(&p6_usb_ticks' in usb and '__atomic_fetch_add(&p6_touch_irq_handlers' in touch
+          assert '__atomic_fetch_add(&p6_touch_poll_checks' in touch
+          assert 'p6_sample_driver_sources(p6_phase,uptime)' in p and 'p6-source:' in p
+          assert 'p6_wifi_irq_handlers' in wifi and 'p6_wifi_irqs' in wifi
+          assert '__atomic_fetch_add(&p6_wifi_irq_handlers' in wifi
+          assert '"kern.hakios.p6_wifi_irqs"' in p
+          assert 'DRIVER-SOURCE:' in report
           assert 'strncmp(name,"PridePoster",11)' in p
           assert 'CONFIRMED PridePoster SIGSEGV exits' in Path('tools/s9-p6-report.ps1').read_text()
           assert 'p6-ca-thread:' in p and 'sampled_libproc_no_stack' in p
@@ -90,6 +105,7 @@ jobs:
           @(
             'p6: PHASE=2 up=100000ms flags=1',
             'p6-wake: up=105000ms phase=2 span_ms=5000 gov_loops=125 boost_requests=1 touches=1 presents=50 idle_lit=91 idle_big=95 missing=0',
+            'p6-source: up=105s phase=2 usb_ticks=2500 usb_connected=2500 usb_overlap=0 touch_irq=0 touch_poll=1250 wifi_irq=14 present_mask=0x3f delta_valid=0x3f source=USB_thread_call_touch_GIC_handler_or_poll_not_all_CPU_wakeups',
             'p6: PHASE=3 up=110000ms flags=3',
             'p6-churn: up=115s phase=3 name=PridePosterExtension prev_pid=100 new_pid=101 changes=1 missing_samples=0 crash=unverified',
             'com.apple.xpc.launchd|2026-11-21 05:32:11.589808 (pid/137/com.apple.PridePoster.PridePosterExtension [101]) <Notice>: exited due to SIGSEGV | sent by exc handler[101]',
@@ -103,7 +119,7 @@ jobs:
           $report=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/s9-p6-report.ps1 -Log $file
           if($LASTEXITCODE -ne 0){throw 'P6 report failed'}
           $text=$report -join "`n"
-          foreach($marker in @('PHASE=2:', 'WAKE-PROXY:', 'PID-CHURN PridePoster',
+          foreach($marker in @('PHASE=2:', 'WAKE-PROXY:', 'DRIVER-SOURCE:', 'PID-CHURN PridePoster',
             'SHADOW:', 'CA GL:', 'CONFIRMED PridePoster SIGSEGV exits in launchd log=1',
             'skipped-interleaved=0', 'NOT MEASURED:')){
             if(-not $text.Contains($marker)){throw "P6 report missing $marker"}

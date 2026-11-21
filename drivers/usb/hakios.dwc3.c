@@ -337,6 +337,9 @@ static thread_call_t call;
 static int stage;                       /* how far the bring-up got: 0 none ... 5 */
 static bool started, connected, high_speed;
 static uint32_t busy;                   /* the poll, or the way back to the loader, has the controller */
+/* P6.1 attribution: driver CALL COUNTS, not GIC IRQs or CPU wakeup counts.
+ * No new timer, interrupt, poll or behavioral change. */
+static uint64_t p6_usb_ticks, p6_usb_connected_ticks, p6_usb_overlap_ticks;
 static bool want_return;                /* the console asked to end the run */
 static bool wifi_report_said, want_wifi_report;           /* the console is up: the radio's log said again, once (hakios.lx.c) */
 static thread_call_t return_call;       /* ... which end_the_run() does, on a thread of its own */
@@ -405,6 +408,12 @@ SYSCTL_QUAD(_kern_hakios_usb, OID_AUTO, bytes_out, CTLFLAG_RD | CTLFLAG_LOCKED, 
 SYSCTL_QUAD(_kern_hakios_usb, OID_AUTO, resets, CTLFLAG_RD | CTLFLAG_LOCKED, &n_resets, "bus resets");
 SYSCTL_UINT(_kern_hakios_usb, OID_AUTO, dropped, CTLFLAG_RD | CTLFLAG_LOCKED, &ring_dropped, 0, "log bytes dropped: the host did not read fast enough");
 SYSCTL_QUAD(_kern_hakios_usb, OID_AUTO, restarts, CTLFLAG_RD | CTLFLAG_LOCKED, &n_restarts, "the link restarted: a replug, or a host that got no answer");
+SYSCTL_QUAD(_kern_hakios, OID_AUTO, p6_usb_ticks, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN,
+    &p6_usb_ticks, "P6 USB gadget periodic thread_call invocations; not GIC interrupts");
+SYSCTL_QUAD(_kern_hakios, OID_AUTO, p6_usb_connected_ticks, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN,
+    &p6_usb_connected_ticks, "P6 gadget thread calls while USB was connected");
+SYSCTL_QUAD(_kern_hakios, OID_AUTO, p6_usb_overlap_ticks, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN,
+    &p6_usb_overlap_ticks, "P6 USB gadget thread calls skipped due to busy controller");
 
 /* the console's answers: into the log (and so to the host) as whole lines, not onto the screen */
 static void con(const char *format, ...) __printflike(1, 2);
@@ -2052,7 +2061,11 @@ tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 {
 	uint64_t deadline;
 
+	__atomic_fetch_add(&p6_usb_ticks, 1, __ATOMIC_RELAXED);
+	if (connected)
+		__atomic_fetch_add(&p6_usb_connected_ticks, 1, __ATOMIC_RELAXED);
 	if (!os_atomic_cmpxchg(&busy, 0, 1, acquire)) {
+		__atomic_fetch_add(&p6_usb_overlap_ticks, 1, __ATOMIC_RELAXED);
 		goto again;
 	}
 	if (!started) {

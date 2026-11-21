@@ -112,6 +112,9 @@ static volatile bool irq_attached;    /* the GIC's SPI 44 and the pin's EINT are
 static volatile bool irq_running;     /* the IRQ thread is reading the queue */
 static uint32_t irq_pending;          /* the line has fired, the IRQ thread has not read the queue yet */
 static uint64_t irqs;                 /* interrupts taken (for the minute line and the log) */
+/* P6.1: source-specific IRQ handler and 4ms polling invocation counts;
+ * neither is proof that a particular CPU exited WFI/CPD. */
+static uint64_t p6_touch_irq_handlers, p6_touch_poll_checks;
 static thread_t irq_thread;
 static struct {
 	uint64_t events, downs;
@@ -177,6 +180,10 @@ static uint32_t touch_events;
 SYSCTL_DECL(_kern_hakios);
 SYSCTL_UINT(_kern_hakios, OID_AUTO, touch_events, CTLFLAG_RD | CTLFLAG_LOCKED, &touch_events, 0,
     "finger events read from the S6SY761");
+SYSCTL_QUAD(_kern_hakios, OID_AUTO, p6_touch_irqs, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN,
+    &p6_touch_irq_handlers, "P6 count of S6SY761 GIC handler invocations; IRQ mode only");
+SYSCTL_QUAD(_kern_hakios, OID_AUTO, p6_touch_polls, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN,
+    &p6_touch_poll_checks, "P6 S6SY761 periodic IRQ-pin poll checks; fallback mode only");
 
 /* tell the CPU governor how many fingers are down: its touch boost is held while any is (gov_policy=2) */
 static void
@@ -316,6 +323,7 @@ extern void gic_v3_spi_detach(uint32_t intid);
 static void
 irq_arrived(__unused void *context, uint32_t intid)
 {
+	__atomic_fetch_add(&p6_touch_irq_handlers, 1, __ATOMIC_RELAXED);
 	gic_v3_spi_mask(intid);
 	os_atomic_store(&irq_pending, 1, release);
 	thread_wakeup((event_t)&irq_pending);
@@ -600,6 +608,7 @@ touch_thread(void *arg, __unused wait_result_t wr_)
 		    res_y - 1);
 		/* up to four rounds of reads per tick while the pin is low */
 		for (unsigned tick = 1;; tick++) {
+			__atomic_fetch_add(&p6_touch_poll_checks, 1, __ATOMIC_RELAXED);
 			for (int rounds = 0; rounds < 4 && irq_low(); rounds++) {
 				read_events();
 			}

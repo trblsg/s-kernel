@@ -10,7 +10,7 @@ PMIC voltages, scheduler affinity, framebuffer dirty regions or frame skipping.*
 
 | Module | Actual code | Cannot claim |
 |---|---|---|
-| P6.1 wake-source *proxies* | In existing cpufreq governor thread: 5s window of per-core scheduler idle, governor loop count, actual touch/frame notifications, requests to wake DVFS worker; in existing `poster_cost`: `proc_taskinfo` context switches, sampled threads (backboardd, USB/haptics daemons, chronod, PridePoster) | No global GIC IRQ, timer-callout origin, WFI, CPU_SUSPEND or core power-off residency. Actual kernel USB/haptics polling loops are NOT instrumented in this overlay. Do not label `csw` as IRQ or wakeups |
+| P6.1 driver sources + wake *proxies* | USB gadget **actual periodic thread-call count**, counts while connected and overlap; S6SY761 **actual touch GIC handler / fallback 4ms poll-check counts**; Wi-Fi bridge **actual GIC handler invocation count**. Existing governor thread: per-core scheduler idle, governor loops, touch/frame notifications, DVFS-worker wake requests. Existing `poster_cost`: process CSW and thread snapshots | No global GIC IRQ, timer-callout origin, WFI, CPU_SUSPEND or core power-off residency. USB gadget/touch/Wi-Fi handlers are specific sources, not total CPU wakeups; haptic driver attribution and global kernel timers are not implemented. Do not label `csw` as IRQ |
 | P6.2 background process churn | PID transition and disappearance census for Poster/chronod/SpringBoard/backboardd/known daemons; per-process CPU, context switches, faults, syscalls. Matches abbreviated `PridePoster*` executable names and recognizes launchd-confirmed `PridePosterExtension` SIGSEGV exits offline | PID change is **not** proof of SIGSEGV; only explicit launchd signal messages are treated as confirmed exits |
 | P6.3 thermal DVFS/parking **shadow** | Exynos9810 BIG threshold 83/96C, G3D 88/95C, 5C hysteresis; M3 parking *candidate* using LITTLE/BIG load, touch, frame cadence. Same already-sampled TMU, no additional sensor timer | No Samsung IPA, no applied rate, no hotplug; suggested state never changes the governor. Unknown TMU retains prior cap |
 | P6.4 G3D shadow and optional real screen-OFF gate | Reuses existing `g3d_lab_gate=1`/2; PMU domain/PLL via existing 5s independent sampler (not GPU MMIO), GPU worker owner, faults and wake latency via P5; actual mode2 requires separate explicit human opt-in | No promise of watt savings. An OFF screen doesn't automatically make PMU G3D OFF. Mode2 can stall on hardware and requires rollback |
@@ -26,6 +26,11 @@ the upstream XNU interrupt/timer sources, absent from this driver overlay.
 Full P6 telemetry involves **both** kernel and matching userland:
 - Kernel: `drivers/power/exynos/hakios.exynos_cpufreq.c` and
   `hakios.p6_lab.h`, `hakios.p6_policy.h`, existing G3D+P5 kernel paths.
+- Kernel-specific attribution: `drivers/usb/hakios.dwc3.c` and
+  `drivers/input/touch/hakios.s6sy761.c` and
+  `drivers/wifi/lx/hakios.lx.c`; six read-only cumulative
+  `kern.hakios.p6_usb_*`, `kern.hakios.p6_touch_*` and
+  `kern.hakios.p6_wifi_irqs` sysctls.
 - System: `userland/src/poster_cost.c` and `userland/src/eagl.c`.
 - Host: `tools/s9-p6-serial-auto.ps1`, `tools/s9-p6-report.ps1`.
 - Portable CI: `s9-p6-unified-lab-tests.yml`.
@@ -60,7 +65,7 @@ P4 and P5 switches remain independent. For G3D bring-up,
 `g3d_lab_stats`, `g3d_lab_reset` are unchanged; **p6_flags=8 NEVER gates GPU**.
 
 P6 output labels:
-`p6-wake`, `p6-wake-detail`, `p6-shadow`,
+`p6-wake`, `p6-wake-detail`, `p6-source`, `p6-shadow`,
 `p6-proc`, `p6-churn`, `p6-missing`, `p6-thread-snapshot`,
 `p6-ca-thread`, `p6-ca-gl`.
 P5/P4/G3D labels remain present in the same serial log when enabled.
@@ -184,6 +189,16 @@ sysctl kern.hakios.p6_stats
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/s9-p6-report.ps1 -Log putty-P6-unified-YYYYMMDD-HHMMSS.log
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/s9-p5-report.ps1 -Log putty-P6-unified-YYYYMMDD-HHMMSS.log
 ```
+
+`p6-source` includes absolute counter **deltas**, `present_mask` and
+`delta_valid` masks (bits 1,2,4,8,16,32 correspond to USB tick,
+connected tick, overlap tick, touch IRQ, touch poll and Wi-Fi IRQ). A missing
+counter or first sample is invalid, not zero wakeups. USB serial capture
+itself keeps the USB gadget connected and adds scheduling overhead:
+USB poll counts from a COM125 run do not represent unplugged battery idle.
+The S9 touch driver might be configured in IRQ mode (touch IRQ counter)
+or fallback 4ms polling mode (touch poll count), but these cannot be
+converted into real per-core power-state wakeups.
 
 P6 parser tolerates missing/garbled serial records; it doesn't repair
 raw interleaved lines or treat them as valid. It prints per-phase wake

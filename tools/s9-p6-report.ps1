@@ -4,7 +4,7 @@
 param([Parameter(Mandatory=$true)][string]$Log)
 $ErrorActionPreference='Stop'
 $lines=[IO.File]::ReadAllLines((Resolve-Path -LiteralPath $Log).Path)
-$ph=@();$wake=@();$shadow=@();$proc=@();$churn=@();$missing=@()
+$ph=@();$wake=@();$shadow=@();$proc=@();$churn=@();$missing=@();$source=@()
 $ca=@();$threads=@();$g3d=@();$gpu=@();$crashes=@()
 $off=0;$on=0;$skipped=0
 $prideSegv=@()
@@ -46,6 +46,17 @@ foreach($s in $lines){
                 bigmc=(IntToken $s 'big_mc');gpumc=(IntToken $s 'gpu_mc')
                 load=(IntToken $s 'm3_load');park=(IntToken $s 'park_candidate')
                 bigstep=(IntToken $s 'big_step');gpustep=(IntToken $s 'gpu_step')
+            }
+        } elseif($s -match '^p6-source: up=(\d+)s phase=(\d+)'){
+            $validHex=(Token $s 'delta_valid' '0x0').Replace('0x','')
+            $presentHex=(Token $s 'present_mask' '0x0').Replace('0x','')
+            $source+= [pscustomobject]@{
+                p=[int]$Matches[2];up=[long]$Matches[1]
+                usb=(IntToken $s 'usb_ticks');connected=(IntToken $s 'usb_connected')
+                overlap=(IntToken $s 'usb_overlap');irq=(IntToken $s 'touch_irq')
+                poll=(IntToken $s 'touch_poll');wifi=(IntToken $s 'wifi_irq')
+                valid=[Convert]::ToUInt32($validHex,16)
+                present=[Convert]::ToUInt32($presentHex,16)
             }
         } elseif($s -match '^p6-proc: up=(\d+)s phase=(\d+)'){
             $proc+= [pscustomobject]@{
@@ -104,6 +115,7 @@ Write-Output ("Input lines=$($lines.Count) phase markers=$($ph.Count) skipped-in
 if($ph.Count -eq 0){Write-Warning 'No exact P6 phase markers: verify matching P6 kernel / serial ACK. Do not compare phases.'}
 foreach($phase in ($ph|Select-Object -ExpandProperty p -Unique)){
     $w=@($wake|Where-Object p -eq $phase)
+    $d=@($source|Where-Object p -eq $phase)
     $s=@($shadow|Where-Object p -eq $phase)
     $p=@($proc|Where-Object p -eq $phase)
     $c=@($ca|Where-Object p -eq $phase)
@@ -112,9 +124,18 @@ foreach($phase in ($ph|Select-Object -ExpandProperty p -Unique)){
     $j=@($gpu|Where-Object p -eq $phase)
     $x=@($churn|Where-Object p -eq $phase)
     Write-Output ''
-    Write-Output ("PHASE=${phase}: wakeSamples=$($w.Count) shadowSamples=$($s.Count) procSamples=$($p.Count) caGroups=$($c.Count) caThreads=$($t.Count) g3dSamples=$($g.Count) gpuSamples=$($j.Count) pidChanges=$($x.Count)")
+    Write-Output ("PHASE=${phase}: wakeSamples=$($w.Count) sourceSamples=$($d.Count) shadowSamples=$($s.Count) procSamples=$($p.Count) caGroups=$($c.Count) caThreads=$($t.Count) g3dSamples=$($g.Count) gpuSamples=$($j.Count) pidChanges=$($x.Count)")
     if($w.Count){
         Write-Output ("  WAKE-PROXY: governorLoops=$(Sum $w 'win') boostReq=$(Sum $w 'boost') touch=$(Sum $w 'touch') presented=$(Sum $w 'frames') avgIdleLIT=$(Avg @($w|Where-Object lit -ne 255) 'lit')% avgIdleBIG=$(Avg @($w|Where-Object big -ne 255) 'big')% (NOT GIC IRQ, CPD, WFI)")
+    }
+    if($d.Count){
+        $usb=@($d|Where-Object {($_.valid -band 1) -ne 0})
+        $usbConnected=@($d|Where-Object {($_.valid -band 2) -ne 0})
+        $overlap=@($d|Where-Object {($_.valid -band 4) -ne 0})
+        $touchIRQ=@($d|Where-Object {($_.valid -band 8) -ne 0})
+        $touchPoll=@($d|Where-Object {($_.valid -band 16) -ne 0})
+        $wifiIRQ=@($d|Where-Object {($_.valid -band 32) -ne 0})
+        Write-Output ("  DRIVER-SOURCE: usb_ticks=$(Sum $usb 'usb')/$($usb.Count) samples usb_connected=$(Sum $usbConnected 'connected') usb_overlap=$(Sum $overlap 'overlap') touch_GIC_handler=$(Sum $touchIRQ 'irq')/$($touchIRQ.Count) samples touch_pin_poll=$(Sum $touchPoll 'poll')/$($touchPoll.Count) samples wifi_GIC_handler=$(Sum $wifiIRQ 'wifi')/$($wifiIRQ.Count) samples (counters NOT CPU wakeups)")
     }
     if($s.Count){
         Write-Output ("  SHADOW: bigPeakMC=$(($s|Measure-Object bigmc -Maximum).Maximum) gpuPeakMC=$(($s|Measure-Object gpumc -Maximum).Maximum) parkCandidateSamples=$(Sum $s 'park') bigStepMax=$(($s|Measure-Object bigstep -Maximum).Maximum) gpuStepMax=$(($s|Measure-Object gpustep -Maximum).Maximum) writes=0")
