@@ -116,6 +116,47 @@ jobs:
           if (-not $preview.Contains('Enter x2, 450ms between Enters')) { throw 'Default double-Enter preview missing' }
           if ($preview.Contains('Sent to PuTTY PID')) { throw 'Unexpected input sent in preview mode' }
           Write-Output 'P5 PuTTY COM125 dry-run stage and syntax checks PASS (no device attached)'
+      - name: Validate direct USB CDC-ACM COM125 capture and ACK-gated P5 automation
+        shell: pwsh
+        run: |
+          $file = (Resolve-Path 'tools/s9-p5-serial-auto.ps1').Path
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
+          if ($errors.Count -ne 0) { throw ('P5 direct serial PowerShell syntax: ' + ($errors -join '; ')) }
+          $source = Get-Content -LiteralPath $file -Raw
+          foreach ($required in @(
+            '[IO.Ports.SerialPort]::new(',
+            'Send-Checked',
+            '$script:Serial.Write($bytes,0,$bytes.Length)',
+            '$script:Serial.Read($script:Buf,0,$script:Buf.Length)',
+            'usb> ',
+            ': set (0)',
+            'GenericARMPE: the display ',
+            '[IO.FileMode]::CreateNew',
+            'Do-SafeExit')) {
+            if (-not $source.Contains($required)) { throw ('Missing serial safety feature: ' + $required) }
+          }
+          if ($source.Contains('[System.Windows.Forms.SendKeys]')) { throw 'GUI SendKeys accidentally introduced into direct serial client' }
+          $preview = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $file -Port COM125
+          if ($LASTEXITCODE -ne 0) { throw ('Direct serial dry-run failed: ' + $LASTEXITCODE) }
+          $all = $preview -join "`n"
+          foreach ($required in @(
+            'mode=PREVIEW ONLY',
+            'PREVIEW SEND/VERIFY: sysctl kern.hakios.p5_stats',
+            'PREVIEW SEND/VERIFY: sysctl kern.hakios.p5_phase=0',
+            'PREVIEW SEND/VERIFY: sysctl kern.hakios.p5_phase=1',
+            'PREVIEW SEND/VERIFY: sysctl kern.hakios.p5_mode=2',
+            'PLEASE physically turn the S9 screen off',
+            'PLEASE physically turn the S9 screen on',
+            'PREVIEW SAFE EXIT',
+            'No COM port opened; no data sent')) {
+            if (-not $all.Contains($required)) { throw ('Missing P5 direct serial preview: ' + $required) }
+          }
+          $minimal = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $file -Port COM125 -PreflightOnly
+          if ($LASTEXITCODE -ne 0) { throw 'Preflight-only dry-run failed' }
+          if (($minimal -join "`n").Contains('A1 screen ON baseline')) { throw 'Preflight-only mode attempted A1 phase' }
+          Write-Output 'P5 direct USB CDC-ACM COM125 preview, ACK gate, log and preflight-only checks PASS (no device attached)'
 
   ios-syntax:
     runs-on: macos-15

@@ -39,6 +39,14 @@ param(
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
 
+# Real COM125 logs showed systematically truncated commands with SendKeys, even
+# with pacing and double Enter. Do not let the known-broken GUI path run on the
+# device under investigation. The replacement exclusively owns serial, saves
+# the log and requires the kernel's exact command echo and successful ack.
+if ($Execute -and $Port -eq 'COM125') {
+    throw 'Deprecated COM125 GUI keystroke transport drops sysctl letters. CLOSE PuTTY and use tools/s9-p5-serial-auto.ps1 -Port COM125 -Execute [-PreflightOnly] instead.'
+}
+
 # ALL transmitted input is drawn from this finite, read-only lab allowlist.
 # No shell escapes, arbitrary text, voltage/clock edits or GPU gating.
 $script:AllowedCommand = '^sysctl kern\.hakios\.(?:(?:p4_mode|p4_threads|p5_mode|p5_threads|p5_phase)=[0-9]{1,2}|p5_stats)$'

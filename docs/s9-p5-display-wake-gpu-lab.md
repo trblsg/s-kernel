@@ -70,7 +70,33 @@ Enter these as **one single line** in the workflow. No `p5_*` boot arguments are
 
 Capture all output from boot, fixed 70 brightness, wallpaper, network, charge state, no touch except deliberate display power transition; wait >=420 seconds uptime for Poster to settle.
 
-### Automatic sequence through the existing PuTTY COM125 session (recommended)
+### Recommended: direct USB CDC-ACM script on COM125, with verified acknowledgments
+
+**2026-11-21 actual-device finding:** our PuTTY GUI keystroke script caused the loader to receive truncated lines such as `usb> sctl kn.haki.p5_phe=0`, followed by `usb: sctl: not a command (help)`. The problem persisted after per-key pacing and double Enter. These responses are emitted from `console()` in `drivers/usb/hakios.dwc3.c` after `usbacm_line_feed()` has collected the received USB bytes; they are NOT just PuTTY visual display corruption. The line parser accepts one CR or LF; double Enter cannot replace dropped letters.
+
+**Use `tools/s9-p5-serial-auto.ps1` instead. This script replaces PuTTY during the measurement. PuTTY MUST be fully closed/disconnected before starting it** because Windows COM port handles are exclusive. It opens COM125 as USB CDC ACM at the documented 115200 8N1, no handshake, DTR on; sends each complete ASCII command plus a single CR in one `SerialPort.Write()` call, reads the actual loader stream, and only moves on after BOTH the exact `usb> sysctl ...` echo and the corresponding confirmed `usb: sysctl ...: set (0)` or readback. It logs every raw received byte to a **new timestamped file**, so no data needs to be captured in PuTTY. It does not require re-flashing the already installed P5 BOOT+SYSTEM.
+
+Open local Windows PowerShell 5.1 (on the PC attached to COM125):
+
+```powershell
+# Preview without opening COM125
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/s9-p5-serial-auto.ps1 -Port COM125
+
+# Safest first device check: ONLY p5_stats read and p5_phase=0 marker, with positive echo+ACK verification
+# First CLOSE PuTTY, then run:
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/s9-p5-serial-auto.ps1 -Port COM125 -Execute -PreflightOnly
+
+# Once preflight passes, run the full A1/B1/A2/B2/OFF/ON experiment:
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/s9-p5-serial-auto.ps1 -Port COM125 -Execute
+```
+
+During the full run, physically turn the phone's screen OFF and ON when the script says so; it watches for actual `GenericARMPE: the display off/on` lines and refuses to advance without them. Run when uptime >=420s and the Home Screen is settled; brightness, Wi-Fi and charging conditions fixed. The P5 sysctls and A/B waits are unchanged from the manual table below. On failure after diagnostics have started it attempts to restore `p5_mode=0`, `p5_threads=0`, `p4_mode=0`, but must not claim cleanup without `set (0)` acknowledgments. The script does not flash, change power or thermal settings, skip frames, or touch voltage. The saved `putty-P5-display-wake-gpu-serial-YYYYMMDD-HHMMSS.log` can be fed directly to `tools/s9-p5-report.ps1 -Log <file>` and returned for analysis.
+
+**Limitations:** serial-specific physical transport is not yet hardware-tested with this script from the @ioss9 workspace, which does not expose the user's COM125. The Windows dry-run and source validation are testable; final correctness depends on the observed USB echo and device ACK. If it cannot open the port, close PuTTY and other monitors; do not run both concurrently. If the loader still echoes truncated commands, save the new serial log to investigate USB OUT handling in the kernel rather than forcing P5 phases.
+
+### Legacy: automation through a PuTTY window (COM125 execution disabled)
+
+The old `tools/s9-p5-putty-auto.ps1` is retained for historical reference and dry-run only on COM125. Its `-Execute -Port COM125` path now deliberately refuses to run after repeated real-device corrupted commands. **Do not reattempt P5 via GUI keystrokes; use the direct serial script above.**
 
 `tools/s9-p5-putty-auto.ps1` is a Windows PowerShell 5.1 keyboard automation for the **existing PuTTY window**. It does not open COM125 and therefore does not conflict with PuTTY's exclusive serial port; leave PuTTY running and its **session logging enabled**. The script must run on the **same interactive Windows desktop** as PuTTY, not on a remote workspace host that does not see COM125. PuTTY should show a logged-in shell prompt. The target window is selected by its title containing `COM125`, or by the explicitly supplied PuTTY PID when its title was customized.
 
