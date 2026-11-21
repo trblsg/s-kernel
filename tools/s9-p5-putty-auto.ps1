@@ -15,6 +15,8 @@
   powershell -NoProfile -ExecutionPolicy Bypass -File tools\s9-p5-putty-auto.ps1 -Port COM125 -Execute
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File tools\s9-p5-putty-auto.ps1 -Port COM125 -PuttyProcessId 1234 -Execute
+.EXAMPLE
+  powershell -NoProfile -ExecutionPolicy Bypass -File tools\s9-p5-putty-auto.ps1 -Port COM125 -Execute -EnterCount 2 -EnterDelayMs 600
 #>
 [CmdletBinding()]
 param(
@@ -27,6 +29,8 @@ param(
     [ValidateRange(30,3600)][int]$ScreenOffSeconds = 110,
     [ValidateRange(1,3600)][int]$AfterWakeSeconds = 120,
     [ValidateRange(30,500)][int]$KeyDelayMs = 90,
+    [ValidateRange(1,2)][int]$EnterCount = 2,
+    [ValidateRange(100,3000)][int]$EnterDelayMs = 450,
     [ValidateRange(100,3000)][int]$CommandGapMs = 600,
     [switch]$SkipScreenCycle,
     [switch]$Execute
@@ -138,7 +142,7 @@ function Send-LabCommand([string]$Command) {
         throw "Blocked non-lab command: $Command"
     }
     if (-not $Execute) {
-        Write-Stage ("PREVIEW SEND: " + $Command)
+        Write-Stage ("PREVIEW SEND: {0} [Enter x{1}, {2}ms between Enters]" -f $Command,$EnterCount,$EnterDelayMs)
         return
     }
     Focus-VerifiedPutty
@@ -156,12 +160,21 @@ function Send-LabCommand([string]$Command) {
         [System.Windows.Forms.SendKeys]::SendWait([string]$char)
         Start-Sleep -Milliseconds $KeyDelayMs
     }
-    if ([Ioss9P5PuttyNative]::GetForegroundWindow() -ne $script:TargetHandle) {
-        throw 'PuTTY lost focus before Enter; aborting.'
+    # The actual COM125 USB loader console sometimes accepts a typed command
+    # only after a SECOND physical Enter. The first terminates the line and
+    # the second is an empty shell line if the first was already processed.
+    for ($enterIndex = 0; $enterIndex -lt $EnterCount; $enterIndex++) {
+        if (-not [Ioss9P5PuttyNative]::IsWindow($script:TargetHandle) -or
+            [Ioss9P5PuttyNative]::GetForegroundWindow() -ne $script:TargetHandle) {
+            throw 'PuTTY lost focus before Enter; aborting.'
+        }
+        [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+        if ($enterIndex -lt $EnterCount - 1) {
+            Start-Sleep -Milliseconds $EnterDelayMs
+        }
     }
-    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
     Start-Sleep -Milliseconds $CommandGapMs
-    Write-Stage ("Sent to PuTTY PID {0}: {1}" -f $script:TargetProcessId, $Command)
+    Write-Stage ("Sent to PuTTY PID {0}: {1} (Enter x{2})" -f $script:TargetProcessId, $Command,$EnterCount)
 }
 
 function Wait-Phase([string]$Description, [int]$Seconds) {
@@ -200,7 +213,7 @@ try {
     Write-Stage ("P5 one-boot plan for {0}; mode={1}" -f $Port, $(if($Execute){'EXECUTE'}else{'PREVIEW ONLY'}))
     Write-Stage 'Conditions: P5 matching BOOT+SYSTEM installed, shell logged in, PuTTY serial LOG enabled, warm boot >=420s.'
     Write-Stage 'The plan NEVER opens COM125; PuTTY continues to own serial and its log.'
-    Write-Stage ("Serial-safe typing speed: {0}ms/key, {1}ms command gap (v2 fix for lost bytes)." -f $KeyDelayMs,$CommandGapMs)
+    Write-Stage ("Serial-safe input: {0}ms/key, Enter x{1} ({2}ms gap), {3}ms command gap." -f $KeyDelayMs,$EnterCount,$EnterDelayMs,$CommandGapMs)
     Write-Stage 'Leave charging, brightness and wallpaper unchanged. Do not type into the PC during automatic phase timing.'
     Write-Stage 'IMPORTANT: a failed or truncated initial sysctl command must STOP the run; do not confirm without an actual p5: PHASE=0 marker.'
     if ($Execute) {

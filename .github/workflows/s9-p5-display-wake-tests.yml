@@ -91,7 +91,7 @@ jobs:
           [void][System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
           if ($errors.Count -ne 0) { throw ('PowerShell parse errors: ' + ($errors -join '; ')) }
           $source = Get-Content -LiteralPath $file -Raw
-          foreach ($guard in @('ToCharArray()', 'Start-Sleep -Milliseconds $KeyDelayMs', 'sysctl kern.hakios.p5_phase=0', 'PHASE=0')) {
+          foreach ($guard in @('ToCharArray()', 'Start-Sleep -Milliseconds $KeyDelayMs', 'sysctl kern.hakios.p5_phase=0', 'PHASE=0', '[ValidateRange(1,2)][int]$EnterCount = 2', 'Start-Sleep -Milliseconds $EnterDelayMs', 'SendWait(''{ENTER}'')')) {
             if (-not $source.Contains($guard)) { throw ('Missing slow-serial/ack guard: ' + $guard) }
           }
           if ($source.Contains('SendWait($Command +')) { throw 'Unsafe full-string serial key injection reintroduced' }
@@ -113,6 +113,7 @@ jobs:
             'PREVIEW SEND: sysctl kern.hakios.p5_phase=7')) {
             if (-not $preview.Contains($required)) { throw ('Missing preview stage: ' + $required) }
           }
+          if (-not $preview.Contains('Enter x2, 450ms between Enters')) { throw 'Default double-Enter preview missing' }
           if ($preview.Contains('Sent to PuTTY PID')) { throw 'Unexpected input sent in preview mode' }
           Write-Output 'P5 PuTTY COM125 dry-run stage and syntax checks PASS (no device attached)'
 
