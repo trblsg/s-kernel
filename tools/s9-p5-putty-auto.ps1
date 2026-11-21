@@ -26,6 +26,8 @@ param(
     [ValidateRange(1,3600)][int]$BurstSeconds = 120,
     [ValidateRange(30,3600)][int]$ScreenOffSeconds = 110,
     [ValidateRange(1,3600)][int]$AfterWakeSeconds = 120,
+    [ValidateRange(30,500)][int]$KeyDelayMs = 90,
+    [ValidateRange(100,3000)][int]$CommandGapMs = 600,
     [switch]$SkipScreenCycle,
     [switch]$Execute
 )
@@ -140,10 +142,19 @@ function Send-LabCommand([string]$Command) {
         return
     }
     Focus-VerifiedPutty
+    # CRITICAL COM125 FIX: sending the entire string with SendKeys::SendWait
+    # dropped letters on the actual S9 USB loader console (e.g. 'sysctl' ->
+    # 'sctl', and every write failed). Send ONE key at a time with an explicit
+    # inter-key delay so the PuTTY serial RX queue can keep up under heavy logs.
     # Commands contain only SendKeys-literal ASCII letters/digits/dots/underscores,
     # equals and spaces. No SendKeys metacharacters or clipboard injection.
-    [System.Windows.Forms.SendKeys]::SendWait($Command + '{ENTER}')
-    Start-Sleep -Milliseconds 220
+    foreach ($char in $Command.ToCharArray()) {
+        Focus-VerifiedPutty
+        [System.Windows.Forms.SendKeys]::SendWait([string]$char)
+        Start-Sleep -Milliseconds $KeyDelayMs
+    }
+    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+    Start-Sleep -Milliseconds $CommandGapMs
     Write-Stage ("Sent to PuTTY PID {0}: {1}" -f $script:TargetProcessId, $Command)
 }
 
@@ -183,14 +194,17 @@ try {
     Write-Stage ("P5 one-boot plan for {0}; mode={1}" -f $Port, $(if($Execute){'EXECUTE'}else{'PREVIEW ONLY'}))
     Write-Stage 'Conditions: P5 matching BOOT+SYSTEM installed, shell logged in, PuTTY serial LOG enabled, warm boot >=420s.'
     Write-Stage 'The plan NEVER opens COM125; PuTTY continues to own serial and its log.'
+    Write-Stage ("Serial-safe typing speed: {0}ms/key, {1}ms command gap (v2 fix for lost bytes)." -f $KeyDelayMs,$CommandGapMs)
     Write-Stage 'Leave charging, brightness and wallpaper unchanged. Do not type into the PC during automatic phase timing.'
+    Write-Stage 'IMPORTANT: a failed or truncated initial sysctl command must STOP the run; do not confirm without an actual p5: PHASE=0 marker.'
     if ($Execute) {
         Initialize-Keyboard
         Find-Putty
         Write-Stage ("Target PID={0} title={1}" -f $script:TargetProcessId, $script:TargetTitle)
         Assert-UserConfirmation ("Verify this really is PuTTY on $Port and enter $Port to authorize one read-only probe") $Port
         Send-LabCommand 'sysctl kern.hakios.p5_stats'
-        Assert-UserConfirmation 'Check PuTTY output: p5_stats exists and is readable (no unknown oid). Type READY to continue' 'READY'
+        Send-LabCommand 'sysctl kern.hakios.p5_phase=0'
+        Assert-UserConfirmation 'Look at PuTTY output: exact p5: PHASE=0 up=... marker must appear and no sctl error. Type PHASE=0 only when verified' 'PHASE=0'
         $started = $true
     }
 

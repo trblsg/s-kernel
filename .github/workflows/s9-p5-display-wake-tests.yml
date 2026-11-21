@@ -90,6 +90,11 @@ jobs:
           $errors = $null
           [void][System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors)
           if ($errors.Count -ne 0) { throw ('PowerShell parse errors: ' + ($errors -join '; ')) }
+          $source = Get-Content -LiteralPath $file -Raw
+          foreach ($guard in @('ToCharArray()', 'Start-Sleep -Milliseconds $KeyDelayMs', 'sysctl kern.hakios.p5_phase=0', 'PHASE=0')) {
+            if (-not $source.Contains($guard)) { throw ('Missing slow-serial/ack guard: ' + $guard) }
+          }
+          if ($source.Contains('SendWait($Command +')) { throw 'Unsafe full-string serial key injection reintroduced' }
           $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $file -Port COM125
           if ($LASTEXITCODE -ne 0) { throw ('PuTTY dry run failed: ' + $LASTEXITCODE) }
           $preview = $output -join "`n"
