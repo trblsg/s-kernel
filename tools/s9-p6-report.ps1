@@ -8,6 +8,8 @@ $ph=@();$wake=@();$shadow=@();$proc=@();$churn=@();$missing=@();$source=@()
 $ca=@();$threads=@();$g3d=@();$gpu=@();$crashes=@()
 $off=0;$on=0;$skipped=0
 $prideSegv=@()
+$screenEvents=@();$keyEvents=@();$powerMinute=@()
+$activePhase=-1;$lineNumber=0
 function Token([string]$s,[string]$key,[string]$default='0'){
     $m=[regex]::Match($s,'(?<![A-Za-z0-9_])'+[regex]::Escape($key)+'=([^\s]+)')
     if($m.Success){return $m.Groups[1].Value}
@@ -29,9 +31,11 @@ function Sum($array,[string]$key) {
     return ($items|Measure-Object -Property $key -Sum).Sum
 }
 foreach($s in $lines){
+    $lineNumber++
     try{
         if($s -match '^p6: PHASE=(\d+) up=(\d+)ms'){
-            $ph+= [pscustomobject]@{p=[int]$Matches[1];up=[long]$Matches[2]}
+            $activePhase=[int]$Matches[1]
+            $ph+= [pscustomobject]@{p=$activePhase;up=[long]$Matches[2]}
         } elseif($s -match '^p6-wake: up=(\d+)ms phase=(\d+)'){
             $wake+= [pscustomobject]@{
                 p=[int]$Matches[2];up=[long]$Matches[1]
@@ -97,8 +101,14 @@ foreach($s in $lines){
                 dropped=(IntToken $s 'dropped')}
         } elseif($s -match 'GenericARMPE: the display off'){
             $off++
+            $screenEvents+= [pscustomobject]@{p=$activePhase;line=$lineNumber;state='off'}
         } elseif($s -match 'GenericARMPE: the display on'){
             $on++
+            $screenEvents+= [pscustomobject]@{p=$activePhase;line=$lineNumber;state='on'}
+        } elseif($s -match '^exynos_keys: power (down|up)'){
+            $keyEvents+= [pscustomobject]@{p=$activePhase;line=$lineNumber;state=$Matches[1]}
+        } elseif($s -match '^exynos_keys: a minute: presses power (\d+)'){
+            $powerMinute+= [pscustomobject]@{p=$activePhase;line=$lineNumber;count=[long]$Matches[1]}
         }
         # This is confirmed launchd-exit evidence, unlike a PID transition.
         if($s -match 'com\.apple\.PridePoster\.PridePosterExtension \[(\d+)\].*exited due to SIGSEGV'){
@@ -112,6 +122,14 @@ foreach($s in $lines){
 }
 Write-Output ('P6 UNIFIED REPORT: '+$Log)
 Write-Output ("Input lines=$($lines.Count) phase markers=$($ph.Count) skipped-interleaved=$skipped display_OFF=$off display_ON=$on")
+Write-Output 'Display/kernel key events by phase (phase=-1 is before P6; not P6.4 wake):'
+foreach($sp in ($screenEvents|Select-Object -ExpandProperty p -Unique)){
+    $se=@($screenEvents|Where-Object p -eq $sp)
+    $ke=@($keyEvents|Where-Object p -eq $sp)
+    $minute=@($powerMinute|Where-Object p -eq $sp)
+    $last=if($minute.Count){$minute[-1].count}else{'unavailable'}
+    Write-Output ("  phase=$sp display_off=$(@($se|Where-Object state -eq 'off').Count) display_on=$(@($se|Where-Object state -eq 'on').Count) power_down=$(@($ke|Where-Object state -eq 'down').Count) power_up=$(@($ke|Where-Object state -eq 'up').Count) last_total_power_presses=$last")
+}
 if($ph.Count -eq 0){Write-Warning 'No exact P6 phase markers: verify matching P6 kernel / serial ACK. Do not compare phases.'}
 foreach($phase in ($ph|Select-Object -ExpandProperty p -Unique)){
     $w=@($wake|Where-Object p -eq $phase)
@@ -123,8 +141,16 @@ foreach($phase in ($ph|Select-Object -ExpandProperty p -Unique)){
     $g=@($g3d|Where-Object p -eq $phase)
     $j=@($gpu|Where-Object p -eq $phase)
     $x=@($churn|Where-Object p -eq $phase)
+    $alias=@()
+    $genuine=@()
+    foreach($change in $x){
+        $same=@($p|Where-Object { $_.up -eq $change.up -and $_.name -eq $change.name } | Select-Object -ExpandProperty pid -Unique)
+        if($same.Count -gt 1 -and ($same -contains $change.old) -and ($same -contains $change.newid)){
+            $alias+=$change
+        }else{$genuine+=$change}
+    }
     Write-Output ''
-    Write-Output ("PHASE=${phase}: wakeSamples=$($w.Count) sourceSamples=$($d.Count) shadowSamples=$($s.Count) procSamples=$($p.Count) caGroups=$($c.Count) caThreads=$($t.Count) g3dSamples=$($g.Count) gpuSamples=$($j.Count) pidChanges=$($x.Count)")
+    Write-Output ("PHASE=${phase}: wakeSamples=$($w.Count) sourceSamples=$($d.Count) shadowSamples=$($s.Count) procSamples=$($p.Count) caGroups=$($c.Count) caThreads=$($t.Count) g3dSamples=$($g.Count) gpuSamples=$($j.Count) pidChangesRaw=$($x.Count) pidAliasSameSecond=$($alias.Count) pidChangesCandidate=$($genuine.Count)")
     if($w.Count){
         Write-Output ("  WAKE-PROXY: governorLoops=$(Sum $w 'win') boostReq=$(Sum $w 'boost') touch=$(Sum $w 'touch') presented=$(Sum $w 'frames') avgIdleLIT=$(Avg @($w|Where-Object lit -ne 255) 'lit')% avgIdleBIG=$(Avg @($w|Where-Object big -ne 255) 'big')% (NOT GIC IRQ, CPD, WFI)")
     }
@@ -144,7 +170,14 @@ foreach($phase in ($ph|Select-Object -ExpandProperty p -Unique)){
         $top=@($p|Group-Object name|ForEach-Object{[pscustomobject]@{name=$_.Name;csw=($_.Group|Measure-Object csw -Sum).Sum;cpu=[math]::Round(($_.Group|Measure-Object cpu -Average).Average,1)}}|Sort-Object csw -Descending|Select-Object -First 5)
         foreach($h in $top){Write-Output ("  PROC-PROXY $($h.name): cswDelta=$($h.csw) avgCPU=$($h.cpu)%")}
     }
-    if($x.Count){foreach($r in $x){Write-Output ("  PID-CHURN $($r.name): $($r.old) -> $($r.newid) (NOT proven crash)")}}
+    if($alias.Count){
+        foreach($name in @($alias|Select-Object -ExpandProperty name -Unique)){
+            $a=@($alias|Where-Object name -eq $name)
+            $ids=@($p|Where-Object name -eq $name|Select-Object -ExpandProperty pid -Unique)
+            Write-Output ("  PID-ALIAS ${name}: rawTransitions=$($a.Count) concurrentPIDs=$($ids -join ',') -- FALSE churn from multiple same-name live processes")
+        }
+    }
+    if($genuine.Count){foreach($r in $genuine){Write-Output ("  PID-CHURN CANDIDATE $($r.name): $($r.old) -> $($r.newid) (NOT proven crash)")}}
     if($c.Count){Write-Output ("  CA GL: frames=$(Sum $c 'frames') meanFrameWallUS=$(Avg $c 'avg') draws=$(Sum $c 'draws') targetDraws=$(Sum $c 'target') uncheckedGroups=$(Sum $c 'unchecked') (NOT CA callback source)")}
     if($t.Count){Write-Output ("  CA thread: avgCPUSampled=$(Avg $t 'cpu')% source=libproc")}
     if($g.Count){

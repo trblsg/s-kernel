@@ -119,6 +119,7 @@ jobs:
         run: |
           $file=Join-Path $env:TEMP 's9-p6-ci-test.log'
           @(
+            'GenericARMPE: the display on (iOS power request before P6)',
             'p6: PHASE=2 up=100000ms flags=1',
             'p6-wake: up=105000ms phase=2 span_ms=5000 gov_loops=125 boost_requests=1 touches=1 presents=50 idle_lit=91 idle_big=95 missing=0',
             'p6-source: up=105s phase=2 usb_ticks=2500 usb_connected=2500 usb_overlap=0 touch_irq=0 touch_poll=1250 wifi_irq=14 present_mask=0x3f delta_valid=0x3f source=USB_thread_call_touch_GIC_handler_or_poll_not_all_CPU_wakeups',
@@ -126,17 +127,30 @@ jobs:
             'p6-churn: up=115s phase=3 name=PridePosterExtension prev_pid=100 new_pid=101 changes=1 missing_samples=0 crash=unverified',
             'com.apple.xpc.launchd|2026-11-21 05:32:11.589808 (pid/137/com.apple.PridePoster.PridePosterExtension [101]) <Notice>: exited due to SIGSEGV | sent by exc handler[101]',
             'p6-proc: up=115s phase=3 name=PridePoster pid=101 cpu_pct=50.00 csw=120 faults=2 pageins=0 syscalls=200 valid_delta=1',
+            'p6-proc: up=115s phase=3 name=CollectionsPoster pid=142 cpu_pct=0.00 csw=0 faults=0 pageins=0 syscalls=0 valid_delta=1',
+            'p6-churn: up=115s phase=3 name=CollectionsPoster prev_pid=142 new_pid=154 changes=1 missing_samples=0 crash=unverified',
+            'p6-proc: up=115s phase=3 name=CollectionsPoster pid=154 cpu_pct=0.00 csw=0 faults=0 pageins=0 syscalls=0 valid_delta=1',
             'p6: PHASE=4 up=120000ms flags=5',
             'p6-shadow: up=125000ms phase=4 big_mc=83000 gpu_mc=88000 m3_load=10 lit_load=11 mhz=455/962 frames=50 gap_ms=100 park_candidate=1 big_step=1 gpu_step=1 changed=1 writes=0',
             'p6: PHASE=7 up=130000ms flags=17',
             'p6-ca-gl: up=135.000s phase=7 n=60 avg_wall_us=200 draws=1200 target_draws=800 uploads=2 changed=0 unchecked=1 same=99 flush=60 finish=0',
+            'p6: PHASE=5 up=140000ms flags=9',
+            'exynos_keys: power down',
+            'exynos_keys: power up',
+            'GenericARMPE: the display off (iOS power request)',
+            'exynos_keys: a minute: presses power 1, volume-up 0, volume-down 0, bixby 0',
             'p5-gl-burst: up=135.000s phase=7 max_draw=fps: 60 presented'
           ) | Set-Content -LiteralPath $file -Encoding ASCII
           $report=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/s9-p6-report.ps1 -Log $file
           if($LASTEXITCODE -ne 0){throw 'P6 report failed'}
           $text=$report -join "`n"
-          foreach($marker in @('PHASE=2:', 'WAKE-PROXY:', 'DRIVER-SOURCE:', 'PID-CHURN PridePoster',
+          foreach($marker in @('PHASE=2:', 'WAKE-PROXY:', 'DRIVER-SOURCE:', 'PID-CHURN',
+            'PID-ALIAS CollectionsPoster', 'pidAliasSameSecond=1',
+            'phase=5 display_off=1 display_on=0 power_down=1 power_up=1',
             'SHADOW:', 'CA GL:', 'CONFIRMED PridePoster SIGSEGV exits in launchd log=1',
             'skipped-interleaved=0', 'NOT MEASURED:')){
             if(-not $text.Contains($marker)){throw "P6 report missing $marker"}
+          }
+          if($text.Contains('PID-CHURN CANDIDATE CollectionsPoster')){
+            throw 'The reporter falsely labels simultaneous same-name PIDs as process restarts'
           }
