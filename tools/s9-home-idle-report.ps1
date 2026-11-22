@@ -9,6 +9,10 @@ $active=$null
 $groupNames=@{}
 $crashes=0
 $gateArms=0
+$hasConfirmedMarkers=[bool](Select-String -LiteralPath $Log -Pattern '^hi: mark=(main|secondary|settings)' -Quiet)
+$hasUsbDenied=[bool](Select-String -LiteralPath $Log -Pattern '^usb: sysctl kern.hakios.hi_cmd=\d+: EPERM' -Quiet)
+$unconfirmed=$hasUsbDenied -and -not $hasConfirmedMarkers
+$lastRequestedStage=0
 function New-Run([string]$stage) {
     return [pscustomobject]@{
         Phase=$stage; Hi=@(); Backboard=@(); SpringBoard=@(); GpuClock=@(); GpuBusy=@();
@@ -23,6 +27,28 @@ foreach($line in [IO.File]::ReadLines((Resolve-Path -LiteralPath $Log).Path)){
     if($line -match '^hi: mark=(main|secondary|settings)'){
         $active=New-Run $Matches[1]
         $runs.Add($active)
+        continue
+    }
+    # The first S9 run had a real USB EPERM because hi_cmd lacked CTLFLAG_KERN.
+    # Recover REQUESTED scene boundaries as explicitly unverified intent; never
+    # claim that the corresponding UI scene was actually visible.
+    if($unconfirmed -and $line -match '^usb> sysctl kern.hakios.hi_cmd=([123])$'){
+        $requested=[int]$Matches[1]
+        if($requested -ne $lastRequestedStage){
+            $lastRequestedStage=$requested
+            $name=@('unused','main','secondary','settings')[$requested]
+            $active=New-Run $name
+            $runs.Add($active)
+        }
+        continue
+    }
+    if($unconfirmed -and $active -and $lastRequestedStage -eq 1 -and
+       $line -match '^usb: sysctl kern.hakios.mali_gov_frame=(0|450): set'){
+        $label=if($Matches[1] -eq '0'){'main-floor0'}else{'main-floor450'}
+        if($active.Phase -ne $label){
+            $active=New-Run $label
+            $runs.Add($active)
+        }
         continue
     }
     if($line -match 'PridePosterExtension .*exited due to SIGSEGV'){$crashes++}
@@ -64,13 +90,18 @@ function Avg($a){
     if(!$a.Count){return 'n/a'}
     return ('{0:0.0}' -f (($a|Measure-Object -Average).Average))
 }
-Write-Output "S9 HomeIdle A/B: $($runs.Count) marked windows; $crashes confirmed PridePoster SIGSEGV; $gateArms source-cut attempts"
-Write-Output 'FPS is based on console one-second summaries inside each marked window, not OLED scanout.'
+Write-Output "S9 HomeIdle A/B: $($runs.Count) serial windows; $crashes confirmed PridePoster SIGSEGV; $gateArms source-cut attempts"
+if($unconfirmed){
+    Write-Output 'WARNING: hi_cmd=EPERM; stages are USB-REQUESTED scenes only, NOT confirmed hi: mark. No source cut succeeded.'
+}
+Write-Output 'fps_window = frames reported / sampled window uptime; navigation transitions are included; idle FPS reports are sparse, not OLED scanout.'
 $i=0
 foreach($r in $runs){
     $i++
     $seconds=$r.SecondsWithFps
-    $fps=if($seconds){'{0:0.00}' -f ($r.Frames/$seconds)}else{'n/a'}
+    $duration=$r.LastUp-$r.FirstUp
+    $fps=if($duration -ge 10){'{0:0.00}' -f ($r.Frames/$duration)}
+         elseif($seconds){'{0:0.00}' -f ($r.Frames/$seconds)}else{'n/a'}
     $commits=if($r.Snapshots){'{0:0.0}' -f ($r.Commits/($r.Snapshots*5.0))}else{'n/a'}
     Write-Output ('{0,2}. {1,-9} fps={2,-6} backboardd={3,-5}% SB={4,-5}% GPU={5,-6}MHz busy={6,-5}% CA commits/s={7,-6} fg_current={8}/{9}mA (device charging state NOT inferred)' -f
         $i,$r.Phase,$fps,(Avg $r.Backboard),(Avg $r.SpringBoard),(Avg $r.GpuClock),(Avg $r.GpuBusy),$commits,

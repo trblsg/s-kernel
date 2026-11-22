@@ -1,0 +1,16 @@
+hi: enabled oneboot links=3 policy=forward-only input_hook=1
+hi: link group=3 target=SBHClockApplicationIconImageView action=_timerFired:
+usb> sysctl kern.hakios.hi_cmd=1
+usb: sysctl kern.hakios.hi_cmd=1: EPERM: not marked CTLFLAG_KERN, so the kernel may not reach it (user space may) (1)
+hi: phase=unset up=100s visible_home=1 home_windows=1 windows=10 contexts=10 commits_5s=515 animations=9 anim_scan_complete=1 gate=0 seconds_left=0 mali_framefloor=450
+hi: link=3 target=SBHClockApplicationIconImageView action=_timerFired: ticks_5s=52 forwarded=52 cut=0 fps_req=10
+fps: 10 presented, 10 drawn
+hi: phase=unset up=105s visible_home=1 home_windows=1 windows=10 contexts=10 commits_5s=510 animations=9 anim_scan_complete=1 gate=0 seconds_left=0 mali_framefloor=450
+hi: link=3 target=SBHClockApplicationIconImageView action=_timerFired: ticks_5s=51 forwarded=51 cut=0 fps_req=10
+fps: 10 presented, 10 drawn
+usb> sysctl kern.hakios.hi_cmd=2
+usb: sysctl kern.hakios.hi_cmd=2: EPERM: not marked CTLFLAG_KERN, so the kernel may not reach it (user space may) (1)
+hi: phase=unset up=110s visible_home=1 home_windows=1 windows=10 contexts=10 commits_5s=0 animations=6 anim_scan_complete=1 gate=0 seconds_left=0 mali_framefloor=450
+fps: 1 presented, 1 drawn
+hi: phase=unset up=120s visible_home=1 home_windows=1 windows=10 contexts=10 commits_5s=0 animations=6 anim_scan_complete=1 gate=0 seconds_left=0 mali_framefloor=450
+fps: idle

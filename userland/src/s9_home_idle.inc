@@ -65,6 +65,12 @@ hi_register_group(id target,SEL action)
     os_unfair_lock_unlock(&hi_group_lock);
     return id;
 }
+static bool
+hi_group_clock(unsigned id)
+{
+    return id && id<=__atomic_load_n(&hi_groups_used,__ATOMIC_ACQUIRE) &&
+        s9_hi_clock_source(hi_groups[id-1].target,hi_groups[id-1].action);
+}
 static void
 hi_proxy_tick(id self,SEL cmd,id link)
 {
@@ -81,7 +87,8 @@ hi_proxy_tick(id self,SEL cmd,id link)
         s9_hi_skip(now,__atomic_load_n(&hi_gate_deadline,__ATOMIC_ACQUIRE),
            __atomic_load_n(&hi_last_input,__ATOMIC_ACQUIRE),p->last_forward,
            __atomic_load_n(&hi_stage,__ATOMIC_ACQUIRE)==1,__atomic_load_n(&hi_home_ready,__ATOMIC_ACQUIRE),
-           hi_event_hook_ok,__atomic_load_n(&hi_animations_absent,__ATOMIC_ACQUIRE));
+           hi_event_hook_ok,hi_group_clock(group) ||
+           __atomic_load_n(&hi_animations_absent,__ATOMIC_ACQUIRE));
     if(cut){
         __atomic_fetch_add(&hi_groups[group-1].cut,1,__ATOMIC_RELAXED);
         return;
@@ -298,18 +305,25 @@ hi_arm(unsigned selected)
             }
     }
     uint64_t now=hi_time_us();
+    const bool clock_source=hi_group_clock(id);
+    /* The stationary Home observed 6..9 persistent animationKeys even while
+     * Clock itself is the only 10Hz callback. The original all-animations-
+     * absent condition made the causal A/B impossible. Lift it ONLY for this
+     * exact Clock target; other groups remain fail-open. */
     if(hi_stage!=1 || !hi_event_hook_ok || !hi_home_ready ||
-        !hi_animations_absent || !id || id>__atomic_load_n(&hi_groups_used,__ATOMIC_ACQUIRE)){
-        say("hi: gate=REFUSED phase=%s target=%u visible=%u no_anim=%u input_hook=%u\n",
-            hi_stages[hi_stage],id,hi_home_ready?1:0,hi_animations_absent?1:0,
+        (!hi_animations_absent && !clock_source) || !id ||
+        id>__atomic_load_n(&hi_groups_used,__ATOMIC_ACQUIRE)){
+        say("hi: gate=REFUSED phase=%s target=%u clock_source=%u visible=%u no_anim=%u input_hook=%u\n",
+            hi_stages[hi_stage],id,clock_source?1:0,
+            hi_home_ready?1:0,hi_animations_absent?1:0,
             hi_event_hook_ok?1:0);
         return;
     }
     __atomic_store_n(&hi_last_input,now,__ATOMIC_RELEASE);
     __atomic_store_n(&hi_gate_deadline,now+S9_HI_GATE_US,__ATOMIC_RELEASE);
     __atomic_store_n(&hi_gate_group,id,__ATOMIC_RELEASE);
-    say("hi: gate=armed target=%u class=%s action=%s max_seconds=30 input_grace=2.5\n",
-        id,hi_groups[id-1].target,hi_groups[id-1].action);
+    say("hi: gate=armed target=%u class=%s action=%s clock_override=%u max_seconds=30 input_grace=2.5\n",
+        id,hi_groups[id-1].target,hi_groups[id-1].action,clock_source?1:0);
 }
 static void
 hi_start(void)

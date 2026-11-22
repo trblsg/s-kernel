@@ -10,6 +10,11 @@ static void check(uint64_t now, uint64_t deadline, uint64_t input,
 }
 int main(void)
 {
+    assert(s9_hi_clock_source("SBHClockApplicationIconImageView", "_timerFired:"));
+    assert(!s9_hi_clock_source("SBHClockApplicationIconImageView", "displayLinkDidFire:"));
+    assert(!s9_hi_clock_source("UIEventFetcher", "_timerFired:"));
+    assert(!s9_hi_clock_source(NULL, "_timerFired:"));
+    assert(!s9_hi_clock_source("SBHClockApplicationIconImageView", NULL));
     const uint64_t t = UINT64_C(100000000);
     /* Only a user-armed, stable, visible primary Home can be gated. */
     check(t, t + S9_HI_GATE_US, t - 5000000, t - 100000,
@@ -39,6 +44,6 @@ int main(void)
         true, true, true, false, false);
     check(t, t + S9_HI_GATE_US, t - 5000000, 0,
         true, true, true, false, false);
-    puts("s9-home-idle-policy: 11 guarded cases OK");
+    puts("s9-home-idle-policy: 11 guarded cases plus 5 exact Clock allowlist cases OK");
     return 0;
 }

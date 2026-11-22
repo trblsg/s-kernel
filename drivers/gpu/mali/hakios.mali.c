@@ -163,7 +163,7 @@ SYSCTL_DECL(_kern_hakios);              /* the node is drivers/core/hakios.platf
  * only when booted with hi=1, and validates each request before acting.
  * USB's built-in 'sysctl' command can set it (no shell/notify command there). */
 static uint32_t hi_cmd;
-SYSCTL_UINT(_kern_hakios, OID_AUTO, hi_cmd, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY,
+SYSCTL_UINT(_kern_hakios, OID_AUTO, hi_cmd, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY | CTLFLAG_KERN,
     &hi_cmd, 0, "S9 Home idle oneboot: 0 stop; 1 main; 2 secondary; 3 Settings; 101..148 gate source; 199 top; 200 layers; 201 stop");
 
 static vm_offset_t pmu, cmu_g3d, mali;

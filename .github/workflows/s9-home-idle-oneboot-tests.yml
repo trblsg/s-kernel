@@ -34,6 +34,10 @@ jobs:
           assert 'hi_make_link(self, selector, target, action)' in sb
           assert 'hi_usb_command();' in inc
           assert 'SYSCTL_UINT(_kern_hakios, OID_AUTO, hi_cmd' in kernel
+          assert 'hi_cmd, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY | CTLFLAG_KERN' in kernel
+          assert 'hi_group_clock(' in inc
+          assert '(!hi_animations_absent && !clock_source)' in inc
+          assert 's9_hi_clock_source(' in Path('userland/src/s9_home_idle_policy.h').read_text()
           assert 's9_hi_skip(' in inc and 'S9_HI_GATE_US' in inc
           assert 'hi_event_hook_ok' in inc and 'hi_animations_absent' in inc
           assert 'wallpaper_home_showing()' in inc
@@ -58,7 +62,11 @@ jobs:
                               '1 confirmed PridePoster SIGSEGV')) {
             if (!$body.Contains($value)) { throw "Report fixture missing: $value" }
           }
-          Write-Host "S9 HomeIdle report parser OK"
+          $fallback = (& ./tools/s9-home-idle-report.ps1 -Log tools/tests/s9-home-idle-eperm-fixture.log) -join "`n"
+          foreach ($value in @('WARNING: hi_cmd=EPERM','2 serial windows','SBHClockApplicationIconImageView._timerFired:')) {
+            if (!$fallback.Contains($value)) { throw "EPERM fallback missing: $value" }
+          }
+          Write-Host "S9 HomeIdle report parser OK (confirmed markers and EPERM fallback)"
   springboard-syntax:
     runs-on: macos-15
     timeout-minutes: 12
