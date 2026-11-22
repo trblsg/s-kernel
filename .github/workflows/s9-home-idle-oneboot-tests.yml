@@ -57,7 +57,7 @@ jobs:
         run: |
           $lines = & ./tools/s9-home-idle-report.ps1 -Log tools/tests/s9-home-idle-fixture.log
           $body = $lines -join "`n"
-          foreach ($value in @('2 marked windows','main      fps=10.00','secondary fps=0.00',
+          foreach ($value in @('2 serial windows','main      fps=10.00','secondary fps=0.00',
                               'SBAnimationDisplayLink.advance:','CA commits/s=10.0',
                               '1 confirmed PridePoster SIGSEGV')) {
             if (!$body.Contains($value)) { throw "Report fixture missing: $value" }
