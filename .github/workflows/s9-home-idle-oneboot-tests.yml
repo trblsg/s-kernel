@@ -28,7 +28,8 @@ jobs:
           kernel=Path('drivers/gpu/mali/hakios.mali.c').read_text()
           doc=Path('docs/s9-home-idle-oneboot.md').read_text()
           assert '#include "s9_home_idle.inc"' in sb
-          assert 'hi_enabled = boot_arg(arguments, "hi=1")' in sb
+          assert 'const char *hi_arg = strstr(arguments, "hi=1")' in sb
+          assert "hi_arg[4] == '\\0'" in sb
           assert 'if (hi_enabled) hi_set_requested_fps' in sb
           assert 'hi_make_link(self, selector, target, action)' in sb
           assert 'hi_usb_command();' in inc

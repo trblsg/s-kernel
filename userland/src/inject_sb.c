@@ -2260,7 +2260,10 @@ display_link_rates(void)
 	dl_say = boot_arg(arguments, "touch_lat=1");
 	dl_max = boot_arg(arguments, "dl_max=1");
 	/* hi=1: one-boot source inventory, scene context commits, timed source cut. */
-	hi_enabled = boot_arg(arguments, "hi=1");
+	/* Match a whole boot word, and expose the actual reader to boot-args.py. */
+	const char *hi_arg = strstr(arguments, "hi=1");
+	hi_enabled = hi_arg != NULL && (hi_arg == arguments || hi_arg[-1] == ' ') &&
+	    (hi_arg[4] == ' ' || hi_arg[4] == '\0');
 	animation_rates(arguments);
 	if (!dl_say && !dl_max && !hi_enabled) {
 		return;
