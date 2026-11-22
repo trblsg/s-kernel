@@ -19,8 +19,11 @@ param(
     [switch]$ResumeCAOnly,
     [switch]$ExtendedOnly,
     [switch]$DeepOnly,
+    [switch]$ParallelOnly,
+    [ValidateRange(40,46)][int]$BatteryStopC=46,
     [switch]$ExtendedScreenOff,
     [switch]$TestDisplayEvidence,
+    [switch]$TestParallelThermal,
     [switch]$EnableActualG3D,
     [switch]$PreflightOnly,
     [switch]$Execute
@@ -33,7 +36,15 @@ $script:Buf=New-Object byte[] 16384
 $script:Recent='';$script:Partial=''
 $script:ActualAttempted=$false
 $script:OnEventProven=$false
+$script:BatteryLatestC=0.0;$script:BatteryStopReached=$false;$script:ThermalWatchActive=$false
 function Say([string]$s){Write-Host ('[{0:HH:mm:ss}] {1}' -f (Get-Date),$s)}
+function Get-P6BatteryTemp([string]$line){
+    if($line -match '^tmu: .*\bbattery=(\d+)(?:\s|$)'){return [double]$Matches[1]}
+    if($line -match '^max77705: (?:now|every 5 minutes): .*? (-?\d+)\.(\d+) C \('){
+        return [double]$Matches[1]+([double]$Matches[2]/10.0)
+    }
+    return $null
+}
 function Pump {
     if($null -eq $script:Serial){return}
     try{$n=$script:Serial.Read($script:Buf,0,$script:Buf.Length)}
@@ -48,7 +59,17 @@ function Pump {
     while($pos -ge 0){
         $line=$script:Partial.Substring(0,$pos).TrimEnd([char]13)
         $script:Partial=$script:Partial.Substring($pos+1)
-        if($line -match '^(usb>|usb: |p6: PHASE|p6-wake:|p6-shadow:|p6-churn:|p6-missing:|p6-ca-gl:|p6-ca-thread:|p66-ca:|p67-cost:|p67-path:|p68-g3d:|p69-source:|p610-gov:|p610-gap:|p611-hash:|p611-surface:|p612-eagl:|p5-gpu:|g3d-lab:|GenericARMPE: the display)'){
+        if($ParallelOnly){
+            $temp=Get-P6BatteryTemp $line
+            if($null -ne $temp){
+                $script:BatteryLatestC=$temp
+                if($script:ThermalWatchActive -and $temp -ge $BatteryStopC -and -not $script:BatteryStopReached){
+                    $script:BatteryStopReached=$true
+                    Say ("THERMAL STOP requested: observed battery temperature "+$temp+" C >= "+$BatteryStopC+" C; read-only observers will shut off")
+                }
+            }
+        }
+        if($line -match '^(usb>|usb: |p6: PHASE|p6-wake:|p6-shadow:|p6-churn:|p6-missing:|p6-ca-gl:|p6-ca-thread:|p66-ca:|p67-cost:|p67-path:|p68-g3d:|p69-source:|p610-gov:|p610-gap:|p610-trans:|max77705: charger|p611-hash:|p611-surface:|p612-eagl:|p5-gpu:|g3d-lab:|GenericARMPE: the display)'){
             Say ('DEVICE '+$line.Substring(0,[Math]::Min($line.Length,290)))
         }
         $pos=$script:Partial.IndexOf([char]10)
@@ -91,7 +112,7 @@ function Rest([string]$stage,[int]$seconds){
     Say ("$stage : $seconds seconds")
     if(-not $Execute){return}
     $until=[DateTime]::UtcNow.AddSeconds($seconds)
-    while([DateTime]::UtcNow -lt $until){Pump}
+    while([DateTime]::UtcNow -lt $until){Pump;if($ParallelOnly -and $script:BatteryStopReached){throw "Battery temperature threshold exceeded ($($script:BatteryLatestC) C >= $BatteryStopC C); SAFE EXIT"}}
 }
 # Cross-check independent ON evidence if the one-shot GenericARMPE line was
 # dropped/interleaved on USB. This is *compositor activity*, NOT proof the
@@ -187,6 +208,58 @@ function Exit-Safe {
         'sysctl kern.hakios.p6_mode=0','sysctl kern.hakios.p5_mode=0',
         'sysctl kern.hakios.p5_threads=0','sysctl kern.hakios.p4_mode=0','sysctl kern.hakios.p6_phase=9','sysctl kern.hakios.p6_stats')
     foreach($cmd in $commands){try{Send $cmd}catch{Write-Warning ('UNCONFIRMED safe exit: '+$cmd+' '+$_.Exception.Message)}}
+}
+function Run-ParallelPhases {
+    if($script:BatteryStopReached){throw "Battery was already above $BatteryStopC C at preflight; skip parallel trial and SAFE EXIT"}
+    Say 'PARALLEL charger/Scion/CA/IOSurface lab: read-only, independent short A/B windows'
+    Say ('Battery thermal guard '+$BatteryStopC+' C; no change to charging, DVFS or G3D policy')
+    foreach($node in @('p66_mode','p67_mode','p68_mode','p69_mode','p610_mode','p611_mode','p612_mode')){
+        Send ('sysctl kern.hakios.'+$node+'=0')
+    }
+    Send 'sysctl kern.hakios.g3d_lab_gate=0'
+    Send 'sysctl kern.hakios.g3d_lab_rail_probe=0'
+    Send 'sysctl kern.hakios.p4_mode=0'
+    Send 'sysctl kern.hakios.p6_mode=0'
+    Send 'sysctl kern.hakios.p5_mode=0'
+    Send 'sysctl kern.hakios.p5_threads=0'
+    Send 'sysctl kern.hakios.p6_phase=30'
+    $script:ThermalWatchActive=$true # ignore historical boot-log replay; act on live readings after ACK
+    Rest 'P6 PARALLEL A1 60s all runtime observers off; MAX77705 bootarg probes already active since boot' 60
+
+    Send 'sysctl kern.hakios.p6_flags=17'
+    Send 'sysctl kern.hakios.p6_mode=2'
+    Send 'sysctl kern.hakios.p5_mode=2'
+    Send 'sysctl kern.hakios.p5_threads=1'
+    foreach($node in @('p610_mode','p611_mode','p612_mode')){Send ('sysctl kern.hakios.'+$node+'=1')}
+    Send 'sysctl kern.hakios.p6_phase=31'
+    Send 'sysctl kern.hakios.p5_phase=31'
+    Rest 'P6 PARALLEL all three observer categories simultaneously (one boot)' 60
+
+    Send 'sysctl kern.hakios.p611_mode=0'
+    Send 'sysctl kern.hakios.p612_mode=0'
+    Send 'sysctl kern.hakios.p6_phase=32'
+    Send 'sysctl kern.hakios.p5_phase=32'
+    Rest 'P6 PARALLEL Scion transition snapshots; checksum/display observers OFF' 60
+
+    Send 'sysctl kern.hakios.p610_mode=0'
+    Send 'sysctl kern.hakios.p611_mode=1'
+    Send 'sysctl kern.hakios.p6_phase=33'
+    Send 'sysctl kern.hakios.p5_phase=33'
+    Rest 'P6 PARALLEL IOSurface timing only, separated from governor/output telemetry' 60
+
+    Send 'sysctl kern.hakios.p611_mode=0'
+    Send 'sysctl kern.hakios.p612_mode=1'
+    Send 'sysctl kern.hakios.p6_phase=34'
+    Send 'sysctl kern.hakios.p5_phase=34'
+    Rest 'P6 PARALLEL EAGL present vs independent framebuffer FPS only' 60
+
+    foreach($node in @('p610_mode','p611_mode','p612_mode')){Send ('sysctl kern.hakios.'+$node+'=0')}
+    Send 'sysctl kern.hakios.p6_mode=0'
+    Send 'sysctl kern.hakios.p5_mode=0'
+    Send 'sysctl kern.hakios.p5_threads=0'
+    Send 'sysctl kern.hakios.p4_mode=0'
+    Send 'sysctl kern.hakios.p6_phase=35'
+    Rest 'P6 PARALLEL A2 60s observer OFF, record current meter again; battery gauge persists' 60
 }
 function Run-DeepPhases {
     Say 'P6.10-12 read-only diagnostic phases; no CPU governor, GL, buffer or display writes'
@@ -387,6 +460,23 @@ function Run-Phases {
     }else{Say 'SCREEN phases skipped: cannot claim G3D OFF residency'}
     Run-CAStage
 }
+if($TestParallelThermal){
+    $cases=@(
+        @('tmu: 8 sensors read; hottest big at 79.0 C; battery=47',47.0),
+        @('max77705: every 5 minutes: 99.73%, 4277 mV, 0 mA, 47.4 C (ADC 1113)',47.4),
+        @('max77705: now: 80.00%, 4050 mV, -100 mA, 35.4 C (ADC 1560)',35.4),
+        @('fps: 10 presented, 10 drawn, 10 flips, 0 lost, 0 held', $null)
+    )
+    foreach($c in $cases){
+        $got=Get-P6BatteryTemp $c[0]
+        if(($null -eq $got) -ne ($null -eq $c[1]) -or
+           ($null -ne $got -and [Math]::Abs($got-[double]$c[1]) -gt 0.01)){
+            throw "P6 thermal parser regression: $($c[0]) => $got, expected=$($c[1])"
+        }
+    }
+    Say ('P6 thermal parser: '+$cases.Count+' deterministic tests PASS; no COM opened or commands sent')
+    return
+}
 if($TestDisplayEvidence){
     $cases=@(
         @('on',"GenericARMPE: the display on (iOS's power request)",'KERNEL_EVENT'),
@@ -407,8 +497,9 @@ if($TestDisplayEvidence){
     return
 }
 if($ResumeCAOnly -and $EnableActualG3D){throw '-ResumeCAOnly cannot request hardware G3D gating'}
-if($ExtendedOnly -and ($ResumeCAOnly -or $EnableActualG3D -or $DeepOnly)){throw '-ExtendedOnly is read-only and mutually exclusive with DeepOnly/ResumeCAOnly/actual gating'}
-if($DeepOnly -and ($ResumeCAOnly -or $EnableActualG3D -or $ExtendedScreenOff)){throw '-DeepOnly is read-only; incompatible with resume, screen OFF or actual gating'}
+if($ExtendedOnly -and ($ResumeCAOnly -or $EnableActualG3D -or $DeepOnly -or $ParallelOnly)){throw '-ExtendedOnly is read-only and mutually exclusive with DeepOnly/ResumeCAOnly/actual gating'}
+if($DeepOnly -and ($ResumeCAOnly -or $EnableActualG3D -or $ExtendedScreenOff -or $ParallelOnly)){throw '-DeepOnly is read-only; incompatible with resume, screen OFF or actual gating'}
+if($ParallelOnly -and ($ResumeCAOnly -or $EnableActualG3D -or $ExtendedScreenOff)){throw '-ParallelOnly is read-only; cannot request actual GPU, display OFF or CA-only trial'}
 if($ExtendedScreenOff -and -not $ExtendedOnly){throw '-ExtendedScreenOff requires -ExtendedOnly'}
 Say ('S9 P6 unified COM one-image lab: '+$(if($Execute){'EXECUTE'}else{'PREVIEW ONLY'}))
 if($EnableActualG3D){Say 'WARNING: ACTUAL G3D trial requested; runtime confirmation still required'}
@@ -416,11 +507,11 @@ else{Say 'G3D uses SHADOW only. Actual gating disabled by default.'}
 if(-not $Execute){
     Send 'sysctl kern.hakios.p6_stats'
     Send 'sysctl kern.hakios.g3d_lab_stats'
-    if($ExtendedOnly -or $DeepOnly){
-        foreach($node in $(if($DeepOnly){@('p610_mode','p611_mode','p612_mode')}else{@('p66_mode','p67_mode','p68_mode','p69_mode')})){Send ('sysctl kern.hakios.'+$node)}
+    if($ExtendedOnly -or $DeepOnly -or $ParallelOnly){
+        foreach($node in $(if($DeepOnly -or $ParallelOnly){@('p610_mode','p611_mode','p612_mode')}else{@('p66_mode','p67_mode','p68_mode','p69_mode')})){Send ('sysctl kern.hakios.'+$node)}
     }
     Send 'sysctl kern.hakios.p6_phase=0'
-    if(-not $PreflightOnly){if($DeepOnly){Run-DeepPhases}elseif($ExtendedOnly){Run-ExtendedPhases}else{Run-Phases}}
+    if(-not $PreflightOnly){if($ParallelOnly){Run-ParallelPhases}elseif($DeepOnly){Run-DeepPhases}elseif($ExtendedOnly){Run-ExtendedPhases}else{Run-Phases}}
     Say 'PREVIEW complete; no COM port opened, no commands sent'
     return
 }
@@ -446,12 +537,12 @@ try{
     Drain 1200
     Send 'sysctl kern.hakios.p6_stats'
     Send 'sysctl kern.hakios.g3d_lab_stats'
-    if($ExtendedOnly -or $DeepOnly){
-        foreach($node in $(if($DeepOnly){@('p610_mode','p611_mode','p612_mode')}else{@('p66_mode','p67_mode','p68_mode','p69_mode')})){Send ('sysctl kern.hakios.'+$node)}
+    if($ExtendedOnly -or $DeepOnly -or $ParallelOnly){
+        foreach($node in $(if($DeepOnly -or $ParallelOnly){@('p610_mode','p611_mode','p612_mode')}else{@('p66_mode','p67_mode','p68_mode','p69_mode')})){Send ('sysctl kern.hakios.'+$node)}
     }
     Send 'sysctl kern.hakios.p6_phase=0'
     Say 'PREFLIGHT PASS: exact echo and ACK for P6 sysctls'
-    if(-not $PreflightOnly){if($DeepOnly){Run-DeepPhases}elseif($ExtendedOnly){Run-ExtendedPhases}else{Run-Phases}}
+    if(-not $PreflightOnly){if($ParallelOnly){Run-ParallelPhases}elseif($DeepOnly){Run-DeepPhases}elseif($ExtendedOnly){Run-ExtendedPhases}else{Run-Phases}}
     $finished=$true
 } finally {
     if($started -and -not $PreflightOnly){Exit-Safe}
@@ -462,4 +553,4 @@ try{
     if($null -ne $script:Serial){$script:Serial.Dispose();$script:Serial=$null}
     if($started){Say ('RAW LOG '+$LogPath)}
 }
-if($finished){Say 'COMPLETE: run tools/s9-p6-report.ps1 -Log <path>';if($DeepOnly){Say 'DEEP REPORT: tools/s9-p6-deep-report.ps1 -Log <path>'}}
+if($finished){Say 'COMPLETE: run tools/s9-p6-report.ps1 -Log <path>';if($DeepOnly -or $ParallelOnly){Say 'DEEP REPORT: tools/s9-p6-deep-report.ps1 -Log <path>'};if($ParallelOnly){Say 'POWER REPORT: tools/s9-p6-parallel-report.ps1 -Log <path>'}}

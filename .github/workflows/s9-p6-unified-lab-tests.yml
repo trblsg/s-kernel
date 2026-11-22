@@ -135,7 +135,25 @@ jobs:
           assert 'g3d_lab_gate=2' not in deep and 'g3d_lab_gate=3' not in deep
           assert 'g3d_lab_mv=' not in deep and 'mali_gov_frame=' not in deep
           assert 'gov_policy=' not in deep and 'gov_frame_big=' not in deep
-          print('P6.1--P6.12 source/rollback guards PASS')
+          # Parallel charger/governor/compositor evidence: no new power writes.
+          charge=Path('drivers/power/max77705/hakios.max77705.c').read_text()
+          assert 'max77705_diag_s' in charge and 'chg_diag_ticks' in charge
+          assert 'if(chg_diag && diag_s>=30 && diag_s<=300 && diag_s%5==0)' in charge
+          assert 'if (chg_diag_ticks && tick%chg_diag_ticks==0 && tick%60!=0)' in charge
+          assert 'chg_diag_say("periodic")' in charge and 'up=%llus' in charge
+          assert 'CHG_DIAG_FIRST  0xB2' in charge and 'CHG_DIAG_LAST   0xC5' in charge
+          assert 'if (chg_wdt && tick % WDT_KICK_POLLS == 0)' in charge
+          assert 'p610-trans:' in cpu and 'ev.transitioned && p610_stats.transitions<=4' in cpu
+          assert 'frame_age_ms=' in cpu and 'quiet_ms=' in cpu and 'applied=0' in cpu
+          assert 'ParallelOnly' in serial and 'BatteryStopC=46' in serial
+          for n in (30,31,32,33,34,35):
+              assert f'p6_phase={n}' in serial
+          parallel=serial.split('function Run-ParallelPhases {',1)[1].split('function Run-DeepPhases {',1)[0]
+          for forbidden in ('g3d_lab_gate=2','g3d_lab_gate=3','gov_policy=','max77705_wdt=1',
+                            'g3d_lab_mv=','mali_gov_frame='):
+              assert forbidden not in parallel, forbidden
+          assert 'tools/s9-p6-parallel-report.ps1' in serial
+          print('P6.1--P6.12 and parallel charger/governor/CA source/rollback guards PASS')
           PY
   windows:
     runs-on: windows-latest
@@ -145,7 +163,7 @@ jobs:
       - name: PowerShell 5.1 parsing and safe COM125 previews (no COM connection)
         shell: powershell
         run: |
-          foreach($file in @('tools/s9-p6-serial-auto.ps1','tools/s9-p6-report.ps1','tools/s9-p6-extended-report.ps1','tools/s9-p6-deep-report.ps1')){
+          foreach($file in @('tools/s9-p6-serial-auto.ps1','tools/s9-p6-report.ps1','tools/s9-p6-extended-report.ps1','tools/s9-p6-deep-report.ps1','tools/s9-p6-parallel-report.ps1')){
             $t=$null;$e=$null
             [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file).Path,[ref]$t,[ref]$e)
             if($e.Count){throw "$file errors: $($e -join '; ')"}
@@ -239,6 +257,56 @@ jobs:
           $old=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/s9-p6-deep-report.ps1 -Log tools/tests/p6-extended-synthetic.log
           if($LASTEXITCODE -ne 0 -or ($old -join "`n") -notmatch 'p610=0 p610gap=0 p611=0 p611surface=0 p612=0'){
               throw 'Deep reporter invented missing new phase data in old fixture'
+          }
+      - name: Parallel 30-35 COM safe dry-run, thermal guard and charger-state report
+        shell: powershell
+        run: |
+          $script='tools/s9-p6-serial-auto.ps1'
+          $therm=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -TestParallelThermal
+          if($LASTEXITCODE -ne 0 -or ($therm -join "`n") -notmatch '4 deterministic tests PASS'){
+             throw 'P6 parallel thermal parser regression failed'
+          }
+          $preview=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -ParallelOnly
+          if($LASTEXITCODE -ne 0){throw 'Parallel-only COM dry-run failed'}
+          $output=$preview -join "`n"
+          foreach($marker in @('p610_mode=1','p611_mode=1','p612_mode=1',
+             'p610_mode=0','p611_mode=0','p612_mode=0',
+             'p6_phase=30','p6_phase=31','p6_phase=32','p6_phase=33',
+             'p6_phase=34','p6_phase=35','Battery thermal guard 46 C',
+             'PREVIEW complete')){
+             if(-not $output.Contains($marker)){throw "Parallel phase not present $marker"}
+          }
+          if($output.Contains('g3d_lab_gate=2') -or $output.Contains('g3d_lab_reset=1') -or
+             $output.Contains('gov_policy=') -or $output.Contains('max77705_wdt=1')){
+             throw 'Parallel trial requests a write to GPU/governor/charger'
+          }
+          $invalidText='';$invalidExit=0
+          try {
+             $ErrorActionPreference='Continue'
+             $invalid=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -ParallelOnly -EnableActualG3D 2>&1
+             $invalidExit=$LASTEXITCODE
+             $invalidText=$invalid -join "`n"
+          }catch{
+             $invalidExit=1
+             $invalidText=$_.Exception.Message
+          }finally{$ErrorActionPreference='Stop'}
+          if($invalidExit -eq 0 -or $invalidText -notmatch 'ParallelOnly is read-only'){
+             throw 'ParallelOnly must refuse actual GPU gating with explicit error'
+          }
+          $report=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/s9-p6-parallel-report.ps1 -Log tools/tests/p6-parallel-synthetic.log
+          if($LASTEXITCODE -ne 0){throw 'Parallel synthetic report failed'}
+          $text=$report -join "`n"
+          foreach($marker in @('rejected=0','fg=6','charger=3',
+             'phase=-1','WDTEN=1 CHGIN_DTLS=3 CHG_DTLS=1','up=30s',
+             'NOT_CHARGING_STATE','phase=31','p610_transitions=1',
+             'scion_transition up=105500ms','quiet=301ms',
+             'checksum_samples=1','eagl_frames=60',
+             'phase=35','QH_first_raw=43000')){
+             if(-not $text.Contains($marker)){throw "Parallel report missing $marker"}
+          }
+          $older=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/s9-p6-parallel-report.ps1 -Log tools/tests/p6-deep-synthetic.log 3>&1
+          if($LASTEXITCODE -ne 0 -or ($older -join "`n") -notmatch 'fg=0 battery=0 charger=0 gov_transition=0'){
+             throw 'Old report must not invent fresh charger/transition evidence'
           }
       - name: P6 offline reporter handles mixed partial GPU serial noise
         shell: powershell

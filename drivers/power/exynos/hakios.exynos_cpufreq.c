@@ -774,6 +774,17 @@ dev_state_update(uint64_t now)
 		ev.to_static=to==SCION_STATIC;
 		ev.transitioned=was!=to;
 		s9_p610_add(&p610_stats,&ev);
+		/* At most four transitions per 1s window; no new timer, no state writes. */
+		if(ev.transitioned && p610_stats.transitions<=4) {
+			uint64_t up_ns=0,touch_age_ns=0;
+			absolutetime_to_nanoseconds(now,&up_ns);
+			if(touch && now>=touch)absolutetime_to_nanoseconds(now-touch,&touch_age_ns);
+			say("p610-trans: up=%llums phase=%u from=%u to=%u frame_valid=%u frame_age_ms=%u quiet_ms=%u touch_age_ms=%llu gap_ms=%u moving=%u fingers=%u frame_tick=%llu touch_tick=%llu applied=0\n",
+			    up_ns/NSEC_PER_MSEC,phase,(unsigned)was,(unsigned)to,ev.frame_valid,
+			    ev.age_ms,ev.quiet_ms,touch?touch_age_ns/NSEC_PER_MSEC:0,
+			    ev.gap_ms,ev.moving,ev.fingers,
+			    (unsigned long long)last,(unsigned long long)touch);
+		}
 		if (last)p610_frame_seen=last;
 	} else if (p610_was_on) {
 		s9_p610_clear(&p610_stats);

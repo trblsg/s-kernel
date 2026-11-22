@@ -46,6 +46,11 @@
  * the 5 s poll) with AvgCurrent (0x0B) and QH (0x4D, the raw coulomb counter, to difference) besides Current,
  * for a drain measured over minutes rather than read off a percentage.
  *
+ * Boot-arg max77705_diag_s=S (30 to 300, multiples of 5 s): with max77705_diag=1, capture the same
+ * read-only charger register snapshot every S seconds rather than only at the existing 5-minute line. Never
+ * reads CHG_INT (0xB0, read-to-clear), never writes charger state, and does not create another polling thread.
+ * For charging/thermal experiments prefer S=30 (20 I2C register reads/30s, bounded).
+ *
  * Boot-arg max77705_wdt=1 (off by default; the one write to the charger, given its go by the phone's owner on 7 November):
  * the charger's watchdog kicked, as Samsung's driver kicks it at every health poll (max77705_chg_set_wdtmr_kick()). On
  * this kernel the charger was seen to stop charging within five minutes of every boot on USB ("charging" at about 1 A,
@@ -833,13 +838,14 @@ haptic_start(void)
  * max77705_diag=1: the charger's registers 0xB2-0xC5, raw, in one line, and what they say (only reads; see the top of
  * this file). A register that does not answer reads "--".
  */
-static uint32_t chg_diag;
+static uint32_t chg_diag, chg_diag_ticks; /* optional 30-300s register cadence on existing 5s battery worker */
 static uint32_t fg_ticks;               /* max77705_fg_s, in 5 s polls (0: off) */
 
 static void
 chg_diag_say(const char *when)
 {
 	uint8_t r[CHG_DIAG_LAST - CHG_DIAG_FIRST + 1];
+	uint64_t up_ns=0;
 	bool got[sizeof(r)];
 	char line[3 * sizeof(r) + 1];
 	size_t at = 0;
@@ -848,15 +854,16 @@ chg_diag_say(const char *when)
 		got[i] = read8(CHARGER, (uint8_t)(CHG_DIAG_FIRST + i), &r[i]) == 0;
 		at += (size_t)snprintf(line + at, sizeof(line) - at, got[i] ? " %02x" : " --", r[i]);
 	}
-	say("max77705: charger %s: 0xb2-0xc5:%s\n", when, line);
+	absolutetime_to_nanoseconds(mach_absolute_time(),&up_ns);
+	say("max77705: charger %s: 0xb2-0xc5:%s up=%llus\n", when, line,up_ns/NSEC_PER_SEC);
 #define CHG_R(reg)      (got[(reg) - CHG_DIAG_FIRST] ? (int)r[(reg) - CHG_DIAG_FIRST] : -1)
 	say("max77705: charger %s: CNFG_00 mode %#x WDTEN %d; CHGIN_DTLS %d; CHG_DTLS %#x BAT_DTLS %d; BYP_DTLS %#x; "
-	    "fast charge %d mA; input limit code %#x (CNFG_09)\n", when,
+	    "fast charge %d mA; input limit code %#x (CNFG_09); up=%llus\n", when,
 	    CHG_R(0xB7) < 0 ? -1 : CHG_R(0xB7) & 0xf, CHG_R(0xB7) < 0 ? -1 : CHG_R(0xB7) >> 4 & 1,
 	    CHG_R(0xB3) < 0 ? -1 : CHG_R(0xB3) >> 5 & 3,
 	    CHG_R(0xB4) < 0 ? -1 : CHG_R(0xB4) & 0xf, CHG_R(0xB4) < 0 ? -1 : CHG_R(0xB4) >> 4 & 7,
 	    CHG_R(0xB5) < 0 ? -1 : CHG_R(0xB5) & 0xf,
-	    CHG_R(0xB9) < 0 ? -1 : (CHG_R(0xB9) & 0x3f) * 50, CHG_R(0xC0) < 0 ? -1 : CHG_R(0xC0) & 0x7f);
+	    CHG_R(0xB9) < 0 ? -1 : (CHG_R(0xB9) & 0x3f) * 50, CHG_R(0xC0) < 0 ? -1 : CHG_R(0xC0) & 0x7f,up_ns/NSEC_PER_SEC);
 #undef CHG_R
 }
 
@@ -1016,6 +1023,12 @@ battery_thread(void *arg, __unused wait_result_t result)
 	{
 		uint32_t fg_s = 0;
 
+		uint32_t diag_s=0;
+		(void)PE_parse_boot_argn("max77705_diag_s",&diag_s,sizeof(diag_s));
+		if(chg_diag && diag_s>=30 && diag_s<=300 && diag_s%5==0) {
+			chg_diag_ticks=diag_s/(POLL_MS/1000);
+			say("max77705: charger snapshots every %u s (read-only; no extra thread, no WDT writes)\n",diag_s);
+		}
 		(void)PE_parse_boot_argn("max77705_fg_s", &fg_s, sizeof(fg_s));
 		fg_ticks = fg_s >= 5 && fg_s <= 600 ? (fg_s + POLL_MS / 2000) / (POLL_MS / 1000) : 0;
 		(void)PE_parse_boot_argn("max77705_wdt", &chg_wdt, sizeof(chg_wdt));
@@ -1033,6 +1046,8 @@ battery_thread(void *arg, __unused wait_result_t result)
 		}
 		if (battery_read(&b)) {
 			failed = 0;
+			if (chg_diag_ticks && tick%chg_diag_ticks==0 && tick%60!=0)
+				chg_diag_say("periodic");
 			hakios_battery_report(&b);
 			if (tick % 60 == 0) {
 				say_state("every 5 minutes", &b);

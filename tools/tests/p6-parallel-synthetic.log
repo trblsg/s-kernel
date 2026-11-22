@@ -1,0 +1,26 @@
+max77705: charger now: 0xb2-0xc5: 40 60 25 00 00 10 00 00 00 00 00 00 00 00 10 00 14 00 05 00 up=5s
+max77705: charger now: CNFG_00 mode 0 WDTEN 1; CHGIN_DTLS 3; CHG_DTLS 0x1 BAT_DTLS 2; BYP_DTLS 0; fast charge 1000 mA; input limit code 0x5 (CNFG_09); up=5s
+max77705: now: 80.00%, 4050 mV, 100 mA, 35.4 C (ADC 1560), a battery, charging, 2500 of 2967 mAh (full 2800), 2 cycles
+max77705: fg: t 10 s, 80.00%, 2500 mAh, current 100 mA, avg 80 mA, QH 43000
+max77705: fg: t 20 s, 79.98%, 2499 mAh, current -100 mA, avg -30 mA, QH 42990
+max77705: charger periodic: 0xb2-0xc5: 40 60 25 00 00 10 00 00 00 00 00 00 00 00 10 00 14 00 05 00 up=30s
+max77705: charger periodic: CNFG_00 mode 0x0 WDTEN 1; CHGIN_DTLS 3; CHG_DTLS 0x7 BAT_DTLS 2; BYP_DTLS 0x0; fast charge 1000 mA; input limit code 0x5 (CNFG_09); up=30s
+max77705: fg: t 30 s, 79.97%, 2499 mAh, current -120 mA, avg -60 mA, QH 42975
+p6: PHASE=30 up=32000ms flags=17 (marker only; rebase next sample)
+max77705: fg: t 40 s, 79.95%, 2498 mAh, current -80 mA, avg -65 mA, QH 42960
+fps: 10 presented, 10 drawn, 10 flips, 0 lost, 0 held; 60 refreshes
+p6: PHASE=31 up=93000ms flags=17 (marker only; rebase next sample)
+max77705: charger periodic: CNFG_00 mode 0x0 WDTEN 1; CHGIN_DTLS 3; CHG_DTLS 0x7 BAT_DTLS 2; BYP_DTLS 0x0; fast charge 1000 mA; input limit code 0x5 (CNFG_09); up=95s
+max77705: fg: t 100 s, 79.92%, 2497 mAh, current -110 mA, avg -75 mA, QH 42930
+p610-trans: up=105500ms phase=31 from=2 to=0 frame_valid=1 frame_age_ms=81 quiet_ms=301 touch_age_ms=0 gap_ms=100 moving=0 fingers=0 frame_tick=1 touch_tick=0 applied=0
+p611-hash: up=110.100s phase=31 frames=60 calls=100 checked=20 checked_same=20 checked_changed=0 skip_sameframe=0 skip_no_base=0 skip_planar=10 skip_seldom=70 samples=1 sample_bytes=7000000 sample_us=3500 max_us=3500 sampled_changed=0 overflow=0 no_extra_hash=1
+p612-eagl: up=110.100s phase=31 frames=60 draws=1200 single=60 multi=0 unknown=0 switched=59 same=0 alternating=58 target_a=3 target_b=5 third_target=0 mirrored=60 shared=0 copied=60 api_calls=60 api_positive=0 api_zero=60 api_negative=0 scanout=use_fps_not_EAGL_api
+fps: 10 presented, 10 drawn, 10 flips, 0 lost, 0 held; 60 refreshes
+p6: PHASE=32 up=154000ms flags=17 (marker only; rebase next sample)
+max77705: fg: t 160 s, 79.90%, 2496 mAh, current -90 mA, avg -80 mA, QH 42915
+p6: PHASE=33 up=215000ms flags=17 (marker only; rebase next sample)
+p611-hash: up=220.000s phase=33 frames=60 calls=110 checked=30 checked_same=30 checked_changed=0 skip_sameframe=0 skip_no_base=0 skip_planar=10 skip_seldom=70 samples=2 sample_bytes=14000000 sample_us=7000 max_us=4000 sampled_changed=0 overflow=0 no_extra_hash=1
+p6: PHASE=34 up=276000ms flags=17 (marker only; rebase next sample)
+p612-eagl: up=280.100s phase=34 frames=60 draws=1250 single=60 multi=0 unknown=0 switched=59 same=0 alternating=58 target_a=3 target_b=5 third_target=0 mirrored=60 shared=0 copied=60 api_calls=60 api_positive=0 api_zero=60 api_negative=0 scanout=use_fps_not_EAGL_api
+p6: PHASE=35 up=337000ms flags=17 (marker only; rebase next sample)
+p6: PHASE=9 up=398000ms flags=17 (marker only; rebase next sample)
