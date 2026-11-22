@@ -9,6 +9,8 @@ $active=$null
 $groupNames=@{}
 $crashes=0
 $gateArms=0
+$autoPhases=0
+$autoFinished=$false
 $hasConfirmedMarkers=[bool](Select-String -LiteralPath $Log -Pattern '^hi: mark=(main|secondary|settings)' -Quiet)
 $hasUsbDenied=[bool](Select-String -LiteralPath $Log -Pattern '^usb: sysctl kern.hakios.hi_cmd=\d+: EPERM' -Quiet)
 $unconfirmed=$hasUsbDenied -and -not $hasConfirmedMarkers
@@ -23,6 +25,21 @@ function New-Run([string]$stage) {
 foreach($line in [IO.File]::ReadLines((Resolve-Path -LiteralPath $Log).Path)){
     if($line -match '^hi: link group=(\d+) target=(\S+) action=(\S+)'){
         $groupNames[[int]$Matches[1]]="$($Matches[2]).$($Matches[3])"
+    }
+    if($line -match '^hi: auto=(baseline|cut1|recover1|cut2|recover2) up='){
+        $active=New-Run ('auto-'+$Matches[1])
+        $runs.Add($active)
+        $autoPhases++
+        continue
+    }
+    if($line -match '^hi: auto=FINISHED'){
+        $autoFinished=$true
+        $active=$null
+        continue
+    }
+    if($line -match '^hi: auto=ABORT'){
+        $active=$null
+        continue
     }
     if($line -match '^hi: mark=(main|secondary|settings)'){
         $active=New-Run $Matches[1]
@@ -90,7 +107,7 @@ function Avg($a){
     if(!$a.Count){return 'n/a'}
     return ('{0:0.0}' -f (($a|Measure-Object -Average).Average))
 }
-Write-Output "S9 HomeIdle A/B: $($runs.Count) serial windows; $crashes confirmed PridePoster SIGSEGV; $gateArms source-cut attempts"
+Write-Output "S9 HomeIdle A/B: $($runs.Count) serial windows; $autoPhases autonomous phases; auto_finished=$autoFinished; $crashes confirmed PridePoster SIGSEGV; $gateArms manual source-cut attempts"
 if($unconfirmed){
     Write-Output 'WARNING: hi_cmd=EPERM; stages are USB-REQUESTED scenes only, NOT confirmed hi: mark. No source cut succeeded.'
 }
@@ -113,4 +130,4 @@ foreach($r in $runs){
         Write-Output ("     link {0}: {1} tick_count={2} cut={3}" -f $g.Key,$who,$g.Value,$r.LinkCut[$g.Key])
     }
 }
-Write-Output 'Reminder: primary/secondary only prove a page-scoped workload; a manual 30s cut is causal evidence, not a validated permanent fix.'
+Write-Output 'Reminder: auto CUT vs BASELINE/RECOVER with cut_count>0 is a source-specific causal intervention, but neither commits nor FPS alone prove pixel identity or permanent safety.'

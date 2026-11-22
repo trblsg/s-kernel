@@ -1,0 +1,42 @@
+hi: enabled oneboot links=7 policy=autonomous_cross_over input_hook=1 group_max=48 usb_ctl=kern.hakios.hi_cmd autonomous_usb_independent=1
+hi: ctl_selftest read_rc=0 value=0 write_rc=0 readback_rc=0 readback=0 expected=0 kern_flag=SOURCE_VERIFIED auto_independent=1
+hi: link group=3 target=SBHClockApplicationIconImageView action=_timerFired:
+hi: clock_view up=200s target=0x123 window=SBHomeScreenWindow has_window=1 intersects_window=0 hidden_ancestors=0 effective_alpha=1.000 rect_in_window=-500,100,40,40 window_size=400,800 ancestry=SBHClockApplicationIconImageView>UIView
+hi: auto=START up=200s confirmed_clock_link=3 ticks_5s=51 steady_windows=2 USB_not_required=1
+hi: auto=baseline up=200s source=3 gate=0 duration_s=20 input_safe=1 home=1
+hi: phase=unset up=201s visible_home=1 home_windows=1 windows=10 contexts=10 commits_5s=520 animations=9 anim_scan_complete=1 gate=0 seconds_left=0 mali_framefloor=450 auto_state=baseline auto_mode=1
+hi: ctx id=0x1 window=SBHomeScreenWindow commits_5s=52 current_commit=600
+hi: link=3 target=SBHClockApplicationIconImageView action=_timerFired: ticks_5s=51 forwarded=51 cut=0 fps_req=10
+fps: 10 presented, 10 drawn
+hi: phase=unset up=219s visible_home=1 home_windows=1 windows=10 contexts=10 commits_5s=510 animations=9 anim_scan_complete=1 gate=0 seconds_left=0 mali_framefloor=450 auto_state=baseline auto_mode=1
+hi: link=3 target=SBHClockApplicationIconImageView action=_timerFired: ticks_5s=51 forwarded=51 cut=0 fps_req=10
+fps: 10 presented, 10 drawn
+hi: auto=cut1 up=220s source=3 gate=1 duration_s=20 input_safe=1 home=1
+hi: phase=unset up=221s visible_home=1 home_windows=1 windows=10 contexts=10 commits_5s=51 animations=9 anim_scan_complete=1 gate=3 seconds_left=19 mali_framefloor=450 auto_state=cut1 auto_mode=1
+hi: link=3 target=SBHClockApplicationIconImageView action=_timerFired: ticks_5s=51 forwarded=5 cut=46 fps_req=10
+fps: 1 presented, 1 drawn
+hi: phase=unset up=239s visible_home=1 home_windows=1 windows=10 contexts=10 commits_5s=52 animations=9 anim_scan_complete=1 gate=3 seconds_left=1 mali_framefloor=450 auto_state=cut1 auto_mode=1
+hi: link=3 target=SBHClockApplicationIconImageView action=_timerFired: ticks_5s=51 forwarded=5 cut=46 fps_req=10
+fps: 1 presented, 1 drawn
+hi: auto=recover1 up=240s source=3 gate=0 duration_s=20 input_safe=1 home=1
+hi: phase=unset up=241s visible_home=1 home_windows=1 windows=10 contexts=10 commits_5s=515 animations=9 anim_scan_complete=1 gate=0 seconds_left=0 mali_framefloor=450 auto_state=recover1 auto_mode=1
+hi: link=3 target=SBHClockApplicationIconImageView action=_timerFired: ticks_5s=51 forwarded=51 cut=0 fps_req=10
+fps: 10 presented, 10 drawn
+hi: phase=unset up=259s visible_home=1 home_windows=1 windows=10 contexts=10 commits_5s=511 animations=9 anim_scan_complete=1 gate=0 seconds_left=0 mali_framefloor=450 auto_state=recover1 auto_mode=1
+hi: link=3 target=SBHClockApplicationIconImageView action=_timerFired: ticks_5s=51 forwarded=51 cut=0 fps_req=10
+fps: 10 presented, 10 drawn
+hi: auto=cut2 up=260s source=3 gate=1 duration_s=20 input_safe=1 home=1
+hi: phase=unset up=261s visible_home=1 home_windows=1 windows=10 contexts=10 commits_5s=51 animations=9 anim_scan_complete=1 gate=3 seconds_left=19 mali_framefloor=450 auto_state=cut2 auto_mode=1
+hi: link=3 target=SBHClockApplicationIconImageView action=_timerFired: ticks_5s=51 forwarded=5 cut=46 fps_req=10
+fps: 1 presented, 1 drawn
+hi: phase=unset up=279s visible_home=1 home_windows=1 windows=10 contexts=10 commits_5s=52 animations=9 anim_scan_complete=1 gate=3 seconds_left=1 mali_framefloor=450 auto_state=cut2 auto_mode=1
+hi: link=3 target=SBHClockApplicationIconImageView action=_timerFired: ticks_5s=51 forwarded=5 cut=46 fps_req=10
+fps: 1 presented, 1 drawn
+hi: auto=recover2 up=280s source=3 gate=0 duration_s=20 input_safe=1 home=1
+hi: phase=unset up=281s visible_home=1 home_windows=1 windows=10 contexts=10 commits_5s=515 animations=9 anim_scan_complete=1 gate=0 seconds_left=0 mali_framefloor=450 auto_state=recover2 auto_mode=1
+hi: link=3 target=SBHClockApplicationIconImageView action=_timerFired: ticks_5s=51 forwarded=51 cut=0 fps_req=10
+fps: 10 presented, 10 drawn
+hi: phase=unset up=299s visible_home=1 home_windows=1 windows=10 contexts=10 commits_5s=512 animations=9 anim_scan_complete=1 gate=0 seconds_left=0 mali_framefloor=450 auto_state=recover2 auto_mode=1
+hi: link=3 target=SBHClockApplicationIconImageView action=_timerFired: ticks_5s=51 forwarded=51 cut=0 fps_req=10
+fps: 10 presented, 10 drawn
+hi: auto=FINISHED up=300s runs=2 controls_restored=1 manual_hi_cmd_still_available=1

@@ -17,6 +17,12 @@ jobs:
           /tmp/s9_hi_c
           c++ -x c++ -std=c++17 -O2 -Wall -Wextra -Werror -pedantic -fsanitize=undefined tools/tests/test_s9_home_idle_policy.c -o /tmp/s9_hi_cpp
           /tmp/s9_hi_cpp
+      - name: Autonomous cross-over C11 and C++17 fail-open tests (UBSan)
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror -pedantic -fsanitize=undefined tools/tests/test_s9_hi_auto_policy.c -o /tmp/s9_auto_c
+          /tmp/s9_auto_c
+          c++ -x c++ -std=c++17 -O2 -Wall -Wextra -Werror -pedantic -fsanitize=undefined tools/tests/test_s9_hi_auto_policy.c -o /tmp/s9_auto_cpp
+          /tmp/s9_auto_cpp
       - name: Boot-args catalog and integration guards
         run: |
           python3 tools/boot-args.py --check
@@ -30,6 +36,9 @@ jobs:
           assert '#include "s9_home_idle.inc"' in sb
           assert 'const char *hi_arg = strstr(arguments, "hi=1")' in sb
           assert "hi_arg[4] == '\\0'" in sb
+          assert 'const char *hi_auto_arg = strstr(arguments, "hi=2")' in sb
+          assert "hi_auto_arg[4] == '\\0'" in sb
+          assert "hi_enabled = hi_auto_mode ||" in sb
           assert 'if (hi_enabled) hi_set_requested_fps' in sb
           assert 'hi_make_link(self, selector, target, action)' in sb
           assert 'hi_usb_command();' in inc
@@ -37,6 +46,26 @@ jobs:
           assert 'hi_cmd, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY | CTLFLAG_KERN' in kernel
           assert 'hi_group_clock(' in inc
           assert '(!hi_animations_absent && !clock_source)' in inc
+          assert '#include "s9_hi_auto_policy.h"' in inc
+          assert '#include "s9_home_idle_auto.inc"' in inc
+          assert '#include "s9_home_idle_detail.inc"' in inc
+          detail=Path('userland/src/s9_home_idle_detail.inc').read_text()
+          auto=Path('userland/src/s9_home_idle_auto.inc').read_text()
+          usb=Path('drivers/usb/hakios.dwc3.c').read_text()
+          assert 'kernel_sysctlbyname(arg, NULL, NULL, &value, sizeof(value))' in usb
+          assert 'hi: ctl_selftest read_rc=' in inc and 'hi: ctl=RECEIVED' in inc
+          assert 'hi_auto_sample(now);' in inc and 'hi_auto_tick();' in inc
+          for phase in ('HI_AUTO_BASELINE','HI_AUTO_CUT1','HI_AUTO_RECOVER1','HI_AUTO_CUT2','HI_AUTO_RECOVER2'):
+              assert phase in Path('userland/src/s9_hi_auto_policy.h').read_text()
+          for symptom in ('hi: ctx id=','hi: clock_view','intersects_window','hidden_ancestors','hi: anim layer='):
+              assert symptom in detail
+          assert 'hi_auto_candidate(' in auto and 'hi_auto_must_abort(' in auto
+          assert 'hi_auto_cut_phase(' in auto and 'hi_auto_disable_gate();' in auto
+          assert 'hi_auto_mode && __atomic_load_n(&hi_auto_clock_gate' in inc
+          assert 'hi_group_clock(group)' in inc
+          assert 'hi: auto=FINISHED' in auto
+          bootline = next(x for x in Path('docs/s9-home-idle-deep-oneboot.md').read_text().splitlines() if x.startswith('hi=2 '))
+          assert len(bootline.encode()) <= 200, len(bootline)
           assert 's9_hi_clock_source(' in Path('userland/src/s9_home_idle_policy.h').read_text()
           assert 's9_hi_skip(' in inc and 'S9_HI_GATE_US' in inc
           assert 'hi_event_hook_ok' in inc and 'hi_animations_absent' in inc
@@ -66,7 +95,13 @@ jobs:
           foreach ($value in @('WARNING: hi_cmd=EPERM','2 serial windows','SBHClockApplicationIconImageView._timerFired:')) {
             if (!$fallback.Contains($value)) { throw "EPERM fallback missing: $value" }
           }
-          Write-Host "S9 HomeIdle report parser OK (confirmed markers and EPERM fallback)"
+          $auto = (& ./tools/s9-home-idle-report.ps1 -Log tools/tests/s9-home-idle-auto-fixture.log) -join "`n"
+          foreach ($value in @('5 autonomous phases','auto_finished=True',
+                              'auto-baseline','auto-cut1','auto-recover1',
+                              'auto-cut2','auto-recover2','cut=92')) {
+            if (!$auto.Contains($value)) { throw "Autonomous cross-over report missing: $value" }
+          }
+          Write-Host "S9 HomeIdle report parser OK (manual, EPERM, auto A/B/A/B)"
   springboard-syntax:
     runs-on: macos-15
     timeout-minutes: 12

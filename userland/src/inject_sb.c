@@ -2259,11 +2259,17 @@ display_link_rates(void)
 	}
 	dl_say = boot_arg(arguments, "touch_lat=1");
 	dl_max = boot_arg(arguments, "dl_max=1");
-	/* hi=1: one-boot source inventory, scene context commits, timed source cut. */
-	/* Match a whole boot word, and expose the actual reader to boot-args.py. */
+	/* hi=1: manual profiler; hi=2: autonomous A/B and extended attribution.
+	 * Match exact boot words, never an arbitrary substring (hi=20 is different).
+	 * Keep literal strstr calls for the boot-args source catalogue. */
 	const char *hi_arg = strstr(arguments, "hi=1");
-	hi_enabled = hi_arg != NULL && (hi_arg == arguments || hi_arg[-1] == ' ') &&
-	    (hi_arg[4] == ' ' || hi_arg[4] == '\0');
+	const char *hi_auto_arg = strstr(arguments, "hi=2");
+	hi_auto_mode = hi_auto_arg != NULL &&
+	    (hi_auto_arg == arguments || hi_auto_arg[-1] == ' ') &&
+	    (hi_auto_arg[4] == ' ' || hi_auto_arg[4] == '\0');
+	hi_enabled = hi_auto_mode || (hi_arg != NULL &&
+	    (hi_arg == arguments || hi_arg[-1] == ' ') &&
+	    (hi_arg[4] == ' ' || hi_arg[4] == '\0'));
 	animation_rates(arguments);
 	if (!dl_say && !dl_max && !hi_enabled) {
 		return;

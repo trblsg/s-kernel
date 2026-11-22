@@ -1,19 +1,21 @@
 /*
  * S9 Home Idle one-boot causal A/B, included after SpringBoard's CADisplayLink caller().
- * Boot: hi=1. No work, hooks or frame suppression without that exact token.
- * Read-only by default. A manual notification can thin exactly ONE identified
- * CADisplayLink target for at most 30 s. The guard fails OPEN for input, visible
- * animations, an app/lockscreen in front, missing event hook, and any time expiry.
- * Never touches the frame end, GL, CA transactions or the panel.
+ * hi=1: passive observer and manual one-target intervention.
+ * hi=2: passive observer, detailed context/view snapshots and autonomous baseline /
+ * Clock-only cut / recovery / repeat within a single boot. The home must be
+ * stable >180s; no serial command is required. All timed cuts fail OPEN on
+ * touch, scene exit, timer disappearance or timeout. Never skip GL/present().
  */
 #include "s9_home_idle_policy.h"
+#include "s9_hi_auto_policy.h"
 #define HI_GROUPS 48
 #define HI_CONTEXTS 40
-static bool hi_enabled, hi_event_hook_ok;
+static bool hi_enabled, hi_event_hook_ok, hi_auto_mode;
 static os_unfair_lock hi_group_lock = OS_UNFAIR_LOCK_INIT;
 static struct hi_group {
     char target[92], action[72];
     uint64_t callbacks, forwarded, cut, last_callbacks;
+    uint64_t last_tick_us, last_view_us;
     uint32_t requested_fps, instances;
 } hi_groups[HI_GROUPS];
 static unsigned hi_groups_used, hi_stage;
@@ -31,10 +33,22 @@ struct hi_proxy_data {
 struct hi_context {
     unsigned id;
     unsigned long long last, delta;
+    char window[72];
 };
 static struct hi_context hi_contexts[HI_CONTEXTS];
 static unsigned hi_contexts_used;
+static enum hi_auto_phase hi_auto_state;
+static unsigned hi_auto_clock_id, hi_auto_ready_windows;
+static uint64_t hi_auto_end_us, hi_auto_input_at_start;
+static bool hi_auto_clock_gate, hi_auto_seen_failure;
+static const char *const hi_auto_names[] = {
+    "wait", "baseline", "cut1", "recover1", "cut2", "recover2", "finished", "aborted"
+};
 static uint64_t hi_time_us(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000; }
+#include "s9_home_idle_detail.inc"
+static void hi_auto_sample(uint64_t now);
+static void hi_auto_tick(void);
+static void hi_auto_cancel(const char *reason,bool manual);
 static void
 hi_send_event(id self,SEL cmd,id event)
 {
@@ -81,12 +95,23 @@ hi_proxy_tick(id self,SEL cmd,id link)
     if(p==NULL || target==NULL || p->action==NULL)return;
     const unsigned group=p->group;
     const uint64_t now=hi_time_us();
-    if(group && group<=HI_GROUPS)
-        __atomic_fetch_add(&hi_groups[group-1].callbacks,1,__ATOMIC_RELAXED);
+    if(group && group<=HI_GROUPS){
+        struct hi_group *g=&hi_groups[group-1];
+        __atomic_fetch_add(&g->callbacks,1,__ATOMIC_RELAXED);
+        __atomic_store_n(&g->last_tick_us,now,__ATOMIC_RELEASE);
+        if(hi_auto_mode && hi_group_clock(group) &&
+           (g->last_view_us==0 || now-g->last_view_us>=UINT64_C(10000000))){
+            g->last_view_us=now;
+            hi_clock_view_snapshot(target,now);
+        }
+    }
     bool cut=group && group==__atomic_load_n(&hi_gate_group,__ATOMIC_ACQUIRE) &&
         s9_hi_skip(now,__atomic_load_n(&hi_gate_deadline,__ATOMIC_ACQUIRE),
            __atomic_load_n(&hi_last_input,__ATOMIC_ACQUIRE),p->last_forward,
-           __atomic_load_n(&hi_stage,__ATOMIC_ACQUIRE)==1,__atomic_load_n(&hi_home_ready,__ATOMIC_ACQUIRE),
+           (__atomic_load_n(&hi_stage,__ATOMIC_ACQUIRE)==1 ||
+            (hi_auto_mode && __atomic_load_n(&hi_auto_clock_gate,__ATOMIC_ACQUIRE) &&
+             hi_auto_clock_id==group)),
+           __atomic_load_n(&hi_home_ready,__ATOMIC_ACQUIRE),
            hi_event_hook_ok,hi_group_clock(group) ||
            __atomic_load_n(&hi_animations_absent,__ATOMIC_ACQUIRE));
     if(cut){
@@ -205,8 +230,10 @@ hi_sample(void)
             hi_contexts[j].id=cid;
             hi_contexts[j].last=commit;
             hi_contexts[j].delta=0;
+            snprintf(hi_contexts[j].window,sizeof(hi_contexts[j].window),"%s",name);
             hi_contexts_used++;
         }else if(j<hi_contexts_used){
+            snprintf(hi_contexts[j].window,sizeof(hi_contexts[j].window),"%s",name);
             if(commit>=hi_contexts[j].last){
                 uint64_t d=commit-hi_contexts[j].last;
                 hi_contexts[j].delta+=d;
@@ -227,6 +254,10 @@ hi_sample(void)
         __atomic_store_n(&hi_gate_deadline,0,__ATOMIC_RELEASE);
         gate=0;
     }
+    if(hi_auto_mode){
+        hi_window_context_details();
+        if(tick%2==0)hi_window_anim_snapshot();
+    }
     unsigned long long commits=0;
     for(unsigned i=0;i<hi_contexts_used;i++){
         commits+=hi_contexts[i].delta;
@@ -234,11 +265,12 @@ hi_sample(void)
     }
     say("hi: phase=%s up=%llus visible_home=%u home_windows=%u windows=%lu contexts=%u "
         "commits_5s=%llu animations=%u anim_scan_complete=%u gate=%u seconds_left=%llu "
-        "mali_framefloor=%d\n",
+        "mali_framefloor=%d auto_state=%s auto_mode=%u\n",
         hi_stages[hi_stage],(unsigned long long)(now/1000000),ready?1:0,
         homewindows,count,contexts,commits,animations,budget?1:0,gate,
         (unsigned long long)(gate && deadline>now?(deadline-now)/1000000:0),
-        sysctl_int("kern.hakios.mali_gov_frame"));
+        sysctl_int("kern.hakios.mali_gov_frame"),
+        hi_auto_names[hi_auto_state],hi_auto_mode?1u:0u);
     unsigned n=__atomic_load_n(&hi_groups_used,__ATOMIC_ACQUIRE);
     for(unsigned i=0;i<n;i++){
         struct hi_group *g=&hi_groups[i];
@@ -251,6 +283,7 @@ hi_sample(void)
                 i+1,g->target,g->action,(unsigned long long)callbacks,
                 (unsigned long long)forwarded,(unsigned long long)cut,g->requested_fps);
     }
+    hi_auto_sample(now);
 }
 static void hi_mark(unsigned stage);
 static void hi_arm(unsigned selected);
@@ -260,9 +293,17 @@ static void
 hi_usb_command(void)
 {
     static int previous;
+    static bool warned;
     int command=sysctl_int("kern.hakios.hi_cmd");
-    if(command<0 || command==previous)return;
+    if(command<0){
+        if(!warned){warned=true;say("hi: CONTROL_FAIL mailbox_read=%d errno=%d "
+            "auto_mode=%u passive_continues=1\n",command,errno,hi_auto_mode?1u:0u);}
+        return;
+    }
+    if(command==previous)return;
     previous=command;
+    say("hi: ctl=RECEIVED value=%d usb_kernel_to_SpringBoard=OK\n",command);
+    if(hi_auto_mode)hi_auto_cancel("manual_usb_control",true);
     if(command>=1 && command<=3)hi_mark((unsigned)command);
     else if(command>=101 && command<=148)hi_arm((unsigned)(command-100));
     else if(command==199)hi_arm(UINT32_MAX);
@@ -278,6 +319,7 @@ hi_pump(void)
 {
     hi_usb_command();
     hi_sample();
+    hi_auto_tick();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(),^{hi_pump();});
 }
 static void
@@ -325,6 +367,8 @@ hi_arm(unsigned selected)
     say("hi: gate=armed target=%u class=%s action=%s clock_override=%u max_seconds=30 input_grace=2.5\n",
         id,hi_groups[id-1].target,hi_groups[id-1].action,clock_source?1:0);
 }
+#include "s9_home_idle_auto.inc"
+
 static void
 hi_start(void)
 {
@@ -336,6 +380,23 @@ hi_start(void)
         hi_event_hook_ok=hi_original_send_event!=NULL;
     }
     __atomic_store_n(&hi_last_input,hi_time_us(),__ATOMIC_RELEASE);
+    /* Actual userland read/write/read self-check: independent of USB typing.
+     * The kernel console route is separately protected by CTLFLAG_KERN and
+     * validated by CI. Auto A/B continues even when either route fails. */
+    const char *mbox="kern.hakios.hi_cmd";
+    int32_t probe=-1,confirmed=-1;
+    size_t len=sizeof(probe);
+    int read_rc=sysctlbyname(mbox,&probe,&len,NULL,0);
+    int write_rc=-1,roundtrip_rc=-1;
+    if(read_rc==0 && probe==0){
+        write_rc=sysctlbyname(mbox,NULL,NULL,&probe,sizeof(probe));
+        len=sizeof(confirmed);
+        roundtrip_rc=sysctlbyname(mbox,&confirmed,&len,NULL,0);
+    }
+    say("hi: ctl_selftest read_rc=%d value=%d write_rc=%d readback_rc=%d "
+        "readback=%d expected=0 kern_flag=SOURCE_VERIFIED "
+        "auto_independent=%u\n",
+        read_rc,probe,write_rc,roundtrip_rc,confirmed,hi_auto_mode?1u:0u);
     int token=0;
     notify_register_dispatch("com.hakios.hi.main",&token,dispatch_get_main_queue(),^(__unused int t){hi_mark(1);});
     notify_register_dispatch("com.hakios.hi.secondary",&token,dispatch_get_main_queue(),^(__unused int t){hi_mark(2);});
@@ -352,8 +413,10 @@ hi_start(void)
         unsigned select=i;
         notify_register_dispatch(name,&token,dispatch_get_main_queue(),^(__unused int t){hi_arm(select);});
     }
-    say("hi: enabled oneboot links=%u policy=forward-only until explicit cut "
-        "input_hook=%u group_max=%d usb_ctl=kern.hakios.hi_cmd no_boot_arg_changes_after_this=1\n",
-        hi_groups_used,hi_event_hook_ok?1:0,HI_GROUPS);
+    say("hi: enabled oneboot links=%u policy=%s "
+        "input_hook=%u group_max=%d usb_ctl=kern.hakios.hi_cmd "
+        "autonomous_usb_independent=%u\n",
+        hi_groups_used,hi_auto_mode?"autonomous_cross_over":"manual_forward_only",
+        hi_event_hook_ok?1:0,HI_GROUPS,hi_auto_mode?1u:0u);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{hi_pump();});
 }
