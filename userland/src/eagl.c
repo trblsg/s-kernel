@@ -85,6 +85,8 @@
 #include "s9_p4_frame_stats.h" /* runtime P4: passive frame/input evidence, no frame skipping */
 #include "s9_p5_frame_lab.h"  /* P5: bounded frame origin/proxy + wake burst (no new GL calls) */
 #include "s9_p66_frame_bucket.h" /* P6.6 non-invasive target/damage-candidate classification */
+#include "s9_p611_hash_diag.h"   /* P6.11 existing surface_changed() path attribution */
+#include "s9_p612_output_diag.h" /* P6.12 EAGL vs display fps telemetry */
 #include "s9_gl_cost.h"       /* opt-in glcost=1: time/count EAGL slot calls, no GL changes */
 #include "s9_g2_bind.h"       /* opt-in g2_bind=1: skip proven redundant native texture binds */
 #include "s9_gl_diag.h"       /* opt-in glpath=1/glhash=1: sampled CPU path timings */
@@ -348,6 +350,11 @@ struct eagl {
 	struct s9_p66_bucket p66;            /* P6.6 60-frame target/damage evidence */
 	uint32_t p66_group_phase,p66_last_mode;
 	uint64_t p66_last_frame_end_us;
+	struct s9_p611_window p611; /* 60-frame existing checksum accounting */
+	uint64_t p611_hash_serial;
+	uint32_t p611_last_mode,p611_last_phase;
+	struct s9_p612_tracker p612;
+	uint32_t p612_last_mode,p612_last_phase;
 	struct s9_g2_state g2;                  /* driver binding truth cache; all raw binds invalidate */
 	bool g2_fault;                          /* any verification mismatch fails this context closed */
 	struct s9_gl_diag diag;                 /* sampled path timings, read-only diagnostics */
@@ -361,7 +368,7 @@ struct eagl {
 static uint32_t p4_mode_cached, p4_phase_cached; /* periodic sysctl reads: no P4 bootarg */
 static uint32_t p5_mode_cached, p5_phase_cached; /* P5 runtime sysctl; read once per 60 frames */
 static uint32_t p6_ca_cached,p6_phase_cached; /* P6.5 independent observer; 60-frame cadence */
-static uint32_t p66_mode_cached,p67_mode_cached; /* P6.6/7 read-only, snapshot once per 60 frames */
+static uint32_t p66_mode_cached,p67_mode_cached,p611_mode_cached,p612_mode_cached; /* runtime read-only; 60-frame refresh */
 static int glstage_on;                       /* boot-arg glstage=1: 60-frame timing aggregates */
 static int glcost_on;                        /* boot-arg glcost=1: per-slot CPU wall timing */
 static int g2_bind_on;                        /* boot-arg g2_bind=1, otherwise legacy code path */
@@ -1050,6 +1057,8 @@ surface_changed(struct eagl *e, struct image *image)
 	bool p0_force_dirty = false;
 
 	if (image->looked == e->frames + 1 || base == NULL || IOSurfaceGetPlaneCount(surface) > 0) {
+		if (__atomic_load_n(&p611_mode_cached,__ATOMIC_RELAXED))
+			s9_p611_skip(&e->p611,image->looked==e->frames+1?1:base==NULL?2:3);
 		if (__atomic_load_n(&p4_mode_cached, __ATOMIC_RELAXED) ||
 		    __atomic_load_n(&p5_mode_cached,__ATOMIC_RELAXED) ||
 		    __atomic_load_n(&p66_mode_cached,__ATOMIC_RELAXED)) e->p4_skipped++; /* not proof of unchanged content */
@@ -1057,6 +1066,8 @@ surface_changed(struct eagl *e, struct image *image)
 		return false;
 	}
 	if (still_seldom && image->unchanged >= STILL_LOOKS && (e->frames + IOSurfaceGetID(surface)) % STILL_EVERY != 0) {
+		if (__atomic_load_n(&p611_mode_cached,__ATOMIC_RELAXED))
+			s9_p611_skip(&e->p611,4);
 		if (__atomic_load_n(&p4_mode_cached, __ATOMIC_RELAXED) ||
 		    __atomic_load_n(&p5_mode_cached,__ATOMIC_RELAXED) ||
 		    __atomic_load_n(&p66_mode_cached,__ATOMIC_RELAXED)) e->p4_skipped++; /* sampling alias explicitly recorded */
@@ -1065,7 +1076,9 @@ surface_changed(struct eagl *e, struct image *image)
 	}
 	image->looked = e->frames + 1;
 	bool hash_sample = glhash_on && s9_gl_diag_sample16(&e->diag.hash_serial);
-	uint64_t hash_began = hash_sample ? now_us() : 0;
+	bool p611_sample = __atomic_load_n(&p611_mode_cached,__ATOMIC_RELAXED) &&
+	    s9_gl_diag_sample16(&e->p611_hash_serial);
+	uint64_t hash_began = (hash_sample || p611_sample) ? now_us() : 0;
 	if (p0hash_on) {
 		/* Both fast and fallback reference use the same digest for the full
 		 * byte range. Switching after a CPU verification failure does not
@@ -1099,9 +1112,15 @@ surface_changed(struct eagl *e, struct image *image)
 			sum ^= sum >> 29;
 		}
 	}
+	uint64_t elapsed_hash_us = (hash_sample || p611_sample) ? now_us()-hash_began : 0;
+	if (__atomic_load_n(&p611_mode_cached,__ATOMIC_RELAXED)) {
+		const bool changed=sum!=image->sum || p0_force_dirty;
+		s9_p611_check(&e->p611,p611_sample?IOSurfaceGetID(surface):0,
+		    p611_sample?size:0,elapsed_hash_us,changed,p611_sample);
+	}
 	if (hash_sample) {
 		e->diag.hash_samples++;
-		e->diag.hash_us += now_us() - hash_began;
+		e->diag.hash_us += elapsed_hash_us;
 		e->diag.hash_bytes += size;
 		if (sum == image->sum) e->diag.hash_same++;
 		else e->diag.hash_changed++;
@@ -1675,6 +1694,12 @@ p5_frame_observe(struct eagl *e,uint64_t after,
         n=sizeof(value);value=0;
         if(sysctlbyname("kern.hakios.p67_mode",&value,&n,NULL,0)!=0 || n!=sizeof(value))value=0;
         __atomic_store_n(&p67_mode_cached,value>0?1u:0u,__ATOMIC_RELEASE);
+        n=sizeof(value);value=0;
+        if(sysctlbyname("kern.hakios.p611_mode",&value,&n,NULL,0)!=0 || n!=sizeof(value))value=0;
+        __atomic_store_n(&p611_mode_cached,value>0?1u:0u,__ATOMIC_RELEASE);
+        n=sizeof(value);value=0;
+        if(sysctlbyname("kern.hakios.p612_mode",&value,&n,NULL,0)!=0 || n!=sizeof(value))value=0;
+        __atomic_store_n(&p612_mode_cached,value>0?1u:0u,__ATOMIC_RELEASE);
         n=sizeof(value);
         if(sysctlbyname("kern.hakios.p6_phase",&value,&n,NULL,0)==0 &&
             n==sizeof(value) && value>=0 && value<=99)
@@ -1766,6 +1791,75 @@ p5_frame_observe(struct eagl *e,uint64_t after,
  * A "candidate" is only a frame whose CHECKED IOSurface inputs were
  * unchanged; unchecked inputs and procedural animations can still differ.
  */
+static void
+p612_frame_observe(struct eagl *e,uint64_t at,uint32_t target_id,
+    uint32_t targets,uint32_t mirror,uint32_t shared,uint32_t copy,
+    uint32_t api_calls,uint32_t api_positive,uint32_t api_zero,uint32_t api_negative)
+{
+    uint32_t on=__atomic_load_n(&p612_mode_cached,__ATOMIC_RELAXED);
+    uint32_t phase=__atomic_load_n(&p6_phase_cached,__ATOMIC_RELAXED);
+    if(!on){
+        if(e->p612_last_mode)s9_p612_reset(&e->p612);
+        e->p612_last_mode=0;
+        return;
+    }
+    if(!e->p612_last_mode || e->p612_last_phase!=phase){
+        s9_p612_reset(&e->p612);
+        e->p612_last_mode=1;e->p612_last_phase=phase;
+        say("p612: armed up=%llu.%03llus phase=%u EAGL_return_is_NOT_display_scanout correlate_with_fps_lines\n",
+            at/1000000,(at/1000)%1000,phase);
+    }
+    struct s9_p612_frame f={0};
+    f.id=target_id;f.targets=targets;f.draws=e->draws;
+    f.mirror=mirror;f.shared=shared;f.copy=copy;
+    f.api_calls=api_calls;f.api_positive=api_positive;
+    f.api_zero=api_zero;f.api_negative=api_negative;
+    s9_p612_add(&e->p612,&f);
+    struct s9_p612_window *w=&e->p612.group;
+    if(w->frames<60)return;
+    say("p612-eagl: up=%llu.%03llus phase=%u frames=%u draws=%u single=%u multi=%u unknown=%u switched=%u same=%u alternating=%u target_a=%u target_b=%u third_target=%u mirrored=%u shared=%u copied=%u api_calls=%u api_positive=%u api_zero=%u api_negative=%u scanout=use_fps_not_EAGL_api\n",
+        at/1000000,(at/1000)%1000,phase,w->frames,w->draws,
+        w->singles,w->multis,w->unknown,w->switched,w->same,w->alternating,
+        w->target_a,w->target_b,w->third_targets,
+        w->mirror_frames,w->shared_frames,w->copy_frames,
+        w->api_calls,w->api_positive,w->api_zero,w->api_negative);
+    s9_p612_clear_window(&e->p612);
+}
+static void
+p611_frame_observe(struct eagl *e,uint64_t at)
+{
+    uint32_t on=__atomic_load_n(&p611_mode_cached,__ATOMIC_RELAXED);
+    uint32_t phase=__atomic_load_n(&p6_phase_cached,__ATOMIC_RELAXED);
+    if(!on){
+        if(e->p611_last_mode)s9_p611_reset(&e->p611);
+        e->p611_last_mode=0;
+        return;
+    }
+    if(!e->p611_last_mode || e->p611_last_phase!=phase){
+        s9_p611_reset(&e->p611);
+        e->p611_last_mode=1;
+        e->p611_last_phase=phase;
+        say("p611: armed up=%llu.%03llus phase=%u checks=existing samples=1in16 no_extra_hash=1\n",
+            at/1000000,(at/1000)%1000,phase);
+    }
+    struct s9_p611_window *w=&e->p611;
+    if(++w->frames<60)return;
+    say("p611-hash: up=%llu.%03llus phase=%u frames=%u calls=%u checked=%u checked_same=%u checked_changed=%u skip_sameframe=%u skip_no_base=%u skip_planar=%u skip_seldom=%u samples=%u sample_bytes=%llu sample_us=%llu max_us=%llu sampled_changed=%u overflow=%u no_extra_hash=1\n",
+        at/1000000,(at/1000)%1000,phase,w->frames,w->calls,w->checked,
+        w->checked_same,w->checked_changed,w->skip_same_frame,w->skip_no_base,
+        w->skip_planar,w->skip_seldom,w->samples,
+        (unsigned long long)w->sample_bytes,(unsigned long long)w->sample_us,
+        (unsigned long long)w->max_sample_us,w->sampled_changed,w->overflow_samples);
+    for(unsigned i=0;i<S9_P611_SURFACES;i++){
+        const struct s9_p611_surface *s=&w->surfaces[i];
+        if(!s->id || !s->samples)continue;
+        say("p611-surface: up=%llu.%03llus phase=%u id=%u n=%u bytes=%llu us=%llu max_us=%llu same=%u changed=%u sampling=1in16_not_full_IOsurface_history\n",
+            at/1000000,(at/1000)%1000,phase,s->id,s->samples,
+            (unsigned long long)s->bytes,(unsigned long long)s->us,
+            (unsigned long long)s->max_us,s->same,s->changed);
+    }
+    s9_p611_reset(w);
+}
 static void
 p66_frame_observe(struct eagl *e, uint64_t after, unsigned presented,
     unsigned in_place, unsigned copied, uint32_t target_id,
@@ -1897,28 +1991,50 @@ frame_end(struct eagl *e, bool finished, enum s9_p4_end_reason end_reason)
 	uint64_t before, sync_began, waited, after;
 	unsigned copied = 0, in_place = 0, presented = 0;
 	uint32_t p66_target_id=0,p66_target_count=0;
+	uint32_t p612_mirror=0,p612_shared=0,p612_copy=0;
+	uint32_t p612_api_calls=0,p612_api_positive=0,p612_api_zero=0,p612_api_negative=0;
 
 	clear_now(e);
 	before = now_us();
 	for (unsigned i = 0; i < e->image_count; i++) {
 		/* Snapshot output targets BEFORE target_to_surface clears .drawn. */
-		if (__atomic_load_n(&p66_mode_cached,__ATOMIC_RELAXED) &&
+		if ((__atomic_load_n(&p66_mode_cached,__ATOMIC_RELAXED) ||
+		    __atomic_load_n(&p612_mode_cached,__ATOMIC_RELAXED)) &&
 		    e->images[i].target && e->images[i].drawn) {
 			p66_target_count++;
 			if (p66_target_count == 1 && e->images[i].surface)
 				p66_target_id=IOSurfaceGetID(e->images[i].surface);
+			if(__atomic_load_n(&p612_mode_cached,__ATOMIC_RELAXED)) {
+				if(e->images[i].mirror)p612_mirror++;
+				if(e->images[i].shared)p612_shared++;
+				if(!e->images[i].shared)p612_copy++;
+			}
 		}
 		if (e->images[i].target && e->images[i].drawn && e->images[i].mirror != 0) {
 			target_to_surface(e, &e->images[i]);    /* (the GPU's copy: before what follows sends it out) */
 			in_place++;
 			/* the display's surface, shown by the host itself: no copy back (hakios_gl_present) */
-			presented += hakios_gl_present(e->gl, IOSurfaceGetID(e->images[i].surface));
+			int present_result=hakios_gl_present(e->gl, IOSurfaceGetID(e->images[i].surface));
+			presented += present_result; /* preserve original return-value semantics */
+			if(__atomic_load_n(&p612_mode_cached,__ATOMIC_RELAXED)) {
+				p612_api_calls++;
+				if(present_result>0)p612_api_positive+=(uint32_t)present_result;
+				else if(present_result==0)p612_api_zero++;
+				else p612_api_negative++;
+			}
 			glFlush();                              /* (also after a glFinish: the copy is new since) */
 		}
 		if (e->images[i].target && e->images[i].drawn && e->images[i].shared) {
 			in_place++;
 			if (e->images[i].mirror == 0) {
-				presented += hakios_gl_present(e->gl, IOSurfaceGetID(e->images[i].surface));
+				int present_result=hakios_gl_present(e->gl, IOSurfaceGetID(e->images[i].surface));
+				presented += present_result; /* preserve original return-value semantics */
+				if(__atomic_load_n(&p612_mode_cached,__ATOMIC_RELAXED)) {
+					p612_api_calls++;
+					if(present_result>0)p612_api_positive+=(uint32_t)present_result;
+					else if(present_result==0)p612_api_zero++;
+					else p612_api_negative++;
+				}
 			}
 		}
 	}
@@ -1960,6 +2076,10 @@ frame_end(struct eagl *e, bool finished, enum s9_p4_end_reason end_reason)
 	e->in_frame = false;
 	e->frames++;
 	p5_frame_observe(e,after,end_reason); /* before P4 clears sampled IOSurface deltas */
+	p611_frame_observe(e,after);
+	p612_frame_observe(e,after,p66_target_id,p66_target_count,
+	    p612_mirror,p612_shared,p612_copy,
+	    p612_api_calls,p612_api_positive,p612_api_zero,p612_api_negative);
 	p66_frame_observe(e,after,presented,in_place,copied,p66_target_id,p66_target_count,end_reason);
 	p4_frame_observe(e, after, presented, in_place, copied, end_reason);
 	if (latency_lines) {

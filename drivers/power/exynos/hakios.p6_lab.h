@@ -17,12 +17,20 @@ static uint32_t p6_mode, p6_phase, p6_flags=31u, p6_log_ms=5000u;
 /* P6.6/.7/.9 independent opt-in read-only instrumentation toggles.
  * P6.8 resides in Mali/G3D because it owns the PMU and work timestamps. */
 static uint32_t p66_mode, p67_mode, p69_mode;
+/* P6.10-12 read-only kernel toggles; userland reads P6.11/12 via sysctl. */
+static uint32_t p610_mode,p611_mode,p612_mode;
 SYSCTL_UINT(_kern_hakios, OID_AUTO, p66_mode, CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,
     &p66_mode, 0, "P6.6 target/damage/frame-candidate read-only 60-frame diagnostics");
 SYSCTL_UINT(_kern_hakios, OID_AUTO, p67_mode, CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,
     &p67_mode, 0, "P6.7 EAGL per-slot CPU wall timing 60-frame diagnostics");
 SYSCTL_UINT(_kern_hakios, OID_AUTO, p69_mode, CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,
     &p69_mode, 0, "P6.9 USB/touch/key periodic source attribution; no poll policy changes");
+SYSCTL_UINT(_kern_hakios, OID_AUTO, p610_mode, CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,
+    &p610_mode, 0, "P6.10 Scion state/cadence shadow only; never change governor");
+SYSCTL_UINT(_kern_hakios, OID_AUTO, p611_mode, CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,
+    &p611_mode, 0, "P6.11 sampled IOSurface checksum-path attribution, no extra hashes");
+SYSCTL_UINT(_kern_hakios, OID_AUTO, p612_mode, CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,
+    &p612_mode, 0, "P6.12 EAGL vs display-fps presentation diagnostics, no frame writes");
 static uint64_t p6_last_at, p6_last_idle[8];
 static uint32_t p6_windows, p6_touch_events, p6_frame_events, p6_boost_requests;
 static uint32_t p6_last_lit=255u, p6_last_big=255u, p6_last_windows;

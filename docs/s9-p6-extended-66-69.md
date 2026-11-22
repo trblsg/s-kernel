@@ -1,5 +1,7 @@
 # Galaxy S9 Exynos9810 — P6.6 to P6.9 extended diagnostics, ONE BOOT + SYSTEM
 
+**Next diagnostic phase:** [P6.10–P6.12 governor state, IOSurface checksum, EAGL/scanout correlation](s9-p6-deep-610-612.md). Requires a newer matching BOOT+SYSTEM image, then independent runtime `-DeepOnly` phases 20–24.
+
 Branch: `s9/p6-unified-wake-thermal-display-lab`, following the real
 P6.1–P6.5 COM logs of 2026-11-21. These changes are **observational only**.
 No new boot-args; runtime sysctls control each phase. They deliberately

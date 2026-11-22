@@ -18,6 +18,7 @@ param(
     [switch]$SkipDisplay,
     [switch]$ResumeCAOnly,
     [switch]$ExtendedOnly,
+    [switch]$DeepOnly,
     [switch]$ExtendedScreenOff,
     [switch]$TestDisplayEvidence,
     [switch]$EnableActualG3D,
@@ -26,7 +27,7 @@ param(
 )
 Set-StrictMode -Version 2
 $ErrorActionPreference='Stop'
-$script:Allowed='^sysctl kern\.hakios\.(?:(?:p66_mode|p67_mode|p68_mode|p69_mode|p6_mode|p6_flags|p6_phase|p6_log_ms|p4_mode|p5_mode|p5_threads|p5_phase|g3d_lab_gate|g3d_lab_idle_ms|g3d_lab_rail_probe|g3d_lab_phase|g3d_lab_reset)=[0-9]{1,5}|(?:p66_mode|p67_mode|p68_mode|p69_mode|p6_stats|p5_stats|g3d_lab_stats))$'
+$script:Allowed='^sysctl kern\.hakios\.(?:(?:p66_mode|p67_mode|p68_mode|p69_mode|p610_mode|p611_mode|p612_mode|p6_mode|p6_flags|p6_phase|p6_log_ms|p4_mode|p5_mode|p5_threads|p5_phase|g3d_lab_gate|g3d_lab_idle_ms|g3d_lab_rail_probe|g3d_lab_phase|g3d_lab_reset)=[0-9]{1,5}|(?:p66_mode|p67_mode|p68_mode|p69_mode|p610_mode|p611_mode|p612_mode|p6_stats|p5_stats|g3d_lab_stats))$'
 $script:Serial=$null;$script:Log=$null
 $script:Buf=New-Object byte[] 16384
 $script:Recent='';$script:Partial=''
@@ -47,7 +48,7 @@ function Pump {
     while($pos -ge 0){
         $line=$script:Partial.Substring(0,$pos).TrimEnd([char]13)
         $script:Partial=$script:Partial.Substring($pos+1)
-        if($line -match '^(usb>|usb: |p6: PHASE|p6-wake:|p6-shadow:|p6-churn:|p6-missing:|p6-ca-gl:|p6-ca-thread:|p66-ca:|p67-cost:|p67-path:|p68-g3d:|p69-source:|p5-gpu:|g3d-lab:|GenericARMPE: the display)'){
+        if($line -match '^(usb>|usb: |p6: PHASE|p6-wake:|p6-shadow:|p6-churn:|p6-missing:|p6-ca-gl:|p6-ca-thread:|p66-ca:|p67-cost:|p67-path:|p68-g3d:|p69-source:|p610-gov:|p610-gap:|p611-hash:|p611-surface:|p612-eagl:|p5-gpu:|g3d-lab:|GenericARMPE: the display)'){
             Say ('DEVICE '+$line.Substring(0,[Math]::Min($line.Length,290)))
         }
         $pos=$script:Partial.IndexOf([char]10)
@@ -68,7 +69,7 @@ function Send([string]$cmd){
     $script:Serial.Write($data,0,$data.Length)
     Say ('TX '+$cmd)
     $echo='usb> '+$cmd
-    $readOnly=$cmd -match '^sysctl kern\.hakios\.(p66_mode|p67_mode|p68_mode|p69_mode|p6_stats|p5_stats|g3d_lab_stats)$'
+    $readOnly=$cmd -match '^sysctl kern\.hakios\.(p66_mode|p67_mode|p68_mode|p69_mode|p610_mode|p611_mode|p612_mode|p6_stats|p5_stats|g3d_lab_stats)$'
     $ack=if($readOnly){'usb: '+($cmd -replace '^sysctl ','')+' = '}
         else{'usb: '+$cmd+': set (0)'}
     $until=[DateTime]::UtcNow.AddSeconds($AckTimeoutSeconds)
@@ -179,12 +180,57 @@ function Exit-Safe {
     $commands=@()
     if($script:ActualAttempted){$commands+=@('sysctl kern.hakios.g3d_lab_gate=0','sysctl kern.hakios.g3d_lab_reset=1','sysctl kern.hakios.g3d_lab_stats')}
     else{$commands+='sysctl kern.hakios.g3d_lab_gate=0'}
-    $commands+=@('sysctl kern.hakios.p66_mode=0','sysctl kern.hakios.p67_mode=0',
+    $commands+=@('sysctl kern.hakios.p610_mode=0','sysctl kern.hakios.p611_mode=0','sysctl kern.hakios.p612_mode=0',
+        'sysctl kern.hakios.p66_mode=0','sysctl kern.hakios.p67_mode=0',
         'sysctl kern.hakios.p68_mode=0','sysctl kern.hakios.p69_mode=0',
         'sysctl kern.hakios.g3d_lab_rail_probe=0','sysctl kern.hakios.g3d_lab_phase=0',
         'sysctl kern.hakios.p6_mode=0','sysctl kern.hakios.p5_mode=0',
         'sysctl kern.hakios.p5_threads=0','sysctl kern.hakios.p4_mode=0','sysctl kern.hakios.p6_phase=9','sysctl kern.hakios.p6_stats')
     foreach($cmd in $commands){try{Send $cmd}catch{Write-Warning ('UNCONFIRMED safe exit: '+$cmd+' '+$_.Exception.Message)}}
+}
+function Run-DeepPhases {
+    Say 'P6.10-12 read-only diagnostic phases; no CPU governor, GL, buffer or display writes'
+    foreach($node in @('p66_mode','p67_mode','p68_mode','p69_mode','p610_mode','p611_mode','p612_mode')){
+        Send ('sysctl kern.hakios.'+$node+'=0')
+    }
+    Send 'sysctl kern.hakios.g3d_lab_gate=0'
+    Send 'sysctl kern.hakios.p6_mode=0'
+    Send 'sysctl kern.hakios.p5_mode=0'
+    Send 'sysctl kern.hakios.p5_threads=0'
+    Send 'sysctl kern.hakios.p4_mode=0'
+    Send 'sysctl kern.hakios.p6_phase=20'
+    Rest 'P6.10-12 A1 screen-ON governor/CA/scanout observers OFF' 60
+
+    Send 'sysctl kern.hakios.p6_flags=17'
+    Send 'sysctl kern.hakios.p6_mode=2'
+    Send 'sysctl kern.hakios.p5_mode=2'
+    Send 'sysctl kern.hakios.p5_threads=1'
+    Send 'sysctl kern.hakios.p610_mode=1'
+    Send 'sysctl kern.hakios.p6_phase=21'
+    Send 'sysctl kern.hakios.p5_phase=21'
+    Rest 'P6.10 Scion governor actual-vs-shadow state and frame-gap evidence' $PhaseSeconds
+
+    Send 'sysctl kern.hakios.p610_mode=0'
+    Send 'sysctl kern.hakios.p611_mode=1'
+    Send 'sysctl kern.hakios.p6_phase=22'
+    Send 'sysctl kern.hakios.p5_phase=22'
+    Rest 'P6.11 IOSurface skip reasons and sampled hash time/bytes per source' $PhaseSeconds
+
+    Send 'sysctl kern.hakios.p611_mode=0'
+    Send 'sysctl kern.hakios.p612_mode=1'
+    Send 'sysctl kern.hakios.p6_phase=23'
+    Send 'sysctl kern.hakios.p5_phase=23'
+    Rest 'P6.12 EAGL A/B output + independent kernel fps presented/flips/zero-copy' $PhaseSeconds
+
+    foreach($node in @('p610_mode','p611_mode','p612_mode')){
+        Send ('sysctl kern.hakios.'+$node+'=0')
+    }
+    Send 'sysctl kern.hakios.p6_mode=0'
+    Send 'sysctl kern.hakios.p5_mode=0'
+    Send 'sysctl kern.hakios.p5_threads=0'
+    Send 'sysctl kern.hakios.p4_mode=0'
+    Send 'sysctl kern.hakios.p6_phase=24'
+    Rest 'P6.10-12 A2 observer-OFF thermal/performance reversal' 60
 }
 function Run-ExtendedPhases {
     Say 'EXTENDED P6.6-P6.9: read-only; no skip/damage enforcement, clock, voltage, poll or power gating'
@@ -361,7 +407,8 @@ if($TestDisplayEvidence){
     return
 }
 if($ResumeCAOnly -and $EnableActualG3D){throw '-ResumeCAOnly cannot request hardware G3D gating'}
-if($ExtendedOnly -and ($ResumeCAOnly -or $EnableActualG3D)){throw '-ExtendedOnly is read-only; cannot combine with -ResumeCAOnly or actual gating'}
+if($ExtendedOnly -and ($ResumeCAOnly -or $EnableActualG3D -or $DeepOnly)){throw '-ExtendedOnly is read-only and mutually exclusive with DeepOnly/ResumeCAOnly/actual gating'}
+if($DeepOnly -and ($ResumeCAOnly -or $EnableActualG3D -or $ExtendedScreenOff)){throw '-DeepOnly is read-only; incompatible with resume, screen OFF or actual gating'}
 if($ExtendedScreenOff -and -not $ExtendedOnly){throw '-ExtendedScreenOff requires -ExtendedOnly'}
 Say ('S9 P6 unified COM one-image lab: '+$(if($Execute){'EXECUTE'}else{'PREVIEW ONLY'}))
 if($EnableActualG3D){Say 'WARNING: ACTUAL G3D trial requested; runtime confirmation still required'}
@@ -369,11 +416,11 @@ else{Say 'G3D uses SHADOW only. Actual gating disabled by default.'}
 if(-not $Execute){
     Send 'sysctl kern.hakios.p6_stats'
     Send 'sysctl kern.hakios.g3d_lab_stats'
-    if($ExtendedOnly){
-        foreach($node in @('p66_mode','p67_mode','p68_mode','p69_mode')){Send ('sysctl kern.hakios.'+$node)}
+    if($ExtendedOnly -or $DeepOnly){
+        foreach($node in $(if($DeepOnly){@('p610_mode','p611_mode','p612_mode')}else{@('p66_mode','p67_mode','p68_mode','p69_mode')})){Send ('sysctl kern.hakios.'+$node)}
     }
     Send 'sysctl kern.hakios.p6_phase=0'
-    if(-not $PreflightOnly){if($ExtendedOnly){Run-ExtendedPhases}else{Run-Phases}}
+    if(-not $PreflightOnly){if($DeepOnly){Run-DeepPhases}elseif($ExtendedOnly){Run-ExtendedPhases}else{Run-Phases}}
     Say 'PREVIEW complete; no COM port opened, no commands sent'
     return
 }
@@ -399,12 +446,12 @@ try{
     Drain 1200
     Send 'sysctl kern.hakios.p6_stats'
     Send 'sysctl kern.hakios.g3d_lab_stats'
-    if($ExtendedOnly){
-        foreach($node in @('p66_mode','p67_mode','p68_mode','p69_mode')){Send ('sysctl kern.hakios.'+$node)}
+    if($ExtendedOnly -or $DeepOnly){
+        foreach($node in $(if($DeepOnly){@('p610_mode','p611_mode','p612_mode')}else{@('p66_mode','p67_mode','p68_mode','p69_mode')})){Send ('sysctl kern.hakios.'+$node)}
     }
     Send 'sysctl kern.hakios.p6_phase=0'
     Say 'PREFLIGHT PASS: exact echo and ACK for P6 sysctls'
-    if(-not $PreflightOnly){if($ExtendedOnly){Run-ExtendedPhases}else{Run-Phases}}
+    if(-not $PreflightOnly){if($DeepOnly){Run-DeepPhases}elseif($ExtendedOnly){Run-ExtendedPhases}else{Run-Phases}}
     $finished=$true
 } finally {
     if($started -and -not $PreflightOnly){Exit-Safe}
@@ -415,4 +462,4 @@ try{
     if($null -ne $script:Serial){$script:Serial.Dispose();$script:Serial=$null}
     if($started){Say ('RAW LOG '+$LogPath)}
 }
-if($finished){Say 'COMPLETE: run tools/s9-p6-report.ps1 -Log <path>'}
+if($finished){Say 'COMPLETE: run tools/s9-p6-report.ps1 -Log <path>';if($DeepOnly){Say 'DEEP REPORT: tools/s9-p6-deep-report.ps1 -Log <path>'}}

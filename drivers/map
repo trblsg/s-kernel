@@ -75,6 +75,7 @@ power/exynos bsd/dev/hakios.p4_idle_math.h
 power/exynos bsd/dev/hakios.p4_cpu_lab.h
 power/exynos bsd/dev/hakios.p6_policy.h
 power/exynos bsd/dev/hakios.p6_lab.h
+power/exynos bsd/dev/s9_p610_gov_diag.h
 power/exynos bsd/dev/hakios.scion_gov.c
 power/exynos bsd/dev/hakios.exynos_tmu.c
 power/exynos bsd/dev/hakios.exynos_tmu.h

@@ -1,0 +1,24 @@
+p6: PHASE=20 up=100000ms flags=17 (marker only; rebase next sample)
+fps: 10 presented, 10 drawn, 9 flips, 0 lost, 0 held; 60 refreshes
+cpufreq_gov: 100 s: lit 455 MHz asked load 1% | big 962 MHz asked load 10% | temp big 75.0 lit 73.0 C
+poster_cost: 100 s: backboardd[18] cpu=19.2% rss=87000KiB vm=10MiB faults=0 up=100s sample
+p6: PHASE=21 up=160000ms flags=17 (marker only; rebase next sample)
+p610-gov: up=161000ms phase=21 windows=25 span_ms=1000 sticky=23 sticky_ms=920 shadow_static=23 moving=1 anim=25 static=0 fingers=0 transitions=0 last_gap_ms=100 last_age_ms=33 last_quiet_ms=33 max_age_ms=130 invalid_frame=0 applied=0
+p610-gap: up=161000ms phase=21 frame_events=10 gap_le50=0 gap_51_150=10 gap_151_300=0 gap_gt300=0 age_le100=19 age_101_299=6 age_ge300=0 source=governor_frame_notifications_not_CA_damage
+p610-gov: up=162000ms phase=21 windows=25 span_ms=1000 sticky=22 sticky_ms=880 shadow_static=22 moving=0 anim=25 static=0 fingers=0 transitions=0 last_gap_ms=99 last_age_ms=66 last_quiet_ms=66 max_age_ms=171 invalid_frame=0 applied=0
+p610-gap: up=162000ms phase=21 frame_events=10 gap_le50=0 gap_51_150=10 gap_151_300=0 gap_gt300=0 age_le100=20 age_101_299=5 age_ge300=0 source=governor_frame_notifications_not_CA_damage
+fps: 10 presented, 10 drawn, 10 flips, 0 lost, 0 held; 60 refreshes
+cpufreq_gov: 161 s: lit 455 MHz asked load 0% | big 962 MHz asked load 10% | temp big 75.5 lit 73.5 C
+p6: PHASE=22 up=280000ms flags=17 (marker only; rebase next sample)
+p611: armed up=280.100s phase=22 checks=existing samples=1in16 no_extra_hash=1
+p611-hash: up=286.200s phase=22 frames=60 calls=900 checked=130 checked_same=129 checked_changed=1 skip_sameframe=40 skip_no_base=10 skip_planar=0 skip_seldom=720 samples=9 sample_bytes=75497472 sample_us=900 max_us=400 sampled_changed=0 overflow=0 no_extra_hash=1
+p611-surface: up=286.200s phase=22 id=812 n=5 bytes=52428800 us=700 max_us=400 same=5 changed=0 sampling=1in16_not_full_IOsurface_history
+p611-surface: up=286.200s phase=22 id=813 n=4 bytes=23068672 us=200 max_us=80 same=4 changed=0 sampling=1in16_not_full_IOsurface_history
+fps: 10 presented, 10 drawn, 10 flips, 0 lost, 0 held; 60 refreshes
+p6: PHASE=23 up=400000ms flags=17 (marker only; rebase next sample)
+p612: armed up=400.100s phase=23 EAGL_return_is_NOT_display_scanout correlate_with_fps_lines
+p612-eagl: up=406.100s phase=23 frames=60 draws=1370 single=60 multi=0 unknown=0 switched=59 same=0 alternating=58 target_a=412 target_b=413 third_target=0 mirrored=0 shared=60 copied=0 api_calls=60 api_positive=0 api_zero=60 api_negative=0 scanout=use_fps_not_EAGL_api
+fps: 10 presented, 10 drawn, 10 flips, 0 lost, 0 held; 60 refreshes
+fps: 10 presented, 10 drawn, 10 flips, 0 lost, 0 held; 60 refreshes
+p6: PHASE=24 up=520000ms flags=17 (marker only; rebase next sample)
+fps: 10 presented, 10 drawn, 10 flips, 0 lost, 0 held; 60 refreshes

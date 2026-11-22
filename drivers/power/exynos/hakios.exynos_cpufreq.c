@@ -292,6 +292,11 @@ static struct {
 SYSCTL_DECL(_kern_hakios);
 #include "hakios.p4_cpu_lab.h" /* P4: scheduler-idle and frame cadence, read-only */
 #include "hakios.p6_lab.h" /* P6: integrated opt-in wake-proxy and policy shadow */
+#include "s9_p610_gov_diag.h" /* P6.10 pure passive state classifier */
+/* Governor-owned single-thread counters. Never evaluated in the IRQ/frame callback. */
+static struct s9_p610_window p610_stats;
+static uint32_t p610_last_phase=~0u,p610_was_on;
+static uint64_t p610_frame_seen;
 
 static bool
 boost_on(uint64_t last, uint64_t span, uint64_t now)
@@ -734,7 +739,47 @@ dev_state_update(uint64_t now)
 	enum scion_state to;
 
 	absolutetime_to_nanoseconds(now - MAX(last, touch), &ns);
-	to = scion_state(__atomic_load_n(&fingers, __ATOMIC_ACQUIRE), frames_moving(now), ns / NSEC_PER_MSEC, dev_state);
+	const uint32_t finger_count=__atomic_load_n(&fingers,__ATOMIC_ACQUIRE);
+	const bool moving=frames_moving(now);
+	const uint64_t quiet_ms=ns/NSEC_PER_MSEC; /* Scion uses last frame OR touch */
+	uint64_t frame_ns=0;
+	if(last && now>=last)absolutetime_to_nanoseconds(now-last,&frame_ns);
+	const uint64_t frame_age_ms=last?frame_ns/NSEC_PER_MSEC:0;
+	const enum scion_state was=dev_state;
+	to = scion_state(finger_count, moving, quiet_ms, was);
+	if (__atomic_load_n(&p610_mode,__ATOMIC_RELAXED)) {
+		uint32_t phase=__atomic_load_n(&p6_phase,__ATOMIC_RELAXED);
+		if (!p610_was_on || phase != p610_last_phase) {
+			s9_p610_clear(&p610_stats);
+			p610_frame_seen=last; /* do not count a pre-phase frame as a new event */
+			p610_was_on=1;
+			p610_last_phase=phase;
+		}
+		uint64_t gap_ns=0,step_ns=0;
+		uint64_t fg=__atomic_load_n(&frame_gap,__ATOMIC_RELAXED);
+		if (fg)absolutetime_to_nanoseconds(fg,&gap_ns);
+		if (dev_since != 0 && now>=dev_since)
+			absolutetime_to_nanoseconds(now-dev_since,&step_ns);
+		struct s9_p610_event ev={0};
+		ev.elapsed_ms=(uint32_t)(step_ns/NSEC_PER_MSEC);
+		ev.gap_ms=(uint32_t)(gap_ns/NSEC_PER_MSEC);
+		ev.age_ms=(uint32_t)(frame_age_ms>(uint64_t)~0u?(uint64_t)~0u:frame_age_ms);
+		ev.quiet_ms=(uint32_t)(quiet_ms>(uint64_t)~0u?(uint64_t)~0u:quiet_ms);
+		ev.frame_valid=last!=0;
+		ev.new_frame=last!=0 && last!=p610_frame_seen;
+		ev.moving=moving;
+		ev.fingers=finger_count!=0;
+		ev.from_anim=was==SCION_ANIMATING;
+		ev.to_anim=to==SCION_ANIMATING;
+		ev.to_static=to==SCION_STATIC;
+		ev.transitioned=was!=to;
+		s9_p610_add(&p610_stats,&ev);
+		if (last)p610_frame_seen=last;
+	} else if (p610_was_on) {
+		s9_p610_clear(&p610_stats);
+		p610_was_on=0;
+		p610_frame_seen=0;
+	}
 	if (dev_since != 0) {
 		absolutetime_to_nanoseconds(now - dev_since, &ns);
 		dev_ms[dev_state] += ns / NSEC_PER_MSEC;
@@ -1338,6 +1383,23 @@ summary(uint64_t seconds)
 	    touched && framed ? "touch and frames on" : touched ? "touch on" : framed ? "frames on" : "off");
 	l->load_sum = l->windows = b->load_sum = b->windows = 0;
 	stat_line(seconds, now, touches != 0 || frames != 0 || raises != 0);
+	if (__atomic_load_n(&p610_mode,__ATOMIC_RELAXED) && p610_stats.windows) {
+		uint64_t up_ns=0;
+		absolutetime_to_nanoseconds(now,&up_ns);
+		const struct s9_p610_window *w=&p610_stats;
+		say("p610-gov: up=%llums phase=%u windows=%llu span_ms=%llu sticky=%llu sticky_ms=%llu shadow_static=%llu moving=%llu anim=%llu static=%llu fingers=%llu transitions=%llu last_gap_ms=%u last_age_ms=%u last_quiet_ms=%u max_age_ms=%u invalid_frame=%llu applied=0\n",
+		    up_ns/NSEC_PER_MSEC,__atomic_load_n(&p6_phase,__ATOMIC_RELAXED),
+		    w->windows,w->elapsed_ms,w->sticky_windows,w->sticky_ms,
+		    w->shadow_static_windows,w->moving_windows,w->real_anim,
+		    w->real_static,w->finger_windows,w->transitions,
+		    w->last_gap_ms,w->last_age_ms,w->last_quiet_ms,w->max_age_ms,w->invalid_frame_windows);
+		say("p610-gap: up=%llums phase=%u frame_events=%llu gap_le50=%llu gap_51_150=%llu gap_151_300=%llu gap_gt300=%llu age_le100=%llu age_101_299=%llu age_ge300=%llu source=governor_frame_notifications_not_CA_damage\n",
+		    up_ns/NSEC_PER_MSEC,__atomic_load_n(&p6_phase,__ATOMIC_RELAXED),
+		    w->gap_le50+w->gap_51_150+w->gap_151_300+w->gap_gt300,
+		    w->gap_le50,w->gap_51_150,w->gap_151_300,w->gap_gt300,
+		    w->age_le100,w->age_101_299,w->age_ge300);
+		s9_p610_clear(&p610_stats);
+	}
 }
 
 static void
