@@ -46,7 +46,7 @@
  * the 5 s poll) with AvgCurrent (0x0B) and QH (0x4D, the raw coulomb counter, to difference) besides Current,
  * for a drain measured over minutes rather than read off a percentage.
  *
- * Boot-arg max77705_diag_s=S (30 to 300, multiples of 5 s): with max77705_diag=1, capture the same
+ * Boot-arg max77705_diag_s=S  read-only charger register snapshots every S seconds with max77705_diag=1 (30 to 300, multiples of 5 s).
  * read-only charger register snapshot every S seconds rather than only at the existing 5-minute line. Never
  * reads CHG_INT (0xB0, read-to-clear), never writes charger state, and does not create another polling thread.
  * For charging/thermal experiments prefer S=30 (20 I2C register reads/30s, bounded).

@@ -351,6 +351,7 @@ MALI_PROBE	arg	mali_probe	GPU and display	k	hakios.mali.c	sample five-second GPU
 MALI_TRACE	arg	mali_trace	GPU and display	k	hakios.mali.c	one line per job: "tl: j SEQ f|v q QUEUED b BEGAN e ENDED", in microseconds
 MAX77705	arg	max77705	Audio and battery	k	hakios.max77705.c	
 MAX77705_DIAG	arg	max77705_diag	Audio and battery	k	hakios.max77705.c	
+MAX77705_DIAG_S	arg	max77705_diag_s	Audio and battery	k	hakios.max77705.c	read-only charger register snapshots every S seconds with max77705_diag=1 (30 to 300, multiples of 5 s)
 MAX77705_FG_S	arg	max77705_fg_s	Audio and battery	k	hakios.max77705.c	the gauge's short line (only reads)
 MAX77705_HAPTIC	arg	max77705_haptic	Audio and battery	k	hakios.max77705.c	
 MAX77705_IPCLK	arg	max77705_ipclk	Audio and battery	k	hakios.max77705.c	

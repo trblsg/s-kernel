@@ -369,6 +369,7 @@ mali_probe	k
 mali_trace	k
 max77705	k
 max77705_diag	k
+max77705_diag_s	k
 max77705_fg_s	k
 max77705_haptic	k
 max77705_ipclk	k
