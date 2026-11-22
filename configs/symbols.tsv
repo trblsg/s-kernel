@@ -310,7 +310,7 @@ GPU_RECOVER	arg	gpu_recover	GPU and display	k	hakios.adreno.c	a submission the c
 GPU_VA	arg	gpu_va	GPU and display	k	hakios.adreno.c	
 HALT_OFF	arg	halt_off	Chip, thermal and PMIC	k	hakios.exynos_poweroff.c	
 HAPTIC_EFFECT	arg	haptic_effect	Haptics and torch	k	hakios.haptic.c	
-HI	arg	hi	User space	u	inject_sb.c	one-boot source inventory, scene context commits, timed source cut
+HI	arg	hi	User space	u	inject_sb.c	manual profiler; hi=2: autonomous A/B and extended attribution
 IOAES	arg	ioaes	User space	k	MiniIOAESAccelerator.cpp	no IOAESAccelerator at all, as the kernel was before this driver
 IRIS_S9	arg	iris_s9	User space	k	hakios.exynos_iris.c	run the first N steps: 1 read the pins, CIS_CLK2, LDOs and the LED's ID; 2 power the sensor
 IRIS_S9_EXP	arg	iris_s9_exp	User space	k	hakios.exynos_iris.c	exposure in lines of 6.56 us (default 0x0339 = 825, at most 5075)
