@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include "../../drivers/power/exynos/s9_p610_gov_diag.h"
+#include "../../drivers/power/exynos/hakios.p610_gov_diag.h"
 #include "../../userland/src/s9_p611_hash_diag.h"
 #include "../../userland/src/s9_p612_output_diag.h"
 int main(void) {

@@ -292,7 +292,7 @@ static struct {
 SYSCTL_DECL(_kern_hakios);
 #include "hakios.p4_cpu_lab.h" /* P4: scheduler-idle and frame cadence, read-only */
 #include "hakios.p6_lab.h" /* P6: integrated opt-in wake-proxy and policy shadow */
-#include "s9_p610_gov_diag.h" /* P6.10 pure passive state classifier */
+#include "hakios.p610_gov_diag.h" /* P6.10 pure passive state classifier */
 /* Governor-owned single-thread counters. Never evaluated in the IRQ/frame callback. */
 static struct s9_p610_window p610_stats;
 static uint32_t p610_last_phase=~0u,p610_was_on;

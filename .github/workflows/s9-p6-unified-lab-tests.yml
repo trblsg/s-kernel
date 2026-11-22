@@ -118,7 +118,7 @@ jobs:
           for name in ('p610_mode','p611_mode','p612_mode'):
               assert f'SYSCTL_UINT(_kern_hakios, OID_AUTO, {name}' in k
               assert f'{name}=0' in serial
-          assert 'power/exynos bsd/dev/s9_p610_gov_diag.h' in m
+          assert 'power/exynos bsd/dev/hakios.p610_gov_diag.h' in m
           assert 's9_p610_add(&p610_stats,&ev)' in cpu
           assert 'p610-gov:' in cpu and 'p610-gap:' in cpu
           assert 'to = scion_state(' in cpu and 'dev_state = to;' in cpu
