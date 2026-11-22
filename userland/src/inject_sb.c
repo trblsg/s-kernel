@@ -2143,10 +2143,13 @@ caller(const void *address, char *buffer, size_t size)
 	return buffer;
 }
 
+#include "s9_home_idle.inc"
+
 static id
 display_link_with(id self, SEL selector, id target, SEL action)
 {
-	id link = original_display_link_with(self, selector, target, action);
+	id link = hi_enabled ? hi_make_link(self, selector, target, action) :
+	    original_display_link_with(self, selector, target, action);
 	char who[256];
 
 	if (link != NULL && target != NULL && strcmp(object_getClassName(target), DL_FULL_FOR) == 0) {
@@ -2168,6 +2171,7 @@ set_fps(id self, SEL selector, long fps)
 		say("hakios: display link %p asked for %ld a second%s by %s\n", (void *)self, fps, full_rate(self) ? " (dropped)" : "",
 		    caller(__builtin_return_address(0), who, sizeof(who)));
 	}
+	if (hi_enabled) hi_set_requested_fps(self, (uint32_t)(fps > 0 ? fps : 0));
 	original_set_fps(self, selector, full_rate(self) ? 0 : fps);
 }
 
@@ -2180,6 +2184,7 @@ set_range(id self, SEL selector, frame_rate_range range)
 		say("hakios: display link %p asked for %.0f..%.0f, %.0f a second%s by %s\n", (void *)self, range.minimum,
 		    range.maximum, range.preferred, full_rate(self) ? " (dropped)" : "", caller(__builtin_return_address(0), who, sizeof(who)));
 	}
+	if (hi_enabled) hi_set_requested_fps(self, (uint32_t)(range.preferred > 0 ? range.preferred : 0));
 	if (full_rate(self)) {
 		range = (frame_rate_range){ 0, 0, 0 };
 	}
@@ -2254,8 +2259,10 @@ display_link_rates(void)
 	}
 	dl_say = boot_arg(arguments, "touch_lat=1");
 	dl_max = boot_arg(arguments, "dl_max=1");
+	/* hi=1: one-boot source inventory, scene context commits, timed source cut. */
+	hi_enabled = boot_arg(arguments, "hi=1");
 	animation_rates(arguments);
-	if (!dl_say && !dl_max) {
+	if (!dl_say && !dl_max && !hi_enabled) {
 		return;
 	}
 	if ((made = class_getClassMethod(link, sel_registerName("displayLinkWithTarget:selector:"))) != NULL) {
@@ -2269,6 +2276,15 @@ display_link_rates(void)
 	}
 	say("hakios: display links: made %s, fps %s, range %s%s\n", made ? "ok" : "NO", fps ? "ok" : "NO", range ? "ok" : "NO",
 	    dl_max ? "; " DL_FULL_FOR "'s at the panel's rate (dl_max=1)" : "");
+	if (hi_enabled) {
+		if (!made) {
+			say("hi: DISABLED: CADisplayLink factory unavailable; no hooks or gating\n");
+			hi_enabled = false;
+		} else {
+			/* UIApplication is not yet ready in the injection constructor. */
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW,3*NSEC_PER_SEC),dispatch_get_main_queue(),^{hi_start();});
+		}
+	}
 }
 
 /*

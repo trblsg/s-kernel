@@ -1,0 +1,17 @@
+hi: enabled oneboot links=0 policy=forward-only until explicit cut input_hook=1 group_max=48 usb_ctl=kern.hakios.hi_cmd no_boot_arg_changes_after_this=1
+hi: link group=1 target=SBAnimationDisplayLink action=advance:
+hi: mark=main gate=off contexts_baseline=reset
+hi: phase=main up=450s visible_home=1 home_windows=1 windows=5 contexts=5 commits_5s=50 animations=0 anim_scan_complete=1 gate=0 seconds_left=0 mali_framefloor=450
+hi: link=1 target=SBAnimationDisplayLink action=advance: ticks_5s=50 forwarded=50 cut=0 fps_req=10
+poster_cost: 450 s: backboardd[18] cpu=20.0% rss=80000KiB up=450s sample
+poster_cost: 450 s: SpringBoard[8] cpu=2.0% rss=80000KiB up=450s sample
+mali-probe: up=450000ms windows=1 busy=2% frame_windows=1 floor_forced=1 thermal_windows=0 framefloor=450MHz clock=455MHz level=1 cap=598MHz
+fps: 10 presented, 10 drawn
+max77705: fg: t 450 s, 100.00%, 2160 mAh, current 100 mA, avg 50 mA, QH 22
+hi: mark=secondary gate=off contexts_baseline=reset
+hi: phase=secondary up=520s visible_home=1 home_windows=1 windows=5 contexts=5 commits_5s=0 animations=0 anim_scan_complete=1 gate=0 seconds_left=0 mali_framefloor=450
+poster_cost: 520 s: backboardd[18] cpu=8.0% rss=80000KiB up=520s sample
+mali-probe: up=520000ms windows=1 busy=0% frame_windows=0 floor_forced=0 thermal_windows=0 framefloor=450MHz clock=260MHz level=0 cap=598MHz
+fps: idle (60 refreshes)
+com.apple.xpc.launchd|time: PridePosterExtension [200] exited due to SIGSEGV
+hi: gate=armed target=1 class=SBAnimationDisplayLink action=advance: max_seconds=30 input_grace=2.5

@@ -1,0 +1,70 @@
+name: S9 Home Idle one-boot A/B
+on:
+  push:
+    branches: [s9/home-idle-oneboot-ab]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  policy-and-catalog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: C11 and C++17 fail-open policy test (UBSan)
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror -pedantic -fsanitize=undefined tools/tests/test_s9_home_idle_policy.c -o /tmp/s9_hi_c
+          /tmp/s9_hi_c
+          c++ -x c++ -std=c++17 -O2 -Wall -Wextra -Werror -pedantic -fsanitize=undefined tools/tests/test_s9_home_idle_policy.c -o /tmp/s9_hi_cpp
+          /tmp/s9_hi_cpp
+      - name: Boot-args catalog and integration guards
+        run: |
+          python3 tools/boot-args.py --check
+          git diff --check
+          python3 - <<'PY'
+          from pathlib import Path
+          sb=Path('userland/src/inject_sb.c').read_text()
+          inc=Path('userland/src/s9_home_idle.inc').read_text()
+          kernel=Path('drivers/gpu/mali/hakios.mali.c').read_text()
+          doc=Path('docs/s9-home-idle-oneboot.md').read_text()
+          assert '#include "s9_home_idle.inc"' in sb
+          assert 'hi_enabled = boot_arg(arguments, "hi=1")' in sb
+          assert 'if (hi_enabled) hi_set_requested_fps' in sb
+          assert 'hi_make_link(self, selector, target, action)' in sb
+          assert 'hi_usb_command();' in inc
+          assert 'SYSCTL_UINT(_kern_hakios, OID_AUTO, hi_cmd' in kernel
+          assert 's9_hi_skip(' in inc and 'S9_HI_GATE_US' in inc
+          assert 'hi_event_hook_ok' in inc and 'hi_animations_absent' in inc
+          assert 'wallpaper_home_showing()' in inc
+          assert 'homeIdleTick:' in inc and 'objc_setAssociatedObject' in inc
+          assert 'com.hakios.hi.stop' in inc
+          assert 'mali_gov_frame=450' in doc and 'max77705_fg_s=10' in doc
+          assert 'glFlush' not in inc and 'glFinish' not in inc
+          print('hi: source+mailbox+guard+rollback layout verified')
+          PY
+  report-parser:
+    runs-on: windows-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - name: One-boot phase grouping, GPU, fuel gauge and callback counters
+        shell: pwsh
+        run: |
+          $lines = & ./tools/s9-home-idle-report.ps1 -Log tools/tests/s9-home-idle-fixture.log
+          $body = $lines -join "`n"
+          foreach ($value in @('2 marked windows','main      fps=10.00','secondary fps=0.00',
+                              'SBAnimationDisplayLink.advance:','CA commits/s=10.0',
+                              '1 confirmed PridePoster SIGSEGV')) {
+            if (!$body.Contains($value)) { throw "Report fixture missing: $value" }
+          }
+          Write-Host "S9 HomeIdle report parser OK"
+  springboard-syntax:
+    runs-on: macos-15
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: iOS SDK C/blocks syntax for SpringBoard injection
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun clang -target arm64-apple-ios16.0 -isysroot "$SDK" -std=gnu11 -fblocks \
+            -Wno-deprecated-declarations -Wno-unknown-pragmas -fsyntax-only userland/src/inject_sb.c

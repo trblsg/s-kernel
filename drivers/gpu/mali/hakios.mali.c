@@ -158,6 +158,13 @@ static uint32_t mali_pll = 1;                   /* mali_pll=0: PLL_G3D as the bo
 #define MALI_G72                0x6221u         /* GPU_ID >> 16 */
 
 SYSCTL_DECL(_kern_hakios);              /* the node is drivers/core/hakios.platform.c's */
+/* One-boot, userland-only Home idle control mailbox.
+ * hi_cmd is never read by the kernel render/PM paths: SpringBoard polls it
+ * only when booted with hi=1, and validates each request before acting.
+ * USB's built-in 'sysctl' command can set it (no shell/notify command there). */
+static uint32_t hi_cmd;
+SYSCTL_UINT(_kern_hakios, OID_AUTO, hi_cmd, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY,
+    &hi_cmd, 0, "S9 Home idle oneboot: 0 stop; 1 main; 2 secondary; 3 Settings; 101..148 gate source; 199 top; 200 layers; 201 stop");
 
 static vm_offset_t pmu, cmu_g3d, mali;
 static uint32_t reached, gpu_id, shader_mask, l2_mask, last_step, step;
