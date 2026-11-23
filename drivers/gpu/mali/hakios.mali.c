@@ -167,7 +167,7 @@ SYSCTL_DECL(_kern_hakios);              /* the node is drivers/core/hakios.platf
 static uint32_t hi_policy;
 SYSCTL_UINT(_kern_hakios, OID_AUTO, hi_policy,
     CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY | CTLFLAG_KERN,
-    &hi_policy, 0, "Clock reduction: 0 disabled, 1 view-verified Home offscreen, 2 P9 hidden Home-icon offscene";
+    &hi_policy, 0, "Clock reduction: 0 disabled, 1 view-verified Home offscreen, 2 P9 hidden Home-icon offscene");
 static uint32_t hi_cmd;
 SYSCTL_UINT(_kern_hakios, OID_AUTO, hi_cmd, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY | CTLFLAG_KERN,
     &hi_cmd, 0, "S9 Home idle oneboot: 0 stop; 1 main; 2 secondary; 3 Settings; 101..148 gate source; 199 top; 200 layers; 201 stop");
