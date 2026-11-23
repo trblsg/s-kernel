@@ -123,3 +123,41 @@ a sysctl ACK, or GPU PMU status alone into proof of CPU electrical watts.
 If a sensor is absent, treat it as **unmeasured**, not zero. A/B/A across
 one boot is a useful control for time drift but is not a wattmeter or a
 guaranteed thermal improvement.
+
+## Real COM125 false timeout: P8 phase 82 (23 November 2026)
+
+First physical P8 capture `putty-S9-p8-unified-20261123-091536.log`
+advanced through phases 80 and 81. Phase 82's host transaction falsely
+timed out after 24 seconds. The **raw kernel USB stream** contains all
+three positive signals:
+
+```text
+p4-thread: ... s_raw=usb> sysctl kern.hakios.p7_cpu_phase=82
+usb: sysctl kern.hakios.p7_cpu_phase=82: set (0)
+p4-thread: ... thr=(unnamed) usb: kern.hakios.p7_cpu_phase = 82
+```
+
+The old host `Test-SysctlReadback` required `^usb:` at column zero.
+Userland `p4-thread` output and kernel USB output share an **unserialized**
+character stream; the reply can appear in the middle of another line.
+This is **not** evidence of USB byte loss, kernel hang, or failed phase
+change. P7 CPU samples continued reporting `phase=82`, 4+4 cores,
+`exit=0`; PSCI CPU3–6 stage3/AFFINITY ON. A later cleanup
+`p4_mode=0` command likewise received a real echo, `set (0)` and
+readback embedded in `p4-thread` lines, but was wrongly flagged
+unconfirmed. The subsequent safety resets (BIG cap 0, G3D gate 0,
+P8/P7 CPU/GPU modes 0) had normal ACKs.
+
+**Host-only fix:** accept the exact `usb: kern.hakios.NAME = NUMBER`
+readback **at the end of any line**, even if a preceding logger's text is
+on that line. Preserve independent exact command echo, `set (0)` ACK,
+fresh per-command buffer and full numeric matching (`82` cannot match
+`820`). Added a synthetic regression based on both real interleavings.
+Only `tools/s9-home-idle-serial-auto.ps1` and test files change; the
+already installed matching P8 BOOT+SYSTEM does **not** need reflashing.
+
+This capture has 31 valid P8 rows (phases 80–82), 32 GPU PMU/PLL rows,
+read-only PSCI 3–6, PMU and rail responses. Screen-OFF phase83 and
+later G3D/frequency A/B/A phases **were not run**. Before rerunning,
+verify a cool device and 8 online cores; close PuTTY and update the
+Windows host script from this branch.

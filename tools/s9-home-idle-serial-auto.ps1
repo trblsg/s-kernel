@@ -322,8 +322,12 @@ function Test-G3DRestored([string]$Text){
     return $Text -match '(?m)^usb: kern\.hakios\.g3d_lab_stats = [^\r\n]*mode=0 [^\r\n]*domain=1 pll=1 gpu_safe=1 tz_ok=1 [^\r\n]*fault=0(?: |\r|$)'
 }
 function Test-SysctlReadback([string]$Text,[string]$Name,[string]$Expected){
-    # Exact numeric line, NOT substring: =1 must never accept =100.
-    return $Text -match ('(?m)^usb: '+[regex]::Escape($Name+' = '+$Expected)+'\r?$')
+    # The USB console and p4-thread logger write concurrently. A genuine
+    # reply may be joined to another log line (observed in S9 P8 phase 82).
+    # Do not demand start-of-line; still require the FULL numeric value at
+    # end-of-line and independent fresh echo + kernel ACK in Send-Checked.
+    # In particular, =82 must never accept =820.
+    return $Text -match ('(?m)usb: '+[regex]::Escape($Name+' = '+$Expected)+'\r?$')
 }
 function Send-Checked([string]$Cmd,[string]$Additional='',[int]$ExtraAppWaitSeconds=0){
     if($Cmd -cnotmatch $script:Allowed){throw "Command outside conservative HI2 allowlist: $Cmd"}
@@ -361,7 +365,7 @@ function Send-Checked([string]$Cmd,[string]$Additional='',[int]$ExtraAppWaitSeco
             throw ("USB rejected $Cmd; "+$script:Recent.Substring([Math]::Max(0,$script:Recent.Length-430)))
         }
         if([datetime]::UtcNow -ge $kernelDeadline -and (-not $gotEcho -or -not $gotAck -or -not $gotReadback)){
-            throw "No kernel echo+ACK+exact-readback for $Cmd within $AckTimeoutSeconds seconds"
+            throw "No kernel echo+ACK+exact-readback for $Cmd within $AckTimeoutSeconds seconds (echo=$gotEcho ack=$gotAck readback=$gotReadback extra=$gotExtra)"
         }
         if($gotEcho -and $gotAck -and $gotReadback -and $gotExtra){
             Say ("ACK echo+kernel+readback"+$(if($Additional){"+SpringBoard"}else{""})+": $Cmd")

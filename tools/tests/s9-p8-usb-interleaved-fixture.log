@@ -1,0 +1,10 @@
+p4-thread: up=334s phase=81 name=backboardd thr=(unnamed) u_raw=5201000 s_raw=usb> sysctl kern.hakios.p7_cpu_phase=82
+8676000 cpu_if_mach=53.12 cpu_if_ns=1.38 run=3
+usb: sysctl kern.hakios.p7_cpu_phase=82: set (0)
+p4-thread: up=334s phase=81 name=backboardd thr=(unnamed) usb: kern.hakios.p7_cpu_phase = 82
+u_raw=4744000 s_raw=8382000
+p4-threads: up=360s phase=81 name=backboardd missing=0 usb> sysctl kern.hakios.p4_mode=0
+hot=7 truncated=0
+p4-thread: up=360s thr=IOHIDEventusb: sysctl kern.hakios.p4_mode=0: set (0)
+_Server_Connection_-_Root u_rusb: kern.hakios.p4_mode = 0
+aw=9233000 s_raw=11859000

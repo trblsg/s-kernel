@@ -44,6 +44,48 @@ try{
     }
     $replay=(& $runner -ReplayP8Log $good 2>&1) -join "`n"
     if(-not $replay.Contains('P8 rows=7')){throw 'P8 replay has no parser output'}
+    # 2026-11-23 real COM125: userland p4-thread lines can swallow the start
+    # of a genuine USB readback. Load the REAL host function via PowerShell
+    # parser, without dot-sourcing the entire runner/opening COM.
+    $tokens=$null;$parseErrors=$null
+    $ast=[System.Management.Automation.Language.Parser]::ParseFile(
+        $runner,[ref]$tokens,[ref]$parseErrors)
+    if(@($parseErrors).Count){throw 'P8 serial host parser errors'}
+    $fn=@($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Test-SysctlReadback'
+    },$true))
+    if($fn.Count -ne 1){throw 'Missing or duplicate live readback parser'}
+    . ([scriptblock]::Create($fn[0].Extent.Text))
+    $interleaved=Get-Content (Join-Path $PSScriptRoot 's9-p8-usb-interleaved-fixture.log') -Raw
+    if(-not (Test-SysctlReadback $interleaved 'kern.hakios.p7_cpu_phase' '82') -or
+       -not (Test-SysctlReadback $interleaved 'kern.hakios.p4_mode' '0')){
+        throw 'P8 actual CPU phase / p4 cleanup readback lost to concurrent log prefix'
+    }
+    # Keep all THREE independent proofs: same command echo, kernel set(0)
+    # and exact numeric readback; never accept partial numeric values.
+    foreach($cmd in @('p7_cpu_phase=82','p4_mode=0')){
+        if(-not $interleaved.Contains('usb> sysctl kern.hakios.'+$cmd) -or
+           -not $interleaved.Contains('usb: sysctl kern.hakios.'+$cmd+': set (0)')){
+            throw 'P8 interleaved USB fixture missing independent echo/ACK'
+        }
+    }
+    $wrongCpu=$interleaved.Replace('usb: kern.hakios.p7_cpu_phase = 82',
+                                   'usb: kern.hakios.p7_cpu_phase = 820')
+    $wrongP4=$interleaved.Replace('usb: kern.hakios.p4_mode = 0',
+                                  'usb: kern.hakios.p4_mode = 01')
+    if((Test-SysctlReadback $wrongCpu 'kern.hakios.p7_cpu_phase' '82') -or
+       (Test-SysctlReadback $wrongP4 'kern.hakios.p4_mode' '0') -or
+       (Test-SysctlReadback $interleaved 'kern.hakios.p7_gpu_phase' '82')){
+        throw 'P8 serial parser accepted a wrong, partial or unrelated numeric readback'
+    }
+    $liveHost=Get-Content $runner -Raw
+    if(-not $liveHost.Contains('if($script:Recent.Contains($echo))') -or
+       -not $liveHost.Contains('if($script:Recent.Contains($ack))') -or
+       -not $liveHost.Contains('if($gotEcho -and $gotAck -and $gotReadback -and $gotExtra)')){
+        throw 'P8 host lost the independent echo + kernel ACK + exact readback gate'
+    }
     # Child PowerShell isolates the deliberately thrown error from parent Stop.
     $ErrorActionPreference='Continue'
     $rejected=(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runner -P7PowerTest CPU -Execute 2>&1 | Out-String)
@@ -70,7 +112,7 @@ try{
        -not $p8runner.Contains('P8-Set-Phase 89')){
         throw 'P8 kernel-level two-layer CPU_OFF safety latch missing'
     }
-    Write-Output 'P8 SAFE UNIFIED PASS: 512-row ABI, PSCI/PMU provenance, thermal cap, negative CPU_ON and host fail-closed checks.'
+    Write-Output 'P8 SAFE UNIFIED PASS: 512-row ABI, PSCI/PMU provenance, thermal cap, negative CPU_ON, interleaved USB readback and fail-closed checks.'
 }finally{
     Remove-Item $temp -ErrorAction SilentlyContinue
 }
