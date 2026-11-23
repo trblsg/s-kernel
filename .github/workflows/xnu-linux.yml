@@ -95,6 +95,17 @@ jobs:
           ./xnu-build.sh -j$(nproc) -k > build.log 2>&1 || echo "make exited with $? (expected: see xnu/README.md)"
           grep -E '(error|Error)[: ]' build.log | grep -v 'exported name not in import list' | tail -40 || true
           K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
+          if [ ! -s "$K" ] || [ ! -s "$K.unstripped" ]; then
+            echo '::error title=XNU link/build failed::Missing kernel output; annotated diagnostics follow'
+            { grep -Ei 'fatal error:|error:|undefined reference|implicit declaration|no rule to make|ld:|failed' build.log || true; } | tail -16 | while IFS= read -r line; do
+              line=${line:0:900}
+              line=${line//'%'/'%25'}
+              echo "::error title=P8 XNU compiler::$line"
+            done
+            echo '--- xnu-build final 60 lines ---'
+            tail -60 build.log
+            exit 1
+          fi
           ls -la $K $K.unstripped
           mkdir -p out && cp $K $K.unstripped out/
 
