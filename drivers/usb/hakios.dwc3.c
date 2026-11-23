@@ -427,7 +427,9 @@ static void con(const char *format, ...) __printflike(1, 2);
 static void
 con(const char *format, ...)
 {
-	char line[300];
+	/* A complete 512-byte sysctl string needs space for USB prefix.
+	 * Never silently truncate PMU/TZ/fault fields during P7 recovery. */
+	char line[768];
 	va_list list;
 
 	va_start(list, format);
@@ -1302,7 +1304,11 @@ errno_name(int error)
 static void
 console_sysctl(char *arg)
 {
-	union { char s[256]; int32_t i; int64_t q; } v;
+	/* P7's g3d_lab_stats grows past 256 bytes once OFF/wake counters
+	 * accumulate. A 256-byte sysctl GET then fails with ENOMEM even when
+	 * the control succeeded, making the USB script mistake it for a power
+	 * failure. 512 bytes fits the bounded kernel report and record rows. */
+	union { char s[512]; int32_t i; int64_t q; } v;
 	size_t len = sizeof(v.s);
 	bool text = true;
 	char *equals = strchr(arg, '=');

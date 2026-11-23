@@ -158,6 +158,14 @@ jobs:
           assert 'USB error ACK / GPU PMU recovery verification' in runner
           assert "'kern.hakios.hi_cmd' '252'" in runner
           assert 'kernel_sysctlbyname(name,value,&length,NULL,0)' in cpu
+          driver_map=Path('drivers/map').read_text()
+          assert 'gpu/mali bsd/dev/hakios.p7_gpu_lab.h' in driver_map
+          assert 'power/exynos bsd/dev/hakios.p7_cpu_lab.h' in driver_map
+          usb_path=Path('drivers/usb/hakios.dwc3.c').read_text()
+          assert 'union { char s[512]; int32_t i; int64_t q; } v;' in usb_path
+          assert 'char line[768];' in usb_path
+          assert 512+len('usb: kern.hakios.g3d_lab_stats = ')+1<768
+          assert 'g3d_lab_stats' in runner and 'Confirm-G3DRestored' in runner
           # Assert every requested USB sysctl is available to KERNEL
           # rather than just iOS userland, preventing another HI2 EPERM.
           import re
