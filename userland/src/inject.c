@@ -116,6 +116,9 @@ static void *(*orig_renderer)(void *server);
 static uintptr_t (*orig_render_update)(void *server, void *update, unsigned *flags);
 
 static unsigned calls_ready, calls_ignore, calls_begin, calls_finish, calls_render;
+/* P10 observational CA truth source: count whether WindowServer itself
+ * rejects or accepts updates. Never change the answer or a render call. */
+static uint64_t p10_ignore_true, p10_ignore_false;
 static int last_ready = -1, last_ignore = -1;
 
 static int
@@ -136,6 +139,8 @@ static int
 my_ignore_update_p(void *display, void *update)
 {
 	int ignore = orig_ignore_update_p(display, update) & 1;
+	if(ignore)__atomic_fetch_add(&p10_ignore_true,1,__ATOMIC_RELAXED);
+	else __atomic_fetch_add(&p10_ignore_false,1,__ATOMIC_RELAXED);
 
 	if (ignore != last_ignore || calls_ignore < 3) {
 		uint64_t *q = (uint64_t *)((char *)display + 0x220);
@@ -206,6 +211,21 @@ my_render_update(void *server, void *update, unsigned *flags)
 	if (calls_render++ < 6) {
 		say("hakios: render_update -> %#lx (flags %#x)\n", r, flags ? *flags : 0);
 	}
+    /* Once per 256 real WindowServer render requests, report whether
+     * CA itself classified input updates as skippable. This is source
+     * attribution, NOT a command to skip the frame or to turn off GPU. */
+    if((calls_render & 255u)==0){
+        uint64_t rejected=__atomic_exchange_n(&p10_ignore_true,0,__ATOMIC_ACQ_REL);
+        uint64_t accepted=__atomic_exchange_n(&p10_ignore_false,0,__ATOMIC_ACQ_REL);
+        int policy=0;
+        size_t len=sizeof(policy);
+        if(sysctlbyname("kern.hakios.hi_lock_policy",&policy,&len,NULL,0)==0 &&
+           len==sizeof(policy) && policy>0)
+            say("p10-ca: windowserver_render_calls=256 CA_ignore_true=%llu "
+                "CA_ignore_false=%llu policy=%d "
+                "render_update_always_forwarded=1 GL_present_unchanged=1\n",
+                (unsigned long long)rejected,(unsigned long long)accepted,policy);
+    }
 	return r;
 }
 

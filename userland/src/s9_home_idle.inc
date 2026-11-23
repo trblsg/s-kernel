@@ -10,17 +10,24 @@
 #include "s9_hi_auto_policy.h"
 #include "s9_hi_verified_policy.h"
 #include "s9_p9_clock_policy.h"
+#include "s9_p10_lock_policy.h"
 #define HI_GROUPS 48
 #define HI_CONTEXTS 40
 static bool hi_enabled, hi_event_hook_ok, hi_auto_mode;
 static bool hi_verified_enabled; /* sysctl hi_policy=1; only after prior A/B FINISHED */
 static bool hi_p9_hidden_clock_enabled; /* hi_policy=2: hidden Home Clock target only */
+/* P10 source-specific lockscreen timers, independent of P9 GPU & panel.
+ * Disabled by default. Epoch/proofs expire within 1.5s; no blind frames. */
+static volatile uint32_t hi_p10_mode;
+static volatile bool hi_p10_cover_proven,hi_p10_display_on;
+static volatile bool hi_p10_anim_full,hi_p10_anim_absent,hi_p10_commit_quiet;
+static volatile uint64_t hi_p10_lock_since,hi_p10_scene_at,hi_p10_quiet_since;
 static uint32_t hi_verified_refusals;
 static os_unfair_lock hi_group_lock = OS_UNFAIR_LOCK_INIT;
 static struct hi_group {
     char target[92], action[72];
     uint64_t callbacks, forwarded, cut, last_callbacks;
-    uint64_t last_tick_us, last_view_us, verified_cuts, p9_cuts;
+    uint64_t last_tick_us, last_view_us, verified_cuts, p9_cuts, p10_clock_cuts, p10_anim_cuts;
     uint32_t requested_fps, instances;
 } hi_groups[HI_GROUPS];
 static unsigned hi_groups_used, hi_stage;
@@ -60,6 +67,8 @@ static void hi_auto_sample(uint64_t now);
 static void hi_auto_tick(void);
 static void hi_auto_cancel(const char *reason,bool manual);
 static void hi_auto_rearm(void);
+static bool hi_p10_maybe_skip(uint64_t now,uint64_t forwarded,
+    enum s9_p10_source source);
 static void
 hi_send_event(id self,SEL cmd,id event)
 {
@@ -107,6 +116,9 @@ hi_proxy_tick(id self,SEL cmd,id link)
     const unsigned group=p->group;
     const uint64_t now=hi_time_us();
     bool exact_clock=group && hi_group_clock(group);
+    enum s9_p10_source p10_source=group && group<=HI_GROUPS?
+        s9_p10_source(hi_groups[group-1].target,hi_groups[group-1].action):
+        S9_P10_OTHER;
     if(group && group<=HI_GROUPS){
         struct hi_group *g=&hi_groups[group-1];
         __atomic_fetch_add(&g->callbacks,1,__ATOMIC_RELAXED);
@@ -156,6 +168,19 @@ hi_proxy_tick(id self,SEL cmd,id link)
         hi_p9_hidden_clock_enabled)){
         __atomic_fetch_add(&hi_groups[group-1].p9_cuts,1,__ATOMIC_RELAXED);
         __atomic_fetch_add(&hi_groups[group-1].cut,1,__ATOMIC_RELAXED);
+        return;
+    }
+    /* P10 never touches generic render/present or any unrecognized link.
+     * A fresh verified lock screen, no input and target-specific frame
+     * interval are mandatory. Animation-manager opt-in mode 2 additionally
+     * requires all windows scanned, no CA animKeys and zero commits. */
+    if(group && hi_p10_maybe_skip(now,p->last_forward,p10_source)){
+        struct hi_group *g=&hi_groups[group-1];
+        if(p10_source==S9_P10_PRECISE_CLOCK)
+            __atomic_fetch_add(&g->p10_clock_cuts,1,__ATOMIC_RELAXED);
+        else
+            __atomic_fetch_add(&g->p10_anim_cuts,1,__ATOMIC_RELAXED);
+        __atomic_fetch_add(&g->cut,1,__ATOMIC_RELAXED);
         return;
     }
     bool cut=group && group==__atomic_load_n(&hi_gate_group,__ATOMIC_ACQUIRE) &&
@@ -245,6 +270,7 @@ hi_count_animations(id layer,unsigned depth,unsigned *budget)
         count+=hi_count_animations(SEND1(id,children,"objectAtIndex:",unsigned long,i),depth+1,budget);
     return count;
 }
+#include "s9_p10_lock_scene.inc"
 static void
 hi_context_reset(void)
 {
@@ -294,6 +320,7 @@ hi_sample(void)
             hi_contexts[j].last=commit;
         }
     }
+    hi_p10_sample_scene(windows,count,hi_time_us());
     bool ready=home && homewindows!=0 && budget!=0;
     __atomic_store_n(&hi_home_ready,ready,__ATOMIC_RELEASE);
     __atomic_store_n(&hi_animations_absent,animations==0 && budget!=0,__ATOMIC_RELEASE);
@@ -306,6 +333,22 @@ hi_sample(void)
         __atomic_store_n(&hi_gate_group,0,__ATOMIC_RELEASE);
         __atomic_store_n(&hi_gate_deadline,0,__ATOMIC_RELEASE);
         gate=0;
+    }
+    if(__atomic_load_n(&hi_p10_mode,__ATOMIC_ACQUIRE)){
+        uint64_t lock_since=__atomic_load_n(&hi_p10_lock_since,__ATOMIC_ACQUIRE);
+        uint64_t quiet_since=__atomic_load_n(&hi_p10_quiet_since,__ATOMIC_ACQUIRE);
+        say("hi: p10_lock mode=%u display=%u cover_locked=%u "
+            "stable_ms=%llu all_anim_scanned=%u anim_empty=%u commits_empty=%u "
+            "anim_quiet_ms=%llu exact_sources_only=1 CA_GL_present_unchanged=1\n",
+            __atomic_load_n(&hi_p10_mode,__ATOMIC_ACQUIRE),
+            __atomic_load_n(&hi_p10_display_on,__ATOMIC_ACQUIRE)?1u:0u,
+            __atomic_load_n(&hi_p10_cover_proven,__ATOMIC_ACQUIRE)?1u:0u,
+            (unsigned long long)(lock_since&&now>=lock_since?(now-lock_since)/1000:0),
+            __atomic_load_n(&hi_p10_anim_full,__ATOMIC_ACQUIRE)?1u:0u,
+            __atomic_load_n(&hi_p10_anim_absent,__ATOMIC_ACQUIRE)?1u:0u,
+            __atomic_load_n(&hi_p10_commit_quiet,__ATOMIC_ACQUIRE)?1u:0u,
+            (unsigned long long)(quiet_since&&now>=quiet_since?
+                (now-quiet_since)/1000:0));
     }
     if(hi_auto_mode){
         hi_window_context_details();
@@ -340,13 +383,17 @@ hi_sample(void)
         uint64_t cut=__atomic_exchange_n(&g->cut,0,__ATOMIC_ACQ_REL);
         uint64_t verified=__atomic_exchange_n(&g->verified_cuts,0,__ATOMIC_ACQ_REL);
         uint64_t p9=__atomic_exchange_n(&g->p9_cuts,0,__ATOMIC_ACQ_REL);
+        uint64_t p10clock=__atomic_exchange_n(&g->p10_clock_cuts,0,__ATOMIC_ACQ_REL);
+        uint64_t p10anim=__atomic_exchange_n(&g->p10_anim_cuts,0,__ATOMIC_ACQ_REL);
         g->last_callbacks=callbacks;
         if(callbacks || cut)
             say("hi: link=%u target=%s action=%s ticks_5s=%llu forwarded=%llu "
-                "cut=%llu fps_req=%u verified_cut=%llu p9_hidden_clock_cut=%llu\n",
+                "cut=%llu fps_req=%u verified_cut=%llu p9_hidden_clock_cut=%llu "
+                "p10_lock_clock_cut=%llu p10_quiet_anim_cut=%llu\n",
                 i+1,g->target,g->action,(unsigned long long)callbacks,
                 (unsigned long long)forwarded,(unsigned long long)cut,
-                g->requested_fps,(unsigned long long)verified,(unsigned long long)p9);
+                g->requested_fps,(unsigned long long)verified,(unsigned long long)p9,
+                (unsigned long long)p10clock,(unsigned long long)p10anim);
     }
     hi_auto_sample(now);
 }
@@ -394,6 +441,19 @@ static void
 hi_pump(void)
 {
     hi_usb_command();
+    int lock_policy=sysctl_int("kern.hakios.hi_lock_policy");
+    unsigned next_lock=lock_policy>=0 && lock_policy<=2?
+        (unsigned)lock_policy:0u;
+    if(next_lock!=__atomic_load_n(&hi_p10_mode,__ATOMIC_ACQUIRE)){
+        __atomic_store_n(&hi_p10_mode,next_lock,__ATOMIC_RELEASE);
+        __atomic_store_n(&hi_p10_cover_proven,false,__ATOMIC_RELEASE);
+        __atomic_store_n(&hi_p10_lock_since,0,__ATOMIC_RELEASE);
+        __atomic_store_n(&hi_p10_quiet_since,0,__ATOMIC_RELEASE);
+        say("hi: p10_lock_policy=%u target_clock=SBUIPreciseClockTimer "
+            "clock_min_forward_hz=1 target_UI_animation_mode2_only=1 "
+            "anim_min_forward_hz=15 all_windows_proof=1 "
+            "global_CA_GL_present_unchanged=1\n",next_lock);
+    }
     int policy=sysctl_int("kern.hakios.hi_policy");
     bool verified=hi_auto_mode && policy==1;
     bool p9_hidden=hi_auto_mode && policy==2;

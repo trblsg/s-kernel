@@ -168,6 +168,42 @@ static uint32_t hi_policy;
 SYSCTL_UINT(_kern_hakios, OID_AUTO, hi_policy,
     CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY | CTLFLAG_KERN,
     &hi_policy, 0, "Clock reduction: 0 disabled, 1 view-verified Home offscreen, 2 P9 hidden Home-icon offscene");
+
+/* P10 userland lockscreen-source policy. Independent of P9 power.
+ * No GPU/DECON MMIO, no system-sleep/CPU_OFF changes and disabled at boot.
+ * Kernel exposure of the real display request is read-only, so SpringBoard
+ * can safely fail OPEN when the screen is off or its state is unknown. */
+extern int hakios_display_requested_on(void);
+static uint32_t hi_lock_policy;
+static int
+hi_lock_policy_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
+    __unused int arg2,struct sysctl_req *req)
+{
+    int value=(int)__atomic_load_n(&hi_lock_policy,__ATOMIC_RELAXED);
+    int err=sysctl_io_number(req,value,sizeof(value),&value,NULL);
+    if(err || req->newptr==USER_ADDR_NULL)return err;
+    if(value<0 || value>2)return EINVAL;
+    __atomic_store_n(&hi_lock_policy,(uint32_t)value,__ATOMIC_RELEASE);
+    say("p10-lock: policy=%d 0=off 1=exact_clock_1Hz "
+        "2=plus_UI_anim_timer_15Hz_only_if_all_quiet "
+        "other_CA_GL_present=unchanged panel_DCS=unchanged GPU_gate=unchanged\n",value);
+    return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,hi_lock_policy,
+    CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_ANYBODY|CTLFLAG_KERN,
+    NULL,0,hi_lock_policy_sysctl,"I",
+    "P10 exact lockscreen clock and optional zero-animation UIKit timer policy, default 0");
+static int
+hi_display_requested_sysctl(__unused struct sysctl_oid *oidp,
+    __unused void *arg1,__unused int arg2,struct sysctl_req *req)
+{
+    int value=hakios_display_requested_on();
+    return SYSCTL_OUT(req,&value,sizeof(value));
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,hi_display_requested,
+    CTLTYPE_INT|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,
+    NULL,0,hi_display_requested_sysctl,"I",
+    "P10 read-only GenericARMPE iOS display ON=1 OFF=0 unknown=-1");
 static uint32_t hi_cmd;
 SYSCTL_UINT(_kern_hakios, OID_AUTO, hi_cmd, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY | CTLFLAG_KERN,
     &hi_cmd, 0, "S9 Home idle oneboot: 0 stop; 1 main; 2 secondary; 3 Settings; 101..148 gate source; 199 top; 200 layers; 201 stop");
@@ -196,7 +232,6 @@ static uint32_t p5_mode, p5_phase, p5_threads;
 static uint32_t p68_mode; /* read-only PMU/quiet-window correlation, independent of real G3D gating */
 /* P9: user-opt-in production screen-OFF GPU policy. Never infer OFF from quiet frames alone. */
 static uint32_t p9_auto_gpu;
-extern int hakios_display_requested_on(void);
 static uint32_t g3d_lab_rail_probe, g3d_lab_fault, g3d_lab_monitor_started;
 static uint32_t g3d_lab_off_count, g3d_lab_wake_count, g3d_lab_wake_failed;
 static uint32_t g3d_lab_shadow_count, g3d_lab_denied_count, g3d_lab_job_faults;

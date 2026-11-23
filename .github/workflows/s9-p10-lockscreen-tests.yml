@@ -1,0 +1,76 @@
+name: S9 P10 lockscreen exact source guard
+on:
+  push:
+    branches: [s9/p10-lockscreen-source-guard]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  lock-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and execute strict C11 lockscreen policy tests
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -O2 tools/tests/test_s9_p10_lock_policy.c -o /tmp/test-p10-lock
+          /tmp/test-p10-lock
+          cc -std=c11 -Wall -Wextra -Werror -O2 tools/tests/test_s9_p9_clock_policy.c -o /tmp/test-p9-clock
+          /tmp/test-p9-clock
+      - name: Exact SpringBoard source, lock manager ABI, kernel sysctl, GPU and panel safety
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          s=lambda p:Path(p).read_text()
+          p=s('userland/src/s9_home_idle.inc')
+          scene=s('userland/src/s9_p10_lock_scene.inc')
+          policy=s('userland/src/s9_p10_lock_policy.h')
+          bb=s('userland/src/inject.c')
+          gpu=s('drivers/gpu/mali/hakios.mali.c')
+          host=s('tools/s9-p9-power-fix.inc.ps1')
+          assert 'hi_p10_maybe_skip' in p and 'hi_p10_sample_scene' in p
+          assert 'method_getReturnType' in scene and 'SBCoverSheetWindow' in scene
+          assert 'hi_p10_is_locked()' in scene and 'SBLockScreenManager' in scene
+          assert 'hi_display_requested' in scene
+          assert 'hi_count_animations' in scene and 'hi_contexts[i].delta' in scene
+          assert 'S9_P10_OTHER' in policy and 'S9_P10_PROOF_FRESH_US' in policy
+          assert 'SBUIPreciseClockTimer' in policy and 'UIViewInProcessAnimationManager' in policy
+          assert 's9_p10_skip' in policy and 'S9_P10_ANIM_QUIET_US' in policy
+          assert 'orig_ignore_update_p(display, update)' in bb
+          assert 'orig_render_update(server, update, flags)' in bb
+          assert 'render_update_always_forwarded=1' in bb
+          assert 'hi_lock_policy_sysctl' in gpu and 'value<0 || value>2' in gpu
+          assert 'CTLTYPE_INT|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN' in gpu
+          assert 'gate_mode == 2 && hakios_display_requested_on() != 0' in gpu
+          assert "Send-Checked 'sysctl kern.hakios.p9_panel_mode=1'" not in host
+          assert 'P9 PANEL BYPASS VERIFIED' in host
+          assert 'p8-safety: BIG CPU_OFF REFUSED' in s('xnu/files/GenericARMPE.cpp')
+          print('P10 exact source, fail-open scene and P9.1 hardware stable guards PASS')
+          PY
+          git diff --check
+  windows-regressions:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: P10/P9/P8 Windows PowerShell offline regression
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach($test in @('tools/tests/test-s9-p10-lockscreen-source.ps1',
+                             'tools/tests/test-s9-p9-power-fix.ps1',
+                             'tools/tests/test-s9-p8-unified.ps1')){
+            $stdout=Join-Path $env:RUNNER_TEMP ([IO.Path]::GetFileName($test)+'.out')
+            $stderr=Join-Path $env:RUNNER_TEMP ([IO.Path]::GetFileName($test)+'.err')
+            $p=Start-Process -FilePath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList @(
+              '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$test) -Wait -PassThru -NoNewWindow `
+              -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            $out=[IO.File]::ReadAllText($stdout)
+            $err=[IO.File]::ReadAllText($stderr)
+            Write-Output $out
+            if($err){Write-Output $err}
+            if($p.ExitCode -ne 0){throw "S9 regression failed: $test exit $($p.ExitCode)"}
+            if($test -match 'p10' -and $out -notmatch 'P10 LOCK SCREEN SOURCE PASS'){throw 'P10 marker missing'}
+            if($test -match 'p9' -and $out -notmatch 'P9 SOURCE FIX PASS'){throw 'P9 marker missing'}
+            if($test -match 'p8' -and $out -notmatch 'P8 SAFE UNIFIED PASS'){throw 'P8 marker missing'}
+          }
