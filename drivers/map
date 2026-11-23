@@ -42,6 +42,7 @@ gpu/mali bsd/dev/hakios.mali.c
 gpu/mali bsd/dev/hakios.mali_va.h
 gpu/mali bsd/dev/hakios.mali_lab_policy.h
 gpu/mali bsd/dev/hakios.mali_lab.h
+gpu/mali bsd/dev/hakios.p7_gpu_lab.h
 gpu/mali bsd/dev/hakios.p5_lab.h
 gpu/mali iokit/Kernel/hakios.mali.cpp
 
@@ -75,6 +76,7 @@ power/exynos bsd/dev/hakios.p4_idle_math.h
 power/exynos bsd/dev/hakios.p4_cpu_lab.h
 power/exynos bsd/dev/hakios.p6_policy.h
 power/exynos bsd/dev/hakios.p6_lab.h
+power/exynos bsd/dev/hakios.p7_cpu_lab.h
 power/exynos bsd/dev/hakios.p610_gov_diag.h
 power/exynos bsd/dev/hakios.scion_gov.c
 power/exynos bsd/dev/hakios.exynos_tmu.c
