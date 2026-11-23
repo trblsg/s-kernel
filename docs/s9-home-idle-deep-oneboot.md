@@ -1,5 +1,10 @@
 # S9 Home Idle: high-resolution single-build investigation (hi=2)
 
+**Recommended Windows fully automatic COM runner:** see
+[`docs/s9-home-idle-serial-auto.md`](s9-home-idle-serial-auto.md).
+It replaces PuTTY, does not require any manual usb> commands, and
+produces raw .log plus .report.txt. The manual steps below are fallback only.
+
 This is **a test branch, not a permanent battery/power fix**. It follows the
 real 2026-11-22 22,027-line `putty-S9-home-idle-oneboot.log`: primary Home
 draws at 10 FPS / backboardd ~20%; secondary Home and Settings draw almost

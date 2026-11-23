@@ -46,9 +46,11 @@ static const char *const hi_auto_names[] = {
 };
 static uint64_t hi_time_us(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000; }
 #include "s9_home_idle_detail.inc"
+#include "s9_home_idle_scene.inc"
 static void hi_auto_sample(uint64_t now);
 static void hi_auto_tick(void);
 static void hi_auto_cancel(const char *reason,bool manual);
+static void hi_auto_rearm(void);
 static void
 hi_send_event(id self,SEL cmd,id event)
 {
@@ -256,6 +258,7 @@ hi_sample(void)
     }
     if(hi_auto_mode){
         hi_window_context_details();
+        hi_scene_snapshot();
         if(tick%2==0)hi_window_anim_snapshot();
     }
     unsigned long long commits=0;
@@ -303,6 +306,17 @@ hi_usb_command(void)
     if(command==previous)return;
     previous=command;
     say("hi: ctl=RECEIVED value=%d usb_kernel_to_SpringBoard=OK\n",command);
+    if(command==250){
+        say("hi: ping mode=%u auto_state=%s clock_link=%u home=%u "
+            "input_hook=%u manual_phase=%s\n",
+            hi_auto_mode?2u:1u,hi_auto_names[hi_auto_state],hi_auto_clock_id,
+            hi_home_ready?1u:0u,hi_event_hook_ok?1u:0u,
+            hi_stages[hi_stage]);
+        return;
+    }
+    if(command==252){hi_auto_rearm();return;}
+    if(command==300){hi_open_settings(false);return;}
+    if(command==301){hi_open_settings(true);return;}
     if(hi_auto_mode)hi_auto_cancel("manual_usb_control",true);
     if(command>=1 && command<=3)hi_mark((unsigned)command);
     else if(command>=101 && command<=148)hi_arm((unsigned)(command-100));

@@ -44,6 +44,7 @@
 #include <Block.h>
 #include <dispatch/dispatch.h>
 #include <pthread.h>
+#include <spawn.h>
 #include <unistd.h>
 #include <dlfcn.h>
 #include <errno.h>

@@ -9,6 +9,30 @@
  */
 static unsigned hi_auto_retries;
 
+/* The Windows COM harness may attach AFTER the boot-time sequence; a single
+ * explicit 252 command restarts the test from WAIT, with guards unchanged.
+ * It is intentionally NOT automatic and never bypasses Home/clock/quiet. */
+static void
+hi_auto_rearm(void)
+{
+    if(!hi_auto_mode){
+        say("hi: auto=REARM_REFUSED reason=hi_mode_not_2\n");
+        return;
+    }
+    __atomic_store_n(&hi_gate_group,0,__ATOMIC_RELEASE);
+    __atomic_store_n(&hi_gate_deadline,0,__ATOMIC_RELEASE);
+    __atomic_store_n(&hi_auto_clock_gate,false,__ATOMIC_RELEASE);
+    hi_auto_state=HI_AUTO_WAIT;
+    hi_auto_ready_windows=0;
+    hi_auto_retries=0;
+    hi_auto_seen_failure=false;
+    hi_auto_clock_id=0;
+    hi_auto_end_us=0;
+    __atomic_store_n(&hi_last_input,hi_time_us(),__ATOMIC_RELEASE);
+    say("hi: auto=REARM up=%llus from_usb=1 requires_clock_10hz=1 quiet_s=8\n",
+        (unsigned long long)(hi_time_us()/1000000));
+}
+
 static void
 hi_auto_disable_gate(void)
 {

@@ -26,6 +26,15 @@ foreach($line in [IO.File]::ReadLines((Resolve-Path -LiteralPath $Log).Path)){
     if($line -match '^hi: link group=(\d+) target=(\S+) action=(\S+)'){
         $groupNames[[int]$Matches[1]]="$($Matches[2]).$($Matches[3])"
     }
+    # If COM attached late, the HI2 host script deliberately re-arms a fresh
+    # crossover. Do not mix previous boot-time baseline with the restarted run.
+    if($line -match '^hi: auto=REARM '){
+        $runs.Clear()
+        $active=$null
+        $autoPhases=0
+        $autoFinished=$false
+        continue
+    }
     if($line -match '^hi: auto=(baseline|cut1|recover1|cut2|recover2) up='){
         $active=New-Run ('auto-'+$Matches[1])
         $runs.Add($active)
@@ -39,6 +48,11 @@ foreach($line in [IO.File]::ReadLines((Resolve-Path -LiteralPath $Log).Path)){
     }
     if($line -match '^hi: auto=ABORT'){
         $active=$null
+        $autoFinished=$false
+        # Interruptions are not evidence of an effective A/B. A restarted
+        # series must be reported on its own, never concatenated with it.
+        $runs.Clear()
+        $autoPhases=0
         continue
     }
     if($line -match '^hi: mark=(main|secondary|settings)'){

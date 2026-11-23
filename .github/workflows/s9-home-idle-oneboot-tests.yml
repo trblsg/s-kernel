@@ -61,6 +61,32 @@ jobs:
               assert symptom in detail
           assert 'hi_auto_candidate(' in auto and 'hi_auto_must_abort(' in auto
           assert 'hi_auto_cut_phase(' in auto and 'hi_auto_disable_gate();' in auto
+          assert 'hi_auto_rearm(void)' in auto
+          scene = Path('userland/src/s9_home_idle_scene.inc').read_text()
+          assert 'posix_spawn(' in scene and 'prefs:root=General' in scene
+          assert 'settings_confirmed=' in scene and 'com.apple.Preferences' in scene
+          assert 'hi_cmd' in inc and 'hi: ping mode=' in inc
+          assert 'hi_auto_rearm();return;' in inc
+          assert 'hi_open_settings(false);return;' in inc
+          assert 'hi_open_settings(true);return;' in inc
+          assert 'if(command==250)' in inc and 'if(command==252)' in inc
+          assert 'if(command==300)' in inc and 'if(command==301)' in inc
+          assert 'SBSOpenSensitiveURLAndUnlock' in scene
+          assert 'hi: settings_open request=1 route=%s' in scene
+          assert 'hi_scene_snapshot();' in inc
+          assert 'powershell -NoProfile -ExecutionPolicy Bypass' in Path('docs/s9-home-idle-serial-auto.md').read_text()
+          runner = Path('tools/s9-home-idle-serial-auto.ps1').read_text()
+          for hook in ('[IO.Ports.SerialPort]','hi: auto=REARM','hi: auto=FINISHED',
+                       'swipe l 1 350 1000','hi: mark=secondary',
+                       'settings_confirmed','No exact echo/ACK','Invoke-Report'):
+              assert hook in runner, hook
+          assert 'sysctl kern.hakios.hi_cmd=250' in runner
+          assert 'sysctl kern.hakios.hi_cmd=252' in runner
+          assert 'sysctl kern.hakios.hi_cmd=300' in runner
+          assert 'sysctl kern.hakios.hi_cmd=301' in runner
+          assert 'hi: settings_open request=1 route=helper' in runner
+          assert 'SendKeys' not in runner
+          assert 'sysctl kern.hakios.mali_gov_frame=0' not in runner
           assert 'hi_auto_mode && __atomic_load_n(&hi_auto_clock_gate' in inc
           assert 'hi_group_clock(group)' in inc
           assert 'hi: auto=FINISHED' in auto
@@ -90,6 +116,21 @@ jobs:
                               'SBAnimationDisplayLink.advance:','CA commits/s=10.0',
                               '1 confirmed PridePoster SIGSEGV')) {
             if (!$body.Contains($value)) { throw "Report fixture missing: $value" }
+          }
+          $runner = './tools/s9-home-idle-serial-auto.ps1'
+          $preview = (& $runner) -join "`n"
+          if (!$preview.Contains('PREVIEW')) { throw "HI2 USB COM runner preview failed" }
+          $replay = (& $runner -ReplayLog tools/tests/s9-home-idle-auto-fixture.log) -join "`n"
+          if (!$replay.Contains('REPLAY SELFTEST PASS')) { throw "HI2 serial state-machine replay failed" }
+          # An interrupted or previously completed auto run must be reset
+          # by REARM before a new five-stage series is considered complete.
+          $partial = Join-Path $env:RUNNER_TEMP 'hi2-rearm.log'
+          $previous = Get-Content tools/tests/s9-home-idle-auto-fixture.log
+          @($previous[0..5], 'hi: auto=REARM up=400s from_usb=1 requires_clock_10hz=1 quiet_s=8', $previous) |
+            ForEach-Object { $_ } | Set-Content -Path $partial
+          $rearmed = (& ./tools/s9-home-idle-report.ps1 -Log $partial) -join "`n"
+          foreach ($value in @('5 serial windows','5 autonomous phases','auto_finished=True')) {
+            if (!$rearmed.Contains($value)) { throw "Rearm parsing mixed old and new phases: $value" }
           }
           $fallback = (& ./tools/s9-home-idle-report.ps1 -Log tools/tests/s9-home-idle-eperm-fixture.log) -join "`n"
           foreach ($value in @('WARNING: hi_cmd=EPERM','2 serial windows','SBHClockApplicationIconImageView._timerFired:')) {
