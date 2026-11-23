@@ -16,3 +16,6 @@ xnu/files/GenericARMPE.cpp iokit/Kernel/GenericARMPE.cpp
 xnu/files/cpu.c osfmk/arm64/cpu.c
 xnu/files/processor.c osfmk/kern/processor.c
 xnu/files/psci_smp.c osfmk/arm64/psci_smp.c
+# Core PSCI cannot depend on BSD's sys/ include path. Install the exact
+# shared ABI in osfmk as well as the BSD driver-map destination.
+drivers/soc/exynos/hakios.p8_soc_snapshot.h osfmk/arm64/hakios.p8_soc_snapshot.h

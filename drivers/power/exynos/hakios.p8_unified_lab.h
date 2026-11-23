@@ -12,7 +12,7 @@
  */
 #ifndef HAKIOS_P8_UNIFIED_LAB_H
 #define HAKIOS_P8_UNIFIED_LAB_H
-#include <sys/hakios.p8_soc_snapshot.h>
+#include "hakios.p8_soc_snapshot.h"
 #define P8_RING 512u
 #define P8_ALL_FLAGS 1023u
 #define P8_UNAVAILABLE 255u

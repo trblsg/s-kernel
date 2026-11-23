@@ -72,7 +72,7 @@ extern void hakios_esslog_start(void);
 #include <sys/hakios.exynos_acpm.h>
 #include <sys/systm.h>
 #include <sys/hakios.exynos_soc.h>
-#include <sys/hakios.p8_soc_snapshot.h>
+#include "hakios.p8_soc_snapshot.h"
 #include <sys/hakios.log.h>
 #include <sys/hakios.xnu.h>
 

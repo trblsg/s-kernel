@@ -1,5 +1,6 @@
 /* P8 shared snapshot ABI. Read-only; no PMU, CPU or PSCI power state writes.
- * Kept in bsd/dev by drivers/map; used by the M3 driver, PSCI and governor.
+ * One source copied to BSD/dev by drivers/map and to osfmk/arm64 by
+ * the iOS 16.5 fork_copy profile; used by M3 driver, PSCI and governor.
  * UNKNOWN is explicit: a successful XNU processor_exit is never proof of
  * PSCI AFFINITY_OFF or PMU hardware OFF.
  */

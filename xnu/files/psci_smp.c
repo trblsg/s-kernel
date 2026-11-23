@@ -45,7 +45,7 @@
 #include <arm/machine_routines.h>
 #include <arm64/proc_reg.h>
 #include <arm64/psci_smp.h>
-#include <sys/hakios.p8_soc_snapshot.h>
+#include <arm64/hakios.p8_soc_snapshot.h>
 #include <pexpert/pexpert.h>
 #include <pexpert/device_tree.h>
 #include <pexpert/arm64/board_config.h>
