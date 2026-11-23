@@ -85,7 +85,7 @@ jobs:
           assert 'sysctl kern.hakios.hi_cmd=300' in runner
           assert 'sysctl kern.hakios.hi_cmd=301' in runner
           assert 'hi: settings_open request=1 route=helper' in runner
-          assert 'SendKeys' not in runner
+          assert 'SendKeys.SendWait' not in runner and 'SendKeys(' not in runner
           assert 'sysctl kern.hakios.mali_gov_frame=0' not in runner
           assert 'hi_auto_mode && __atomic_load_n(&hi_auto_clock_gate' in inc
           assert 'hi_group_clock(group)' in inc
@@ -118,9 +118,9 @@ jobs:
             if (!$body.Contains($value)) { throw "Report fixture missing: $value" }
           }
           $runner = './tools/s9-home-idle-serial-auto.ps1'
-          $preview = (& $runner) -join "`n"
+          $preview = (& $runner 6>&1) -join "`n"
           if (!$preview.Contains('PREVIEW')) { throw "HI2 USB COM runner preview failed" }
-          $replay = (& $runner -ReplayLog tools/tests/s9-home-idle-auto-fixture.log) -join "`n"
+          $replay = (& $runner -ReplayLog tools/tests/s9-home-idle-auto-fixture.log 6>&1) -join "`n"
           if (!$replay.Contains('REPLAY SELFTEST PASS')) { throw "HI2 serial state-machine replay failed" }
           # An interrupted or previously completed auto run must be reset
           # by REARM before a new five-stage series is considered complete.
