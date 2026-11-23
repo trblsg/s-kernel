@@ -57,7 +57,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: PowerShell 5.1 syntax and positive/negative offline tests
+      - name: PowerShell 5.1 syntax for each host script
         shell: powershell
         run: |
           $ErrorActionPreference='Stop'
@@ -69,7 +69,29 @@ jobs:
             $tokens=$null;$errors=$null
             [System.Management.Automation.Language.Parser]::ParseFile(
               (Join-Path $PWD $file), [ref]$tokens, [ref]$errors) | Out-Null
-            if(@($errors).Count -gt 0){throw "PS parse failed: $file $errors"}
+            if(@($errors).Count -gt 0){
+              Write-Host "::error file=$file,title=P8 parser failed::$($errors -join '; ')"
+              throw "PS parse failed: $file"
+            }
+            Write-Output "PS5.1 syntax PASS: $file"
           }
-          & ./tools/tests/test-s9-p8-unified.ps1
-          if($LASTEXITCODE -and $LASTEXITCODE -ne 0){throw 'P8 regression exit status is not 0'}
+      - name: P8 PowerShell offline positive and negative fixtures
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Continue'
+          $stdout=Join-Path $env:RUNNER_TEMP 's9-p8.stdout.log'
+          $stderr=Join-Path $env:RUNNER_TEMP 's9-p8.stderr.log'
+          $p=Start-Process -FilePath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList @(
+            '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass',
+            '-File','tools/tests/test-s9-p8-unified.ps1') -Wait -PassThru -NoNewWindow `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          $out=[IO.File]::ReadAllText($stdout)
+          $err=[IO.File]::ReadAllText($stderr)
+          Write-Output $out
+          if($err){Write-Output $err}
+          if($p.ExitCode -ne 0 -or $out -notmatch 'P8 SAFE UNIFIED PASS'){
+            $safe=($err+' '+$out) -replace '[\r\n]+',' | '
+            if($safe.Length -gt 1100){$safe=$safe.Substring(0,1100)}
+            Write-Host "::error title=P8 offline replay failed,exit=$($p.ExitCode)::$safe"
+            throw 'P8 regression failed on Windows runner'
+          }
