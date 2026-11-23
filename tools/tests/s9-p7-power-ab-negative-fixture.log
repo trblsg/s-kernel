@@ -1,0 +1,12 @@
+# P7 negative fixture: B does NOT power down G3D, CPU never parks; reject.
+p7-gpu: up=605000ms phase=51 domain=1 pll=1 awake=1 clock=260MHz frame_age_ms=55000 job_age_ms=55000 off_total_ms=0 off=0 wake=0 wake_fail=0 gate=3 fault=0 gpu_safe=1 tz_ok=1 rail_valid=1 rail_mv=950 g3d_mc=69000 source=PMU_CMU_5s_not_watts
+p7-gpu: up=610000ms phase=51 domain=1 pll=1 awake=1 clock=260MHz frame_age_ms=60000 job_age_ms=60000 off_total_ms=0 off=0 wake=0 wake_fail=0 gate=3 fault=0 gpu_safe=1 tz_ok=1 rail_valid=1 rail_mv=950 g3d_mc=69000 source=PMU_CMU_5s_not_watts
+p7-gpu: up=665000ms phase=52 domain=1 pll=1 awake=1 clock=260MHz frame_age_ms=12000 job_age_ms=12000 off_total_ms=0 off=0 wake=0 wake_fail=0 gate=0 fault=0 gpu_safe=1 tz_ok=1 rail_valid=1 rail_mv=950 g3d_mc=68000 source=PMU_CMU_5s_not_watts
+usb: kern.hakios.g3d_lab_stats = phase=52 mode=0 grace_ms=10000 requested_mv=950 domain=1 pll=1 gpu_safe=1 tz_ok=1 off_count=0 off_total_ms=0 wake_count=0 wake_fail=0 fault=0 rail_valid=1 rail_last_mv=950
+p7-cpu: up=700000ms phase=60 disp=0 idle_lit=99% idle_big=94% lit_online=4 big_online=4 mhz=1053/650 exit=0 usb_valid=1 usb_delta=2470 usb_connected=2470 touch_valid=1 touch_delta=1240 deep_C2_CPD_SICD=unmeasured
+p7-cpu: up=705000ms phase=60 disp=0 idle_lit=99% idle_big=95% lit_online=4 big_online=4 mhz=1053/650 exit=0 usb_valid=1 usb_delta=2470 usb_connected=2470 touch_valid=1 touch_delta=1240 deep_C2_CPD_SICD=unmeasured
+p7-cpu: up=760000ms phase=61 disp=0 idle_lit=99% idle_big=95% lit_online=4 big_online=4 mhz=1053/650 exit=0 usb_valid=1 usb_delta=2470 usb_connected=2470 touch_valid=1 touch_delta=1240 deep_C2_CPD_SICD=unmeasured
+p7-cpu: up=765000ms phase=61 disp=0 idle_lit=99% idle_big=94% lit_online=4 big_online=4 mhz=1053/650 exit=0 usb_valid=1 usb_delta=2470 usb_connected=2470 touch_valid=1 touch_delta=1240 deep_C2_CPD_SICD=unmeasured
+p7-cpu: up=825000ms phase=62 disp=0 idle_lit=99% idle_big=94% lit_online=4 big_online=4 mhz=1053/650 exit=0 usb_valid=1 usb_delta=2470 usb_connected=2470 touch_valid=1 touch_delta=1240 deep_C2_CPD_SICD=unmeasured
+p7-cpu: up=830000ms phase=62 disp=0 idle_lit=99% idle_big=95% lit_online=4 big_online=4 mhz=1053/650 exit=0 usb_valid=1 usb_delta=2470 usb_connected=2470 touch_valid=1 touch_delta=1240 deep_C2_CPD_SICD=unmeasured
+cpufreq_gov: 831 s: lit 1053 MHz asked load 0% (avg 0%, 4 online, 1053 max, measured 1051) | big 650 MHz asked load 5% (avg 5%, 4 online, 650 max, measured 649) | temp big 70.0 lit 69.0 C

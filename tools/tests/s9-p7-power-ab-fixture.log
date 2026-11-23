@@ -1,0 +1,27 @@
+# P7 serial fixture: A/B/A G3D actual PMU domain OFF, BIG CPU_OFF and paired restore.
+p7-cpu: up=600000ms phase=50 disp=1 idle_lit=99% idle_big=94% lit_online=4 big_online=4 mhz=1053/650 exit=0 usb_valid=1 usb_delta=2500 usb_connected=2500 touch_valid=1 touch_delta=1240 deep_C2_CPD_SICD=unmeasured
+p7-gpu: up=600000ms phase=50 domain=1 pll=1 awake=1 clock=260MHz frame_age_ms=50000 job_age_ms=50000 off_total_ms=0 off=0 wake=0 wake_fail=0 gate=0 fault=0 gpu_safe=1 tz_ok=1 rail_valid=1 rail_mv=950 g3d_mc=69000 source=PMU_CMU_5s_not_watts
+p7-gpu: gate_watchdog=ARMED max_seconds=120 automatic_restore_even_without_COM=1
+p7-gpu: up=605000ms phase=51 domain=0 pll=0 awake=0 clock=0MHz frame_age_ms=55000 job_age_ms=55000 off_total_ms=10000 off=1 wake=0 wake_fail=0 gate=3 fault=0 gpu_safe=0 tz_ok=1 rail_valid=1 rail_mv=950 g3d_mc=67000 source=PMU_CMU_5s_not_watts
+p7-gpu: up=610000ms phase=51 domain=0 pll=0 awake=0 clock=0MHz frame_age_ms=60000 job_age_ms=60000 off_total_ms=20000 off=1 wake=0 wake_fail=0 gate=3 fault=0 gpu_safe=0 tz_ok=1 rail_valid=1 rail_mv=950 g3d_mc=66000 source=PMU_CMU_5s_not_watts
+p7-gpu: up=615000ms phase=51 domain=0 pll=0 awake=0 clock=0MHz frame_age_ms=65000 job_age_ms=65000 off_total_ms=30000 off=1 wake=0 wake_fail=0 gate=3 fault=0 gpu_safe=0 tz_ok=1 rail_valid=1 rail_mv=950 g3d_mc=65000 source=PMU_CMU_5s_not_watts
+p7-gpu: gate_watchdog=disarmed real_gate_disabled=1
+p7-gpu: up=665000ms phase=52 domain=1 pll=1 awake=1 clock=260MHz frame_age_ms=12000 job_age_ms=12000 off_total_ms=55000 off=1 wake=1 wake_fail=0 gate=0 fault=0 gpu_safe=1 tz_ok=1 rail_valid=1 rail_mv=950 g3d_mc=66000 source=PMU_CMU_5s_not_watts
+usb: kern.hakios.g3d_lab_stats = phase=52 mode=0 grace_ms=10000 requested_mv=950 domain=1 pll=1 gpu_safe=1 tz_ok=1 off_count=1 off_total_ms=55000 wake_count=1 wake_fail=0 wake_last_us=3200 wake_max_us=3200 wake_avg_us=3200 shadow=12 denied=1 job_faults=0 fault=0 rail_valid=1 rail_last_mv=950
+p7-cpu: up=700000ms phase=60 disp=0 idle_lit=99% idle_big=95% lit_online=4 big_online=4 mhz=1053/650 exit=0 usb_valid=1 usb_delta=2470 usb_connected=2470 touch_valid=1 touch_delta=1240 deep_C2_CPD_SICD=unmeasured
+p7-cpu: up=705000ms phase=60 disp=0 idle_lit=99% idle_big=95% lit_online=4 big_online=4 mhz=1053/650 exit=0 usb_valid=1 usb_delta=2470 usb_connected=2470 touch_valid=1 touch_delta=1240 deep_C2_CPD_SICD=unmeasured
+GenericARMPE: the display off (iOS's power request); sleep_cores=
+GenericARMPE: sleep_cores: cpu 4 taken off (0) in 390 us, 2 of its interrupts to cpu 0 first; 7 processors running
+GenericARMPE: sleep_cores: cpu 5 taken off (0) in 380 us, 1 of its interrupts to cpu 0 first; 6 processors running
+GenericARMPE: sleep_cores: cpu 6 taken off (0) in 410 us, 1 of its interrupts to cpu 0 first; 5 processors running
+GenericARMPE: sleep_cores: cpu 7 taken off (0) in 420 us, 0 of its interrupts to cpu 0 first; 4 processors running
+p7-cpu: up=760000ms phase=61 disp=0 idle_lit=99% idle_big=99% lit_online=4 big_online=0 mhz=1053/650 exit=0xf0 usb_valid=1 usb_delta=2470 usb_connected=2470 touch_valid=1 touch_delta=1240 deep_C2_CPD_SICD=unmeasured
+p7-cpu: up=765000ms phase=61 disp=0 idle_lit=99% idle_big=99% lit_online=4 big_online=0 mhz=1053/650 exit=0xf0 usb_valid=1 usb_delta=2470 usb_connected=2470 touch_valid=1 touch_delta=1240 deep_C2_CPD_SICD=unmeasured
+GenericARMPE: the display on (iOS's power request); sleep_cores=
+GenericARMPE: sleep_cores: cpu 4 started again (0) in 500 us; 5 processors running
+GenericARMPE: sleep_cores: cpu 5 started again (0) in 490 us; 6 processors running
+GenericARMPE: sleep_cores: cpu 6 started again (0) in 550 us; 7 processors running
+GenericARMPE: sleep_cores: cpu 7 started again (0) in 530 us; 8 processors running
+p7-cpu: up=825000ms phase=62 disp=0 idle_lit=99% idle_big=95% lit_online=4 big_online=4 mhz=1053/650 exit=0 usb_valid=1 usb_delta=2470 usb_connected=2470 touch_valid=1 touch_delta=1240 deep_C2_CPD_SICD=unmeasured
+p7-cpu: up=830000ms phase=62 disp=0 idle_lit=99% idle_big=94% lit_online=4 big_online=4 mhz=1053/650 exit=0 usb_valid=1 usb_delta=2470 usb_connected=2470 touch_valid=1 touch_delta=1240 deep_C2_CPD_SICD=unmeasured
+cpufreq_gov: 831 s: lit 1053 MHz asked load 0% (avg 0%, 4 online, 1053 max, measured 1051) | big 650 MHz asked load 5% (avg 5%, 4 online, 650 max, measured 649) | temp big 70.0 lit 69.0 C

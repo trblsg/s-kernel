@@ -158,6 +158,37 @@ jobs:
           assert 'USB error ACK / GPU PMU recovery verification' in runner
           assert "'kern.hakios.hi_cmd' '252'" in runner
           assert 'kernel_sysctlbyname(name,value,&length,NULL,0)' in cpu
+          # P7 A/B/A runs on the SAME flashed firmware, but in strictly
+          # separate G3D and CPU sessions. Positives require hardware
+          # readbacks, no false PASS from sysctl ACK or a shadow-only gate.
+          power=Path('tools/s9-p7-power-ab.inc.ps1').read_text()
+          power_doc=Path('docs/s9-p7-power-ab-run.md').read_text()
+          assert ". (Join-Path $PSScriptRoot 's9-p7-power-ab.inc.ps1')" in runner
+          assert "if($P7PowerTest)" in runner
+          for key in ("[ValidateSet('G3D','CPU')]",'-ReplayPowerLog',
+                      'CpuBaselineSamples','CpuOffSamples','CpuRecoverySamples',
+                      'G3DOffSamples','PowerThermalArmed','CpuThermalWhen',
+                      'EMERGENCY CPU OFF CLEANUP'):
+              assert key in runner,key
+          for key in ('P7-Run-G3DAB','P7-Run-CPUAB','P7-Start-PowerPreflight',
+                      'P7-Assert-Safe-G3D','P7-SwitchDisplay',
+                      'P7-VerifyCpuRestored','P7-Open-QuietHome',
+                      'sysctl kern.hakios.g3d_lab_gate=3',
+                      'sysctl kern.hakios.p7_cpu_park=1',
+                      'P7-Set-Phase 61','P7-Set-Phase 51'):
+              assert key in power,key
+          assert power.count('P7-Set-Phase ') >= 6
+          assert '$script:G3DOffSamples -lt 2' in power
+          assert '$script:CpuOffSamples -lt 2' in power
+          assert '$script:G3DLastOffTotal' in power and '15000' in power
+          assert 'P7-Parse-G3DStats' in power
+          assert '$script:PowerThermalArmed=$true' in power
+          assert 'P7 thermal sensors missing BIG/LITTLE/G3D values' in power
+          assert '$script:G3DGateSamples -lt 6' in power
+          assert 'g3d_lab_gate=3' in power_doc and 'sleep_cores=1' in power_doc
+          assert 's9-p7-power-ab-run.md' in doc7
+          assert Path('tools/tests/s9-p7-power-ab-fixture.log').is_file()
+          assert Path('tools/tests/s9-p7-power-ab-negative-fixture.log').is_file()
           driver_map=Path('drivers/map').read_text()
           assert 'gpu/mali bsd/dev/hakios.p7_gpu_lab.h' in driver_map
           assert 'power/exynos bsd/dev/hakios.p7_cpu_lab.h' in driver_map
@@ -247,7 +278,40 @@ jobs:
                               'BIG CPU_OFF=1 CPU_ON=1','USB_calls/s=495.0')) {
             if (!$p7.Contains($value)) { throw "P7 phase report missing: $value" }
           }
-          Write-Host "S9 HomeIdle+P7 report parsers OK (manual, EPERM, ABAB, PMU/CPU/Clock proof)"
+          # Replay the full physical-state evidence classifier without COM
+          # or a handset. A successful sysctl write MUST NOT suffice.
+          $powerFixture='tools/tests/s9-p7-power-ab-fixture.log'
+          $negativeFixture='tools/tests/s9-p7-power-ab-negative-fixture.log'
+          foreach($mode in @('G3D','CPU')){
+            $pre=(& $runner -P7PowerTest $mode 6>&1) -join "`n"
+            if(!$pre.Contains("P7PowerTest $mode uses EXISTING image")){
+              throw "P7 $mode standalone preview failed"
+            }
+            $positive=(& $runner -P7PowerTest $mode -ReplayPowerLog $powerFixture 6>&1) -join "`n"
+            if(!$positive.Contains("P7 REPLAY $mode PASS")){
+              throw "P7 $mode positive PMU/CPU_OFF recovery fixture not accepted"
+            }
+            $negative=(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runner -P7PowerTest $mode -ReplayPowerLog $negativeFixture 2>&1) -join "`n"
+            if($LASTEXITCODE -eq 0 -or !$negative.Contains('REPLAY FAIL:')){
+              throw "P7 $mode false-positive: wrong hardware state fixture accepted"
+            }
+          }
+          $powerReport = (& ./tools/s9-p7-basepower-report.ps1 -Log $powerFixture) -join "`n"
+          foreach($term in @('6 labelled phases','phase=51','G3D_off=3/3',
+                             'phase=61','online_big=0.0','BIG CPU_OFF=4 CPU_ON=4')){
+            if(!$powerReport.Contains($term)){throw "Dedicated A/B/A P7 phase report missing $term"}
+          }
+          # Thermal interlock: a kernel BIG 88 C report must STOP even when
+          # all PMU/CPU evidence would otherwise qualify as a PASS.
+          $hotFile=Join-Path $env:RUNNER_TEMP 'p7-hot-fixture.log'
+          @((Get-Content $powerFixture),
+            'cpufreq_gov: 840 s: lit 1053 MHz asked load 0% | big 650 MHz asked load 5% | temp big 88.0 lit 82.0 C') |
+            ForEach-Object {$_} | Set-Content -Path $hotFile
+          $hot = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runner -P7PowerTest G3D -ReplayPowerLog $hotFile 2>&1) -join "`n"
+          if($LASTEXITCODE -eq 0 -or !$hot.Contains('BIG temperature')){
+            throw 'P7 thermal over-limit replay incorrectly passed'
+          }
+          Write-Host "S9 HomeIdle+P7 G3D/CPU one-command A/B/A + temperature-stop and fail-closed replays PASS"
   springboard-syntax:
     runs-on: macos-15
     timeout-minutes: 12

@@ -37,8 +37,14 @@ param(
     [ValidateRange(43,55)][int]$BatteryStopC=47,
     [string]$LogPath='',
     [string]$ReplayLog='',
+    [string]$ReplayPowerLog='',
     [switch]$SkipSettings,
     [switch]$P7Unified,
+    [ValidateSet('G3D','CPU')][string]$P7PowerTest='',
+    [ValidateRange(35,55)][int]$PowerWindowSeconds=50,
+    [ValidateRange(75,85)][int]$BigStopC=82,
+    [ValidateRange(70,80)][int]$LittleStopC=75,
+    [ValidateRange(70,85)][int]$G3DStopC=77,
     [switch]$ActiveG3DGate,
     [switch]$ActiveCpuPark,
     [switch]$LeaveP7AuditRunning,
@@ -64,6 +70,27 @@ $script:DisplayOff=$false
 $script:DisplayOn=$false
 $script:ParkedCount=0
 $script:UnparkedCount=0
+$script:ParkedCPUIds=@{}
+$script:RestoredCPUIds=@{}
+$script:CpuBaselineSamples=0
+$script:CpuOffSamples=0
+$script:CpuRecoverySamples=0
+$script:PowerExperimentComplete=$false
+$script:ClockLastObserved=[datetime]::MinValue
+$script:LastGpuSample=$null
+$script:LastCpuSample=$null
+$script:G3DOffSamples=0
+$script:G3DGateSamples=0
+$script:G3DLastOffTotal=0L
+$script:G3DOffTotalBaseline=0L
+$script:G3DOffCountBaseline=0
+$script:G3DOffCountObserved=0
+$script:BigC=$null
+$script:LittleC=$null
+$script:G3DC=$null
+$script:CpuThermalWhen=[datetime]::MinValue
+$script:PowerThermalArmed=$false
+$script:HardwareFault=''
 $script:LatestClockTicks=0
 $script:BatteryC=0.0
 $script:BatteryStop=$false
@@ -109,6 +136,65 @@ function Scan-Line([string]$Line){
     }
     if($Line -match '^hi: link=\d+ target=SBHClockApplicationIconImageView action=_timerFired: ticks_5s=(\d+)'){
         $script:LatestClockTicks=[int]$Matches[1]
+        if($script:LatestClockTicks -ge 3){$script:ClockLastObserved=[datetime]::UtcNow}
+    }
+    if($Line -match '^p7-cpu: up=(\d+)ms phase=(\d+) disp=(\d+) idle_lit=(\d+)% idle_big=(\d+)% lit_online=(\d+) big_online=(\d+) mhz=(\d+)/(\d+)'){
+        $m=$Matches
+        $script:LastCpuSample=[pscustomobject]@{
+            Up=[long]$m[1];Phase=[int]$m[2];Display=[int]$m[3]
+            LittleIdle=[int]$m[4];BigIdle=[int]$m[5]
+            LittleOnline=[int]$m[6];BigOnline=[int]$m[7]
+            LittleMHz=[int]$m[8];BigMHz=[int]$m[9];When=[datetime]::UtcNow
+        }
+        if($script:LastCpuSample.Display -eq 0 -and
+           $script:LastCpuSample.LittleOnline -eq 4){
+            if($script:LastCpuSample.Phase -eq 60 -and
+               $script:LastCpuSample.BigOnline -eq 4){$script:CpuBaselineSamples++}
+            if($script:LastCpuSample.Phase -eq 61 -and
+               $script:LastCpuSample.BigOnline -lt 4){$script:CpuOffSamples++}
+            if($script:LastCpuSample.Phase -eq 62 -and
+               $script:LastCpuSample.BigOnline -eq 4){$script:CpuRecoverySamples++}
+        }
+    }
+    if($Line -match '^p7-gpu: up=(\d+)ms phase=(\d+) domain=(\d+) pll=(\d+) awake=(\d+) clock=(\d+)MHz frame_age_ms=(\d+) job_age_ms=(\d+) off_total_ms=(\d+) off=(\d+) wake=(\d+) wake_fail=(\d+) gate=(\d+) fault=(\d+) gpu_safe=(\d+) tz_ok=(\d+) rail_valid=(\d+) rail_mv=(\d+) g3d_mc=(-?\d+)'){
+        $m=$Matches
+        $script:LastGpuSample=[pscustomobject]@{
+            Up=[long]$m[1];Phase=[int]$m[2];Domain=[int]$m[3]
+            PLL=[int]$m[4];Awake=[int]$m[5];Clock=[int]$m[6]
+            FrameAge=[long]$m[7];JobAge=[long]$m[8]
+            OffTotal=[long]$m[9];OffCount=[int]$m[10]
+            WakeCount=[int]$m[11];WakeFail=[int]$m[12]
+            Gate=[int]$m[13];Fault=[int]$m[14]
+            Safe=[int]$m[15];TzOk=[int]$m[16]
+            RailValid=[int]$m[17];RailMv=[int]$m[18]
+            Temperature=([double][int]$m[19])/1000;When=[datetime]::UtcNow
+        }
+        $script:G3DC=$script:LastGpuSample.Temperature
+        if($P7PowerTest -eq 'G3D' -and $script:LastGpuSample.Phase -eq 51){
+            $script:G3DGateSamples++
+            if($script:LastGpuSample.Domain -eq 0 -and $script:LastGpuSample.PLL -eq 0){
+                $script:G3DOffSamples++
+                $script:G3DLastOffTotal=[Math]::Max($script:G3DLastOffTotal,$script:LastGpuSample.OffTotal)
+                $script:G3DOffCountObserved=[Math]::Max($script:G3DOffCountObserved,$script:LastGpuSample.OffCount)
+            }
+        }
+        if($P7PowerTest -and ($script:LastGpuSample.Fault -ne 0 -or
+             $script:LastGpuSample.WakeFail -ne 0)){
+            $script:HardwareFault="G3D fault=$($script:LastGpuSample.Fault) wake_fail=$($script:LastGpuSample.WakeFail)"
+        }
+    }
+    if($Line -match '^cpufreq_gov: \d+ s: .+\| temp big ([\d.]+) lit ([\d.]+) C'){
+        $script:BigC=[double]::Parse($Matches[1],[Globalization.CultureInfo]::InvariantCulture)
+        $script:LittleC=[double]::Parse($Matches[2],[Globalization.CultureInfo]::InvariantCulture)
+        $script:CpuThermalWhen=[datetime]::UtcNow
+    }
+    if($Line -match '^tmu: WARNING: (big|little) at ([\d.]+) C'){
+        $hot=[double]::Parse($Matches[2],[Globalization.CultureInfo]::InvariantCulture)
+        if($Matches[1] -eq 'big'){$script:BigC=$hot}else{$script:LittleC=$hot}
+        $script:CpuThermalWhen=[datetime]::UtcNow
+    }
+    if($Line -match '^p7-gpu: gate_watchdog=RESTORE_FAILED'){
+        $script:HardwareFault=$Line
     }
     if($Line -match '^(p7-cpu:|p7-gpu:|g3d-lab: FAULT|g3d-lab: gate timeout|hi: verified_policy=|hi: clock_proof)'){
         Say ('DEVICE '+$Line.Substring(0,[Math]::Min($Line.Length,250)))
@@ -121,13 +207,20 @@ function Scan-Line([string]$Line){
         $script:DisplayOn=$true;$script:DisplayOff=$false
         Say 'DEVICE display request=ON'
     }
-    if($Line -match '^GenericARMPE: sleep_cores: cpu \d+ taken off'){
-        $script:ParkedCount++
+    if($Line -match '^GenericARMPE: sleep_cores: cpu (\d+) taken off \(0\)'){
+        $id=$Matches[1]
+        $script:ParkedCPUIds[$id]=$true
+        $script:ParkedCount=$script:ParkedCPUIds.Count
         Say ('DEVICE '+$Line.Substring(0,[Math]::Min(240,$Line.Length)))
     }
-    if($Line -match '^GenericARMPE: sleep_cores: cpu \d+ started again'){
-        $script:UnparkedCount++
+    if($Line -match '^GenericARMPE: sleep_cores: cpu (\d+) started again \(0\)'){
+        $id=$Matches[1]
+        $script:RestoredCPUIds[$id]=$true
+        $script:UnparkedCount=$script:RestoredCPUIds.Count
         Say ('DEVICE '+$Line.Substring(0,[Math]::Min(240,$Line.Length)))
+    }
+    if($Line -match '^GenericARMPE: sleep_cores: cpu \d+ NOT (?:taken off|started again)'){
+        $script:HardwareFault=$Line
     }
     if($Line -match '^hi: scene home=(\d+) .+settings_confirmed=(\d+)'){
         $script:SceneHome=($Matches[1] -eq '1')
@@ -169,7 +262,31 @@ function Pump{
 }
 function Check-Thermal{
     if($script:BatteryStop){
-        throw "Battery reached $($script:BatteryC)C >= safety limit $BatteryStopC C; callback will be restored"
+        throw "Battery reached $($script:BatteryC)C >= safety limit $BatteryStopC C; restore requested"
+    }
+    if($P7PowerTest){
+        if($script:PowerThermalArmed){
+            if($script:CpuThermalWhen -eq [datetime]::MinValue -or
+               ([datetime]::UtcNow-$script:CpuThermalWhen).TotalSeconds -gt 15){
+                throw 'CPU thermal telemetry stale for over 15 seconds; fail closed'
+            }
+            if($null -eq $script:LastGpuSample -or
+               ([datetime]::UtcNow-$script:LastGpuSample.When).TotalSeconds -gt 15){
+                throw 'G3D thermal/PMU telemetry stale for over 15 seconds; fail closed'
+            }
+        }
+        if($script:BigC -ne $null -and $script:BigC -ge $BigStopC){
+            throw "BIG temperature $($script:BigC) C reached $BigStopC C stop threshold; restore requested"
+        }
+        if($script:LittleC -ne $null -and $script:LittleC -ge $LittleStopC){
+            throw "LITTLE temperature $($script:LittleC) C reached $LittleStopC C stop threshold; restore requested"
+        }
+        if($script:G3DC -ne $null -and $script:G3DC -ge $G3DStopC){
+            throw "G3D temperature $($script:G3DC) C reached $G3DStopC C stop threshold; restore requested"
+        }
+        if($script:HardwareFault){
+            throw "Kernel hardware safety fault: $($script:HardwareFault)"
+        }
     }
 }
 function Wait-For([string]$Label,[int]$TimeoutSeconds,[scriptblock]$When,[switch]$Thermal){
@@ -277,7 +394,12 @@ function Dump-P7-Rings{
     }
     Say 'P7 all retained kernel RAM samples captured. Reconnect after battery-only idle.'
 }
+. (Join-Path $PSScriptRoot 's9-p7-power-ab.inc.ps1')
 function Run-Scenario{
+    if($P7PowerTest){
+        Run-P7PowerScenario
+        return
+    }
     Say 'S9 HI2 + P7: direct USB COM logger; no PuTTY, no GUI SendKeys'
     if($DumpP7History){
         Dump-P7-Rings
@@ -437,7 +559,7 @@ function Invoke-Report{
     Say ('HOST EVENTS: '+$events)
     $report=$stem+'.report.txt'
     $parser=Join-Path $PSScriptRoot 's9-home-idle-report.ps1'
-    if(Test-Path $parser){
+    if(-not $P7PowerTest -and (Test-Path $parser)){
         try{
             $result=& $parser -Log $script:LogPathFinal 2>&1
             $result|Out-File -LiteralPath $report -Encoding UTF8
@@ -445,7 +567,7 @@ function Invoke-Report{
             foreach($line in @($result)){Write-Host $line}
         }catch{Say ('REPORT FAILED but RAW LOG preserved: '+$_.Exception.Message)}
     }
-    if($P7Unified -or $DumpP7History){
+    if($P7Unified -or $DumpP7History -or $P7PowerTest){
         $p7report=$stem+'.p7-report.txt'
         $p7parser=Join-Path $PSScriptRoot 's9-p7-basepower-report.ps1'
         if(Test-Path $p7parser){
@@ -458,6 +580,9 @@ function Invoke-Report{
         }
     }
     Say ('RAW LOG: '+$script:LogPathFinal)
+}
+if($ReplayLog -and $ReplayPowerLog){
+    throw 'Select only one replay mode (HI2 or P7 hardware power).'
 }
 if($ReplayLog){
     if(-not(Test-Path -LiteralPath $ReplayLog)){throw "No fixture: $ReplayLog"}
@@ -495,9 +620,73 @@ if($ReplayLog){
     Say 'REPLAY SELFTEST PASS: ABAB + USB error ACK / GPU PMU recovery verification, no COM port opened'
     return
 }
-Say ('S9 HI2 SERIAL AUTO: '+$(if($Execute){'EXECUTE'}else{'PREVIEW'}))
+if($ReplayPowerLog){
+    if(-not $P7PowerTest){throw '-ReplayPowerLog requires -P7PowerTest G3D or CPU'}
+    if(-not(Test-Path -LiteralPath $ReplayPowerLog)){throw "No P7 power fixture: $ReplayPowerLog"}
+    foreach($line in [IO.File]::ReadLines((Resolve-Path -LiteralPath $ReplayPowerLog).Path)){
+        Scan-Line $line
+    }
+    Check-Thermal
+    if($P7PowerTest -eq 'G3D'){
+        if($script:G3DOffSamples -lt 2 -or $script:G3DLastOffTotal -lt 15000 -or
+           $script:G3DOffCountObserved -lt 1){
+            throw 'REPLAY FAIL: no verified G3D OFF/PLL OFF samples or off-residency'
+        }
+        $all=[IO.File]::ReadAllText((Resolve-Path -LiteralPath $ReplayPowerLog).Path)
+        if(-not (Test-G3DRestored $all)){
+            throw 'REPLAY FAIL: missing independent restored domain=1 PLL=1 GPU/TZ safe fault=0'
+        }
+        $stats=P7-Parse-G3DStats $all
+        P7-Assert-Safe-G3D $stats
+        if($stats.off_count -lt 1 -or $stats.off_total_ms -lt 15000 -or
+           $stats.wake_count -lt 1){
+            throw 'REPLAY FAIL: G3D OFF-ON counters did not advance'
+        }
+        if(-not (P7-GpuSample 52)){
+            throw 'REPLAY FAIL: missing fresh final GPU phase52 PMU sample'
+        }
+        if($null -eq $script:LastGpuSample -or $script:LastGpuSample.Phase -ne 52 -or
+           $script:LastGpuSample.Domain -ne 1 -or $script:LastGpuSample.PLL -ne 1){
+            throw 'REPLAY FAIL: missing fresh P7 post-restore PMU sample'
+        }
+        Say "P7 REPLAY G3D PASS: true OFF/PLL OFF samples=$($script:G3DOffSamples), off_ms=$($script:G3DLastOffTotal), restore confirmed"
+    }elseif($P7PowerTest -eq 'CPU'){
+        if($script:CpuBaselineSamples -lt 2 -or $script:CpuOffSamples -lt 2 -or
+           $script:CpuRecoverySamples -lt 2 -or $script:ParkedCPUIds.Count -eq 0){
+            throw 'REPLAY FAIL: missing screen OFF / hardware BIG CPU_OFF / restored ONLINE samples'
+        }
+        foreach($id in $script:ParkedCPUIds.Keys){
+            if(-not $script:RestoredCPUIds.ContainsKey($id)){
+                throw "REPLAY FAIL: missing CPU_ON for cpu $id"
+            }
+        }
+        if(-not (P7-CpuSample 62 0)){
+            throw 'REPLAY FAIL: recovered CPU phase62 OFF sample missing'
+        }
+        if($null -eq $script:LastCpuSample -or $script:LastCpuSample.Phase -ne 62 -or
+           $script:LastCpuSample.BigOnline -ne 4 -or $script:LastCpuSample.LittleOnline -ne 4){
+            throw 'REPLAY FAIL: final CPU sample lacks all 8 cores online'
+        }
+        Say ("P7 REPLAY CPU PASS: baseline={0}, physical_OFF={1}, restored={2} samples, CPU IDs={3}" -f
+             $script:CpuBaselineSamples,$script:CpuOffSamples,$script:CpuRecoverySamples,
+             (($script:ParkedCPUIds.Keys|Sort-Object) -join ','))
+    }
+    return
+}
+if($P7PowerTest -and ($P7Unified -or $DumpP7History -or
+   $ActiveG3DGate -or $ActiveCpuPark -or $LeaveP7AuditRunning)){
+    throw 'P7PowerTest is standalone: do not combine it with HI2/other power flags or history dump.'
+}
+Say ('S9 '+$(if($P7PowerTest){'P7 '+$P7PowerTest+' A/B/A'}else{'HI2 SERIAL AUTO'})+': '+$(if($Execute){'EXECUTE'}else{'PREVIEW'}))
 if(-not $Execute){
     Say 'Preview: close PuTTY then re-run with -Port COMxxx -Execute; it will log DIRECTLY over USB.'
+    if($P7PowerTest){
+        Say ('P7PowerTest '+$P7PowerTest+' uses EXISTING image; no Clock test, no flash, no automatic second hardware test.')
+        Say ('Phases '+$(if($P7PowerTest -eq 'G3D'){'50=G3D ON, 51=verified G3D OFF with kernel 120s watchdog, 52=G3D ON restored'}else{'60=display OFF with BIG 4/4, 61=display OFF with confirmed BIG CPU_OFF, 62=display OFF with BIG 4/4 restored'}))
+        Say ('A/B/A active window '+$PowerWindowSeconds+'s each; thermal stop BIG='+$BigStopC+'C LITTLE='+$LittleStopC+'C G3D='+$G3DStopC+'C; battery guard if sensor available.')
+        Say 'All sysctl writes require exact readback; every physical state requires PMU or CPU_ON evidence. Full raw/host-events/P7 report preserved on abort.'
+        return
+    }
     Say 'Preflight read sysctl+ping(250), Home, rearm(252), Clock A/B/A/B, verified Clock policy and P7 CPU/GPU sampled ring, secondary, G3D shadow, Settings.'
     if($ActiveCpuPark){Say 'EXPLICIT CPU_OFF A/B requested: requires sleep_cores=1 in verified bootargs, button lock, positive OFF/ON/CPU_OFF proof'}
     if($DumpP7History){Say 'OFFLINE DUMP mode: 96 CPU+GPU ring rows collected after USB reconnect (no device state changes)'}
@@ -515,7 +704,8 @@ while([IO.Ports.SerialPort]::GetPortNames() -notcontains $Port){
 # If PuTTY still owns the port, SerialPort.Open throws before changing anything.
 Say ('Opening exclusive '+$Port+'. CLOSE PuTTY first; no manual commands will be required.')
 if([string]::IsNullOrWhiteSpace($LogPath)){
-    $LogPath='putty-S9-hi2-auto-'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'.log'
+    $prefix=if($P7PowerTest){'putty-S9-p7-'+$P7PowerTest.ToLowerInvariant()+'-'}else{'putty-S9-hi2-auto-'}
+    $LogPath=$prefix+(Get-Date -Format 'yyyyMMdd-HHmmss')+'.log'
 }
 $script:LogPathFinal=[IO.Path]::GetFullPath($LogPath)
 if(Test-Path -LiteralPath $script:LogPathFinal){
@@ -543,7 +733,7 @@ try{
         # Each restore is independent; a missing/unresponsive sysctl must
         # not prevent the subsequent GPU/CPU/Clock safety restorations.
         $restore=New-Object 'System.Collections.Generic.List[string]'
-        if($P7Unified){
+        if($P7Unified -or $P7PowerTest){
             [void]$restore.Add('sysctl kern.hakios.hi_policy=0')
             [void]$restore.Add('sysctl kern.hakios.p7_cpu_park=0')
             [void]$restore.Add('sysctl kern.hakios.g3d_lab_gate=0')
@@ -559,6 +749,20 @@ try{
         foreach($item in $restore){
             try{Send-Checked $item}
             catch{Say ('CLEANUP UNCONFIRMED '+$item+' : '+$_.Exception.Message)}
+            # CPU_OFF has no independent kernel expiry on this flashed
+            # image. Request a visible ON state before USB acquisition
+            # ends if a screen-OFF experiment was interrupted.
+            if($P7PowerTest -eq 'CPU' -and $item -eq 'sysctl kern.hakios.p7_cpu_park=0' -and
+                $null -ne $script:LastCpuSample -and $script:LastCpuSample.Display -eq 0){
+                try{
+                    $script:DisplayOn=$false
+                    Send-Checked 'button lock'
+                    Wait-For 'emergency cleanup: display ON request' 38 {$script:DisplayOn}
+                    Say 'EMERGENCY CPU OFF CLEANUP: screen ON requested, park=0 already sent.'
+                }catch{
+                    Say ('EMERGENCY SCREEN ON UNCONFIRMED: '+$_.Exception.Message)
+                }
+            }
         }
     }
     if($null -ne $script:Raw){
@@ -568,6 +772,7 @@ try{
     if($null -ne $script:Serial){$script:Serial.Dispose();$script:Serial=$null}
     Invoke-Report
 }
-if($null -ne $failed){throw "HI2 scenario incomplete. $failed . Raw log and report retained."}
-if(-not $script:Completed){throw 'HI2 scenario did not complete all confirmed phases'}
-Say 'HI2 FULL AUTOMATIC SESSION COMPLETE; send the .log and .report.txt for source attribution.'
+$sessionName=if($P7PowerTest){'P7 '+$P7PowerTest+' hardware A/B/A'}else{'HI2'}
+if($null -ne $failed){throw "$sessionName scenario incomplete. $failed . Raw log and reports retained."}
+if(-not $script:Completed){throw "$sessionName scenario did not complete all confirmed phases"}
+Say "$sessionName AUTOMATIC SESSION COMPLETE; send .log, .events.txt and .p7-report.txt for attribution."

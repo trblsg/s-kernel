@@ -1,4 +1,6 @@
 # S9 P7 — Clock owner proof + SoC Base Power / CPU idle
+
+**Đã có script PowerShell A/B/A dành riêng cho G3D real OFF và CPU BIG OFF trên image đang cài**, không chạy lại Clock HI2 hoặc yêu cầu flash: xem [Hướng dẫn P7 thử phần cứng từng lượt](s9-p7-power-ab-run.md). Dùng `-P7PowerTest G3D` trước, kiểm tra log, rồi mới cân nhắc `-P7PowerTest CPU` riêng; firmware hiện tại không có watchdog CPU_OFF độc lập.
 ## One matched BOOT+SYSTEM, one Windows COM script, optional bounded power A/B
 
 Feature kernel branch: `s9/p7-clock-basepower-oneboot`
