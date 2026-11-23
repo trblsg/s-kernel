@@ -27,7 +27,7 @@ jobs:
           abi = Path('drivers/soc/exynos/hakios.p8_soc_snapshot.h').read_text()
           assert 'p8_probe(now);' in c and '#include "hakios.p8_unified_lab.h"' in c
           assert 'power/exynos bsd/dev/hakios.p8_unified_lab.h' in mapping
-          assert 'soc/exynos bsd/dev/hakios.p8_soc_snapshot.h' in mapping
+          assert 'soc/exynos bsd/sys/hakios.p8_soc_snapshot.h' in mapping
           assert 'P8_RING 512u' in k and 'P7_GPU_RING 512u' in Path('drivers/gpu/mali/hakios.p7_gpu_lab.h').read_text()
           assert 'if(value==1)return EPERM;' in p
           assert 'if(enable){' in x and 'p8-safety: BIG CPU_OFF REFUSED' in x
