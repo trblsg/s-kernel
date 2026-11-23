@@ -8,14 +8,17 @@
  */
 #include "s9_home_idle_policy.h"
 #include "s9_hi_auto_policy.h"
+#include "s9_hi_verified_policy.h"
 #define HI_GROUPS 48
 #define HI_CONTEXTS 40
 static bool hi_enabled, hi_event_hook_ok, hi_auto_mode;
+static bool hi_verified_enabled; /* sysctl hi_policy=1; only after prior A/B FINISHED */
+static uint32_t hi_verified_refusals;
 static os_unfair_lock hi_group_lock = OS_UNFAIR_LOCK_INIT;
 static struct hi_group {
     char target[92], action[72];
     uint64_t callbacks, forwarded, cut, last_callbacks;
-    uint64_t last_tick_us, last_view_us;
+    uint64_t last_tick_us, last_view_us, verified_cuts;
     uint32_t requested_fps, instances;
 } hi_groups[HI_GROUPS];
 static unsigned hi_groups_used, hi_stage;
@@ -29,6 +32,9 @@ struct hi_proxy_data {
     SEL action;
     uint32_t group;
     uint64_t last_forward;
+    uint64_t last_checked;
+    uint64_t verified_since;
+    enum hi_view_status state;
 };
 struct hi_context {
     unsigned id;
@@ -45,6 +51,7 @@ static const char *const hi_auto_names[] = {
     "wait", "baseline", "cut1", "recover1", "cut2", "recover2", "finished", "aborted"
 };
 static uint64_t hi_time_us(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000; }
+#include "s9_hi_clock_resolve.inc"
 #include "s9_home_idle_detail.inc"
 #include "s9_home_idle_scene.inc"
 static void hi_auto_sample(uint64_t now);
@@ -97,15 +104,44 @@ hi_proxy_tick(id self,SEL cmd,id link)
     if(p==NULL || target==NULL || p->action==NULL)return;
     const unsigned group=p->group;
     const uint64_t now=hi_time_us();
+    bool exact_clock=group && hi_group_clock(group);
     if(group && group<=HI_GROUPS){
         struct hi_group *g=&hi_groups[group-1];
         __atomic_fetch_add(&g->callbacks,1,__ATOMIC_RELAXED);
         __atomic_store_n(&g->last_tick_us,now,__ATOMIC_RELEASE);
-        if(hi_auto_mode && hi_group_clock(group) &&
-           (g->last_view_us==0 || now-g->last_view_us>=UINT64_C(10000000))){
-            g->last_view_us=now;
-            hi_clock_view_snapshot(target,now);
+        if(hi_auto_mode && exact_clock){
+            if(p->last_checked==0 || now<p->last_checked ||
+               now-p->last_checked>=UINT64_C(2000000)){
+                char why[144]="";
+                enum hi_view_status state=hi_clock_resolve(target,why,sizeof(why));
+                if(state!=p->state || state==HI_VIEW_UNKNOWN)
+                    p->verified_since=state==HI_VIEW_UNKNOWN?0:now;
+                p->state=state;
+                p->last_checked=now;
+                say("hi: clock_proof up=%llus owner=%s state=%s reason=%s "
+                    "stable_for_ms=%llu policy=%u\n",
+                    (unsigned long long)(now/1000000),object_getClassName(target),
+                    hi_view_state_name(state),why,
+                    (unsigned long long)(p->verified_since && now>=p->verified_since?
+                    (now-p->verified_since)/1000:0),hi_verified_enabled?1u:0u);
+            }
+            if(g->last_view_us==0){
+                hi_clock_class_chain(target);
+                g->last_view_us=now;
+            }
         }
+    }
+    bool verified_cut=exact_clock &&
+        hi_verified_should_skip(now,__atomic_load_n(&hi_last_input,__ATOMIC_ACQUIRE),
+            p->last_forward,p->verified_since,p->state,
+            __atomic_load_n(&hi_stage,__ATOMIC_ACQUIRE)==1 &&
+                __atomic_load_n(&hi_home_ready,__ATOMIC_ACQUIRE) &&
+                hi_auto_state==HI_AUTO_FINISHED,
+            hi_event_hook_ok,exact_clock,hi_verified_enabled);
+    if(verified_cut){
+        __atomic_fetch_add(&hi_groups[group-1].verified_cuts,1,__ATOMIC_RELAXED);
+        __atomic_fetch_add(&hi_groups[group-1].cut,1,__ATOMIC_RELAXED);
+        return;
     }
     bool cut=group && group==__atomic_load_n(&hi_gate_group,__ATOMIC_ACQUIRE) &&
         s9_hi_skip(now,__atomic_load_n(&hi_gate_deadline,__ATOMIC_ACQUIRE),
@@ -260,6 +296,13 @@ hi_sample(void)
         hi_window_context_details();
         hi_scene_snapshot();
         if(tick%2==0)hi_window_anim_snapshot();
+        say("hi: verified status=%u allow=%u auto_finished=%u "
+            "home_main=%u hook=%u unknown_fail_open=1\n",
+            hi_verified_enabled?1u:0u,
+            hi_verified_enabled && hi_auto_state==HI_AUTO_FINISHED &&
+            hi_stage==1 && ready && hi_event_hook_ok?1u:0u,
+            hi_auto_state==HI_AUTO_FINISHED?1u:0u,
+            hi_stage==1?1u:0u,hi_event_hook_ok?1u:0u);
     }
     unsigned long long commits=0;
     for(unsigned i=0;i<hi_contexts_used;i++){
@@ -280,11 +323,14 @@ hi_sample(void)
         uint64_t callbacks=__atomic_exchange_n(&g->callbacks,0,__ATOMIC_ACQ_REL);
         uint64_t forwarded=__atomic_exchange_n(&g->forwarded,0,__ATOMIC_ACQ_REL);
         uint64_t cut=__atomic_exchange_n(&g->cut,0,__ATOMIC_ACQ_REL);
+        uint64_t verified=__atomic_exchange_n(&g->verified_cuts,0,__ATOMIC_ACQ_REL);
         g->last_callbacks=callbacks;
         if(callbacks || cut)
-            say("hi: link=%u target=%s action=%s ticks_5s=%llu forwarded=%llu cut=%llu fps_req=%u\n",
+            say("hi: link=%u target=%s action=%s ticks_5s=%llu forwarded=%llu "
+                "cut=%llu fps_req=%u verified_cut=%llu\n",
                 i+1,g->target,g->action,(unsigned long long)callbacks,
-                (unsigned long long)forwarded,(unsigned long long)cut,g->requested_fps);
+                (unsigned long long)forwarded,(unsigned long long)cut,
+                g->requested_fps,(unsigned long long)verified);
     }
     hi_auto_sample(now);
 }
@@ -332,6 +378,14 @@ static void
 hi_pump(void)
 {
     hi_usb_command();
+    int policy=sysctl_int("kern.hakios.hi_policy");
+    bool verified=hi_auto_mode && policy==1;
+    if(hi_verified_enabled!=verified){
+        hi_verified_enabled=verified;
+        say("hi: verified_policy=%u ui_owner_proof_required=1 "
+            "unknown_always_forwards=1 previous_auto_finished=%u\n",
+            verified?1u:0u,hi_auto_state==HI_AUTO_FINISHED?1u:0u);
+    }
     hi_sample();
     hi_auto_tick();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(),^{hi_pump();});

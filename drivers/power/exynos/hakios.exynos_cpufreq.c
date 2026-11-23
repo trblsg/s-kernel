@@ -292,6 +292,7 @@ static struct {
 SYSCTL_DECL(_kern_hakios);
 #include "hakios.p4_cpu_lab.h" /* P4: scheduler-idle and frame cadence, read-only */
 #include "hakios.p6_lab.h" /* P6: integrated opt-in wake-proxy and policy shadow */
+#include "hakios.p7_cpu_lab.h" /* P7: ring-buffered base CPU idle/wake audit */
 #include "hakios.p610_gov_diag.h" /* P6.10 pure passive state classifier */
 /* Governor-owned single-thread counters. Never evaluated in the IRQ/frame callback. */
 static struct s9_p610_window p610_stats;
@@ -1450,6 +1451,7 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 		}
 		measure(now - then > 0 ? now - then : 1);
 		p4_cpu_probe(now); /* on-demand 5s read-only, no new kernel thread */
+		p7_cpu_probe(now); /* P7 ring captures USB-disconnected samples */
 		if (__atomic_load_n(&p6_mode,__ATOMIC_RELAXED)) {
 			__atomic_fetch_add(&p6_windows,1,__ATOMIC_RELAXED);
 			p6_probe(now);

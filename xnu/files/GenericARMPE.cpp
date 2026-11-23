@@ -18,6 +18,7 @@ extern "C" {
 #include <IOKit/IOLib.h>
 #include <IOKit/IOCPU.h>
 #include <kern/clock.h>
+#include <sys/errno.h>
 #include <kern/thread_call.h>
 
 #include "MiniDrivers.h"
@@ -230,7 +231,39 @@ static GenericARMCPU ** gCPUList;               /* GenericARMPE::start()'s cpus[
 static uint32_t gPanelSleep, gSleepCores, gSleepCoresAfter = 10;
 static thread_call_t gSleepCoresCall;
 static volatile int gDisplayOn = -1;            /* -1: not said yet */
+/* P7 read-only display request, NOT proof of panel/DECON power state. */
+extern "C" int
+hakios_display_requested_on(void)
+{
+    return gDisplayOn;
+}
 static uint32_t gParked;                        /* the cores taken off (only gSleepCoresCall touches it) */
+/* P7: even with boot arg sleep_cores=1, no CPU_OFF is attempted until
+ * a runtime sysctl enables this tested-offscreen experiment explicitly.
+ * Disable requests unpark BIG cores, even while screen still dark. */
+static volatile uint32_t gP7ParkEnabled;
+extern "C" int
+hakios_p7_cpu_park(unsigned enable)
+{
+    if(enable>1)return EINVAL;
+    if(enable && (gSleepCores!=1 || gSleepCoresCall==NULL))return ENODEV;
+    __atomic_store_n(&gP7ParkEnabled,enable,__ATOMIC_RELEASE);
+    if(gSleepCoresCall){
+        thread_call_cancel(gSleepCoresCall);
+        if(enable && gDisplayOn==0){
+            uint64_t deadline;
+            clock_interval_to_deadline(gSleepCoresAfter,NSEC_PER_SEC,&deadline);
+            thread_call_enter_delayed(gSleepCoresCall,deadline);
+        }else if(!enable){
+            /* The worker must run to UNPARK even if display stays OFF. */
+            thread_call_enter(gSleepCoresCall);
+        }
+    }
+    hakios_say("p7-cpu: park_requested=%u boot_support=%u "
+        "display_requested_on=%d cpu_off_only_after_screen_off=1\n",
+        enable,gSleepCores==1?1u:0u,gDisplayOn);
+    return 0;
+}
 
 static bool
 sleepCoreWanted(unsigned int number)
@@ -238,7 +271,8 @@ sleepCoreWanted(unsigned int number)
 	const ml_topology_info_t * topology = ml_get_topology_info();
 	bool performance;
 
-	if (gCPUList == NULL || gCPUList[number] == NULL || number == (unsigned int)master_cpu ||
+	if (!__atomic_load_n(&gP7ParkEnabled,__ATOMIC_ACQUIRE) ||
+	    gCPUList == NULL || gCPUList[number] == NULL || number == (unsigned int)master_cpu ||
 	    psci_smp_cpu_is_loaders((int)number) || gCPUList[number]->getCPUState() != kIOCPUStateRunning) {
 		return false;
 	}
@@ -296,7 +330,7 @@ sleepCoresWork(thread_call_param_t, thread_call_param_t)
 			    master_cpu, processor_avail_count);
 		}
 	}
-	if (gDisplayOn != 0 && gParked != 0) {
+	if ((gDisplayOn != 0 || !__atomic_load_n(&gP7ParkEnabled,__ATOMIC_ACQUIRE)) && gParked != 0) {
 		for (unsigned int number = 0; number < MAX_CPUS && number < 32; number++) {
 			if (!(gParked & (1u << number))) {
 				continue;
@@ -358,8 +392,9 @@ screenPowerInit(void)
 	if (gSleepCores != 0 && ml_get_cpu_count() > 1) {
 		gSleepCoresCall = thread_call_allocate_with_options(sleepCoresWork, NULL, THREAD_CALL_PRIORITY_KERNEL,
 		    THREAD_CALL_OPTIONS_ONCE);
-		hakios_say("GenericARMPE: sleep_cores=%u: %s taken off %u s after the screen goes off\n", gSleepCores,
-		    gSleepCores >= 2 ? "every core but the boot processor (and the loader's)" : "the performance cores",
+		hakios_say("GenericARMPE: sleep_cores=%u: candidate=%s after %u s display OFF; "
+		    "P7 runtime gate defaults 0; requires kern.hakios.p7_cpu_park=1 to attempt CPU_OFF\n", gSleepCores,
+		    gSleepCores >= 2 ? "every core except boot/loader" : "performance BIG cores",
 		    gSleepCoresAfter);
 	}
 }

@@ -162,6 +162,12 @@ SYSCTL_DECL(_kern_hakios);              /* the node is drivers/core/hakios.platf
  * hi_cmd is never read by the kernel render/PM paths: SpringBoard polls it
  * only when booted with hi=1, and validates each request before acting.
  * USB's built-in 'sysctl' command can set it (no shell/notify command there). */
+/* P7/Clock: 0=observe; 1=verified-offscreen-only experimental policy.
+ * Mode=1 does not bypass SpringBoard's independent view/owner proof. */
+static uint32_t hi_policy;
+SYSCTL_UINT(_kern_hakios, OID_AUTO, hi_policy,
+    CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY | CTLFLAG_KERN,
+    &hi_policy, 0, "S9 Clock visibility-verified reduction; OFF unless explicitly 1");
 static uint32_t hi_cmd;
 SYSCTL_UINT(_kern_hakios, OID_AUTO, hi_cmd, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY | CTLFLAG_KERN,
     &hi_cmd, 0, "S9 Home idle oneboot: 0 stop; 1 main; 2 secondary; 3 Settings; 101..148 gate source; 199 top; 200 layers; 201 stop");
@@ -2765,6 +2771,7 @@ g3d_sleep_ms_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unu
 SYSCTL_PROC(_kern_hakios, OID_AUTO, g3d_sleep_ms, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
     g3d_sleep_ms_sysctl, "I", "the screen-off grace for g3d_sleep=, ms (500..60000)");
 
+#include "hakios.p7_gpu_lab.h" /* P7 durable G3D PMU/PLL state ring */
 #include "hakios.mali_lab.h" /* G3D independent OFF-state sampler, reused by P5 */
 #include "hakios.p5_lab.h"   /* P5 per-client/PMU read-only probes; mode0 off */
 

@@ -22,13 +22,17 @@ g3d_lab_mon(__unused void *arg, __unused wait_result_t why)
 		 * Only PMU/CMU (outside G3D) are read; never touch GPU MMIO. */
 		if (!g3d_lab_gate && g3d_lab_mv == 950 && !g3d_lab_rail_probe &&
 		    !g3d_lab_fault && !g3d_lab_phase && !__atomic_load_n(&p68_mode,__ATOMIC_RELAXED) &&
-		    !__atomic_load_n(&p5_mode,__ATOMIC_RELAXED))
+		    !__atomic_load_n(&p5_mode,__ATOMIC_RELAXED) &&
+		    !__atomic_load_n(&p7_gpu_mode,__ATOMIC_RELAXED))
 			continue;
 		if (pmu == 0 || cmu_g3d == 0)
 			continue;
 
 		lck_mtx_lock(&mali_job_lock);
 		now = mach_absolute_time();
+		/* P7 only: auto-expire any real long-quiet gate started during a
+		 * connected serial A/B. This remains live if the host unplugs. */
+		p7_gpu_gate_watchdog(now);
 		absolutetime_to_nanoseconds(now, &up_ns);
 		status = rd(pmu, PMU_G3D_STATUS);
 		pll = rd(cmu_g3d, PLL_CON0);
@@ -87,6 +91,8 @@ g3d_lab_mon(__unused void *arg, __unused wait_result_t why)
 		 * no GPU jobs while the display is off. */
 		if (__atomic_load_n(&p5_mode,__ATOMIC_RELAXED))
 			p5_monitor_snapshot(now,up_ns,status,pll,mux,awake_state != 0);
+		if (__atomic_load_n(&p7_gpu_mode,__ATOMIC_RELAXED))
+			p7_gpu_store(now,up_ns,status,pll,mux,awake_state!=0);
 		if (__atomic_load_n(&p68_mode,__ATOMIC_RELAXED)) {
 			const uint64_t jf=__atomic_load_n(&g3d_last_busy,__ATOMIC_RELAXED);
 			const uint64_t ff=__atomic_load_n(&gov_frame_last,__ATOMIC_RELAXED);

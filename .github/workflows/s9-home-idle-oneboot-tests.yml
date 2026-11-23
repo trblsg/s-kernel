@@ -1,7 +1,7 @@
 name: S9 Home Idle one-boot A/B
 on:
   push:
-    branches: [s9/home-idle-oneboot-ab]
+    branches: [s9/home-idle-oneboot-ab, s9/p7-clock-basepower-oneboot]
   workflow_dispatch:
 permissions:
   contents: read
@@ -23,6 +23,12 @@ jobs:
           /tmp/s9_auto_c
           c++ -x c++ -std=c++17 -O2 -Wall -Wextra -Werror -pedantic -fsanitize=undefined tools/tests/test_s9_hi_auto_policy.c -o /tmp/s9_auto_cpp
           /tmp/s9_auto_cpp
+      - name: Clock runtime visibility policy C11/C++17 UBSan
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror -pedantic -fsanitize=undefined tools/tests/test_s9_hi_verified_policy.c -o /tmp/s9_verified_c
+          /tmp/s9_verified_c
+          c++ -x c++ -std=c++17 -O2 -Wall -Wextra -Werror -pedantic -fsanitize=undefined tools/tests/test_s9_hi_verified_policy.c -o /tmp/s9_verified_cpp
+          /tmp/s9_verified_cpp
       - name: Boot-args catalog and integration guards
         run: |
           python3 tools/boot-args.py --check
@@ -100,6 +106,50 @@ jobs:
           assert 'com.hakios.hi.stop' in inc
           assert 'mali_gov_frame=450' in doc and 'max77705_fg_s=10' in doc
           assert 'glFlush' not in inc and 'glFinish' not in inc
+          # P7 Clock + SoC base-power full source gate; no fabricated C2
+          # or unverified offscreen operation may pass.
+          proof = Path('userland/src/s9_hi_clock_resolve.inc').read_text()
+          verified = Path('userland/src/s9_hi_verified_policy.h').read_text()
+          g3d = Path('drivers/gpu/mali/hakios.p7_gpu_lab.h').read_text()
+          cpu = Path('drivers/power/exynos/hakios.p7_cpu_lab.h').read_text()
+          cdrv = Path('drivers/power/exynos/hakios.exynos_cpufreq.c').read_text()
+          arm = Path('xnu/files/GenericARMPE.cpp').read_text()
+          g3dlab = Path('drivers/gpu/mali/hakios.mali_lab.h').read_text()
+          doc7=Path('docs/s9-p7-clock-basepower-unified.md').read_text()
+          assert 'hi_view_state(id view' in proof and 'class_copyIvarList' in proof
+          assert 'HI_VIEW_UNKNOWN' in verified and 'hi_verified_should_skip' in verified
+          assert 'hi_verified_should_skip(' in inc and 'verified_cut=' in inc
+          assert 'hi_auto_state==HI_AUTO_FINISHED' in inc
+          assert 'SYSCTL_UINT(_kern_hakios, OID_AUTO, hi_policy' in kernel
+          assert 'hi_verified_enabled=verified' in inc
+          assert 'p7_cpu_probe(now);' in cdrv
+          assert '#include "hakios.p7_cpu_lab.h"' in cdrv
+          for src in ('p7_cpu_mode','p7_cpu_phase','p7_cpu_slot','p7_cpu_record',
+                      'p7_cpu_stats','p7_cpu_park'):
+              assert src in cpu,src
+          assert 'extern int hakios_p7_cpu_park(unsigned enable);' in cpu
+          assert 'hakios_p7_cpu_park(unsigned enable)' in arm
+          assert 'gP7ParkEnabled' in arm and 'thread_call_enter(gSleepCoresCall)' in arm
+          assert 'p7_gpu_store(now,up_ns,status,pll,mux,awake_state!=0);' in g3dlab
+          assert 'p7_gpu_gate_watchdog(now);' in g3dlab
+          for src in ('p7_gpu_mode','p7_gpu_phase','p7_gpu_slot','p7_gpu_record',
+                      'p7_gpu_stats','p7_gpu_gate_watchdog'):
+              assert src in g3d,src
+          assert 'p7_gpu_gate_until' in g3d and 'g3d_lab_protection_ok' in g3d
+          assert 'g3d_lab_trip(7)' in g3d
+          assert 'GPU_MMIO=0' in g3d and 'deep_C2_CPD_SICD=unmeasured' in cpu
+          assert '-P7Unified' in doc7 and '-ActiveG3DGate' in doc7
+          assert '-ActiveCpuPark' in doc7 and 'sleep_cores=1' in doc7
+          assert '-DumpP7History' in doc7
+          for value in ('p7_cpu_mode=1','p7_gpu_mode=1','hi_policy=1',
+                        'g3d_lab_gate=3','p7_cpu_park=1','Dump-P7-Rings'):
+              assert value in runner,value
+          extra='shub=6 bt=7 fps_log=1 metal=2 camtl=0 '
+          unified=next(s for s in doc7.splitlines() if s.startswith('hi=2 sleep_cores=1 '))
+          assert len(unified.encode()) == 177, len(unified)
+          assert len((extra+unified).encode())==215
+          assert len((extra+unified).encode())<=280
+          print('P7 integrated CPU/GPU rings, visibility proof, guarded power and bootargs budget PASS')
           print('hi: source+mailbox+guard+rollback layout verified')
           PY
   report-parser:
@@ -142,7 +192,13 @@ jobs:
                               'auto-cut2','auto-recover2','cut=92')) {
             if (!$auto.Contains($value)) { throw "Autonomous cross-over report missing: $value" }
           }
-          Write-Host "S9 HomeIdle report parser OK (manual, EPERM, auto A/B/A/B)"
+          $p7 = (& ./tools/s9-p7-basepower-report.ps1 -Log tools/tests/s9-p7-basepower-fixture.log) -join "`n"
+          foreach ($value in @('5 labelled phases','unknown=1 visible=0 detached=1',
+                              'strictly verified cuts=44','G3D_off=1/1',
+                              'BIG CPU_OFF=1 CPU_ON=1','USB_calls/s=495.0')) {
+            if (!$p7.Contains($value)) { throw "P7 phase report missing: $value" }
+          }
+          Write-Host "S9 HomeIdle+P7 report parsers OK (manual, EPERM, ABAB, PMU/CPU/Clock proof)"
   springboard-syntax:
     runs-on: macos-15
     timeout-minutes: 12

@@ -1,0 +1,25 @@
+hi: auto=FINISHED up=400s runs=2 controls_restored=1 manual_hi_cmd_still_available=1
+hi: verified_policy=1 ui_owner_proof_required=1 unknown_always_forwards=1 previous_auto_finished=1
+hi: clock_proof up=401s owner=SBHClockApplicationIconImageView state=unknown reason=no_verified_UIView_owner stable_for_ms=0 policy=1
+hi: clock_proof up=403s owner=SBHClockApplicationIconImageView state=detached reason=UIView.window_nil stable_for_ms=0 policy=1
+hi: link=3 target=SBHClockApplicationIconImageView action=_timerFired: ticks_5s=51 forwarded=7 cut=44 fps_req=10 verified_cut=44
+p7-cpu: mode=1 ring=96 sample_ms=5000 core_idle=scheduler_only deep_C2_CPD_SICD=unmeasured no_power_writes=1
+p7-gpu: mode=1 ring=96 sampled_by=existing_G3D_5s_worker power_changes=0 GPU_MMIO=0
+p7-cpu: up=411000ms phase=11 disp=1 idle_lit=99% idle_big=92% lit_online=4 big_online=4 mhz=1053/650 exit=0 usb_valid=1 usb_delta=2475 usb_connected=2475 touch_valid=1 touch_delta=1250 deep_C2_CPD_SICD=unmeasured
+p7-gpu: up=411000ms phase=11 domain=1 pll=1 awake=1 clock=260MHz frame_age_ms=12000 job_age_ms=12000 off_total_ms=0 off=0 wake=0 wake_fail=0 gate=0 fault=0 gpu_safe=1 tz_ok=1 rail_valid=1 rail_mv=950 g3d_mc=70000 source=PMU_CMU_5s_not_watts
+p7-cpu: up=416000ms phase=11 disp=1 idle_lit=99% idle_big=95% lit_online=4 big_online=4 mhz=1053/650 exit=0 usb_valid=1 usb_delta=2475 usb_connected=2475 touch_valid=1 touch_delta=1250 deep_C2_CPD_SICD=unmeasured
+p7-gpu: up=416000ms phase=11 domain=1 pll=1 awake=1 clock=260MHz frame_age_ms=17000 job_age_ms=17000 off_total_ms=0 off=0 wake=0 wake_fail=0 gate=0 fault=0 gpu_safe=1 tz_ok=1 rail_valid=1 rail_mv=950 g3d_mc=69000 source=PMU_CMU_5s_not_watts
+p7-cpu: up=510000ms phase=20 disp=1 idle_lit=99% idle_big=95% lit_online=4 big_online=4 mhz=1053/650 exit=0 usb_valid=1 usb_delta=2475 usb_connected=2475 touch_valid=1 touch_delta=1250 deep_C2_CPD_SICD=unmeasured
+p7-gpu: up=510000ms phase=20 domain=1 pll=1 awake=1 clock=260MHz frame_age_ms=80000 job_age_ms=80000 off_total_ms=0 off=0 wake=0 wake_fail=0 gate=1 fault=0 gpu_safe=1 tz_ok=1 rail_valid=1 rail_mv=950 g3d_mc=65000 source=PMU_CMU_5s_not_watts
+p7-gpu: gate_watchdog=ARMED max_seconds=120 automatic_restore_even_without_COM=1
+p7-cpu: up=600000ms phase=21 disp=1 idle_lit=99% idle_big=96% lit_online=4 big_online=4 mhz=1053/650 exit=0 usb_valid=1 usb_delta=2475 usb_connected=2475 touch_valid=1 touch_delta=1250 deep_C2_CPD_SICD=unmeasured
+p7-gpu: up=600000ms phase=21 domain=0 pll=0 awake=0 clock=0MHz frame_age_ms=170000 job_age_ms=170000 off_total_ms=50000 off=1 wake=0 wake_fail=0 gate=3 fault=0 gpu_safe=1 tz_ok=1 rail_valid=1 rail_mv=950 g3d_mc=59000 source=PMU_CMU_5s_not_watts
+p7-gpu: gate_watchdog=RESTORED gate=0 domain=ON gpu_safe=1 tz_ok=1 voltage_policy_unchanged=1
+GenericARMPE: sleep_cores: cpu 4 taken off (0) in 390 us, 8 of its interrupts to cpu 1 first; 7 processors running
+p7-cpu: up=700000ms phase=31 disp=0 idle_lit=99% idle_big=98% lit_online=4 big_online=3 mhz=1053/650 exit=0x10 usb_valid=1 usb_delta=2475 usb_connected=2475 touch_valid=1 touch_delta=1250 deep_C2_CPD_SICD=unmeasured
+p7-gpu: up=700000ms phase=31 domain=0 pll=0 awake=0 clock=0MHz frame_age_ms=270000 job_age_ms=270000 off_total_ms=145000 off=2 wake=1 wake_fail=0 gate=0 fault=0 gpu_safe=1 tz_ok=1 rail_valid=1 rail_mv=950 g3d_mc=59000 source=PMU_CMU_5s_not_watts
+GenericARMPE: sleep_cores: cpu 4 started again (0) in 400 us; 8 processors running
+usb: kern.hakios.p7_cpu_record = seq=50 up_ms=700000 phase=31 disp=0
+usb: kern.hakios.p7_gpu_record = seq=50 up_ms=700000 phase=31 domain=0
+usb: kern.hakios.p7_cpu_record = seq=70 up_ms=800000 phase=40 disp=0 lit_idle=99 big_idle=96 lit_on=4 big_on=4 mhz=1053/650 exit=0 usb_valid=1 usb_delta=240 usb_connected=0 touch_valid=1 touch_delta=1250 deep=unmeasured
+usb: kern.hakios.p7_gpu_record = seq=71 up_ms=800000 phase=40 domain=0 pll=0 awake=0 clock=0 rail_valid=1 rail_mv=950 frame_age=260000 job_age=260000 off_ms=175000 off=2 wake=1 fail=0 gate=0 fault=0 gpu_safe=1 tz_ok=1 g3d_mc=59000

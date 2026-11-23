@@ -38,6 +38,10 @@ param(
     [string]$LogPath='',
     [string]$ReplayLog='',
     [switch]$SkipSettings,
+    [switch]$P7Unified,
+    [switch]$ActiveG3DGate,
+    [switch]$ActiveCpuPark,
+    [switch]$DumpP7History,
     [switch]$Execute
 )
 Set-StrictMode -Version 2
@@ -55,6 +59,10 @@ $script:AutoAbortCount=0
 $script:BootProven=$false
 $script:SceneSettings=$false
 $script:SceneHome=$false
+$script:DisplayOff=$false
+$script:DisplayOn=$false
+$script:ParkedCount=0
+$script:UnparkedCount=0
 $script:LatestClockTicks=0
 $script:BatteryC=0.0
 $script:BatteryStop=$false
@@ -64,7 +72,7 @@ $script:Started=$false
 $script:PreflightPassed=$false
 $script:SafeStopNeeded=$false
 $script:Completed=$false
-$script:Allowed='^(?:sysctl kern\.hakios\.(?:hi_cmd(?:=(?:2|3|201|250|252|300|301))?|mali_gov_frame)|button home|swipe l 1 350 1000)$'
+$script:Allowed='^(?:sysctl kern\.hakios\.(?:hi_cmd(?:=(?:1|2|3|201|250|252|300|301))?|mali_gov_frame|hi_policy(?:=[01])?|p7_(?:cpu|gpu)_(?:mode=[01]|phase=\d{1,2}|slot=\d{1,2}|stats|record|park=[01])|g3d_lab_(?:gate=[013]|idle_ms=10000|rail_probe=[01]|stats))|button (?:home|lock)|swipe l 1 350 1000)$'
 function Say([string]$Message){
     $record=('{0:yyyy-MM-ddTHH:mm:ss.fffZ} {1}' -f [datetime]::UtcNow,$Message)
     $script:Events.Add($record)
@@ -100,6 +108,25 @@ function Scan-Line([string]$Line){
     }
     if($Line -match '^hi: link=\d+ target=SBHClockApplicationIconImageView action=_timerFired: ticks_5s=(\d+)'){
         $script:LatestClockTicks=[int]$Matches[1]
+    }
+    if($Line -match '^(p7-cpu:|p7-gpu:|g3d-lab: FAULT|g3d-lab: gate timeout|hi: verified_policy=|hi: clock_proof)'){
+        Say ('DEVICE '+$Line.Substring(0,[Math]::Min($Line.Length,250)))
+    }
+    if($Line -match '^GenericARMPE: the display off'){
+        $script:DisplayOff=$true;$script:DisplayOn=$false
+        Say 'DEVICE display request=OFF'
+    }
+    if($Line -match '^GenericARMPE: the display on'){
+        $script:DisplayOn=$true;$script:DisplayOff=$false
+        Say 'DEVICE display request=ON'
+    }
+    if($Line -match '^GenericARMPE: sleep_cores: cpu \d+ taken off'){
+        $script:ParkedCount++
+        Say ('DEVICE '+$Line.Substring(0,[Math]::Min(240,$Line.Length)))
+    }
+    if($Line -match '^GenericARMPE: sleep_cores: cpu \d+ started again'){
+        $script:UnparkedCount++
+        Say ('DEVICE '+$Line.Substring(0,[Math]::Min(240,$Line.Length)))
     }
     if($Line -match '^hi: scene home=(\d+) .+settings_confirmed=(\d+)'){
         $script:SceneHome=($Matches[1] -eq '1')
@@ -171,13 +198,11 @@ function Send-Checked([string]$Cmd,[string]$Additional='',[int]$ExtraAppWaitSeco
     $script:Serial.Write($payload,0,$payload.Length)
     Say ("TX $Cmd")
     $echo='usb> '+$Cmd
-    if($Cmd -match '^sysctl kern\.hakios\.hi_cmd=(\d+)$'){
+    if($Cmd -match '^sysctl (kern\.hakios\.[A-Za-z0-9_]+)=(\d+)$'){
         $ack='usb: '+$Cmd+': set (0)'
-    }elseif($Cmd -match '^sysctl kern\.hakios\.hi_cmd$'){
-        $ack='usb: kern.hakios.hi_cmd = '
-    }elseif($Cmd -eq 'sysctl kern.hakios.mali_gov_frame'){
-        $ack='usb: kern.hakios.mali_gov_frame = '
-    }elseif($Cmd -eq 'button home'){
+    }elseif($Cmd -match '^sysctl (kern\.hakios\.[A-Za-z0-9_]+)$'){
+        $ack='usb: '+$Matches[1]+' = '
+    }elseif($Cmd -eq 'button home' -or $Cmd -eq 'button lock'){
         $ack='usb: button: pressed and let go'
     }elseif($Cmd -eq 'swipe l 1 350 1000'){
         $ack='usb: swipe: done'
@@ -211,8 +236,36 @@ function Check-Auto-Crossover{
         throw ('Incomplete auto phase order; expected '+($want -join ',')+' got '+($got -join ','))
     }
 }
+function Dump-P7-Rings{
+    Say 'P7 OFFLINE HISTORY: retrieve up to 96 samples per ring, no CPU/GPU power writes'
+    Send-Checked 'sysctl kern.hakios.p7_cpu_stats'
+    Send-Checked 'sysctl kern.hakios.p7_gpu_stats'
+    for($slot=0;$slot -lt 96;$slot++){
+        Send-Checked ("sysctl kern.hakios.p7_cpu_slot="+$slot)
+        Send-Checked 'sysctl kern.hakios.p7_cpu_record'
+        Send-Checked ("sysctl kern.hakios.p7_gpu_slot="+$slot)
+        Send-Checked 'sysctl kern.hakios.p7_gpu_record'
+    }
+    Say 'P7 all retained kernel RAM samples captured. Reconnect after battery-only idle.'
+}
 function Run-Scenario{
-    Say 'S9 HI2: direct USB COM logger; no PuTTY, no GUI SendKeys'
+    Say 'S9 HI2 + P7: direct USB COM logger; no PuTTY, no GUI SendKeys'
+    if($DumpP7History){
+        Dump-P7-Rings
+        $script:Completed=$true
+        return
+    }
+    if(($ActiveG3DGate -or $ActiveCpuPark) -and -not $P7Unified){throw 'ActiveG3DGate and ActiveCpuPark require P7Unified'}
+    if($P7Unified){
+        Send-Checked 'sysctl kern.hakios.p7_cpu_mode=1' 'p7-cpu: mode=1'
+        Send-Checked 'sysctl kern.hakios.p7_gpu_mode=1' 'p7-gpu: mode=1'
+        Send-Checked 'sysctl kern.hakios.g3d_lab_rail_probe=1' 'g3d-lab: 30-second read-only PMIC sampler=1'
+        Send-Checked 'sysctl kern.hakios.p7_cpu_phase=10'
+        Send-Checked 'sysctl kern.hakios.p7_gpu_phase=10'
+        Send-Checked 'sysctl kern.hakios.p7_cpu_stats'
+        Send-Checked 'sysctl kern.hakios.p7_gpu_stats'
+        Say 'P7 baseline CPU/GPU PMU history recording (kernel-ring; also captures USB disconnected epochs)'
+    }
     Send-Checked 'sysctl kern.hakios.hi_cmd'
     Send-Checked 'sysctl kern.hakios.mali_gov_frame'
     # A previous PuTTY/manual run can leave the mailbox at 250. Force a
@@ -236,12 +289,47 @@ function Run-Scenario{
     } -Thermal
     Check-Auto-Crossover
     Say 'COMPLETE: Clock causal A/B/A/B; all 5 phase markers confirmed'
+    if($P7Unified){
+        Send-Checked 'sysctl kern.hakios.p7_cpu_phase=11'
+        Send-Checked 'sysctl kern.hakios.p7_gpu_phase=11'
+        Send-Checked 'sysctl kern.hakios.hi_cmd=1' 'hi: mark=main'
+        Send-Checked 'sysctl kern.hakios.hi_policy=1' 'hi: verified_policy=1'
+        Rest 'Verified-offscreen-only Clock policy ON; UNKNOWN must fail open' 85
+        Send-Checked 'sysctl kern.hakios.hi_policy=0' 'hi: verified_policy=0'
+        Rest 'Clock policy restored: baseline contrast on main Home' 45
+        Send-Checked 'sysctl kern.hakios.p7_cpu_phase=12'
+        Send-Checked 'sysctl kern.hakios.p7_gpu_phase=12'
+    }
     # Verify a physical one-stroke Home navigation completed before
     # assigning the secondary-stage label to any later serial metrics.
     Send-Checked 'swipe l 1 350 1000'
     Rest 'Secondary settle' 4
     Send-Checked 'sysctl kern.hakios.hi_cmd=2' 'hi: mark=secondary'
     Rest 'Secondary Home low-load comparison' $SecondarySeconds
+    if($P7Unified){
+        Send-Checked 'sysctl kern.hakios.p7_cpu_phase=20'
+        Send-Checked 'sysctl kern.hakios.p7_gpu_phase=20'
+        Send-Checked 'sysctl kern.hakios.g3d_lab_gate=1' 'g3d-lab: gate mode=1'
+        Rest 'P7 G3D quiet shadow (NO power writes)' 65
+        if($ActiveG3DGate){
+            # Existing driver demands safe GPU/TZ, default 950mV, no DVS,
+            # and makes a validated domain power cycle. Kernel P7 watchdog
+            # restores gate=0 after 120s even if the host disappears.
+            Send-Checked 'sysctl kern.hakios.g3d_lab_idle_ms=10000'
+            Send-Checked 'sysctl kern.hakios.p7_gpu_phase=21'
+            Send-Checked 'sysctl kern.hakios.p7_cpu_phase=21'
+            Send-Checked 'sysctl kern.hakios.g3d_lab_gate=3' 'g3d-lab: gate mode=3'
+            Rest 'P7 real G3D quiet power gating (bounded; no voltage changes)' 80
+            Send-Checked 'sysctl kern.hakios.g3d_lab_gate=0' 'g3d-lab: gate mode=0'
+            Send-Checked 'sysctl kern.hakios.g3d_lab_stats'
+            Say 'G3D gate restored, read back off/wake/fault counters'
+        }else{
+            Send-Checked 'sysctl kern.hakios.g3d_lab_gate=0' 'g3d-lab: gate mode=0'
+            Say 'P7 real G3D OFF skipped (safe default); opt-in with -ActiveG3DGate'
+        }
+        Send-Checked 'sysctl kern.hakios.p7_cpu_phase=22'
+        Send-Checked 'sysctl kern.hakios.p7_gpu_phase=22'
+    }
     if(-not $SkipSettings){
         # Existing entitled battery_test open URL implementation, invoked by
         # a separate subprocess from SpringBoard only after auto FINISHED.
@@ -262,11 +350,46 @@ function Run-Scenario{
         Send-Checked 'sysctl kern.hakios.hi_cmd=3' 'hi: mark=settings'
         Rest 'Settings stable comparison' $SettingsSeconds
     }else{Say 'Settings intentionally skipped by -SkipSettings'}
+    if($P7Unified -and $ActiveCpuPark){
+        Say 'P7 CPU OFF baseline vs opt-in CPU_OFF; requires boot sleep_cores=1'
+        Send-Checked 'sysctl kern.hakios.p7_cpu_phase=30'
+        Send-Checked 'sysctl kern.hakios.p7_gpu_phase=30'
+        $script:DisplayOff=$false
+        Send-Checked 'button lock'
+        Wait-For 'display OFF baseline request' 30 {$script:DisplayOff} -Thermal
+        Rest 'P7 screen-OFF baseline, BIG still online (park=0)' 75
+        $script:DisplayOn=$false
+        Send-Checked 'button lock'
+        Wait-For 'display ON from baseline' 45 {$script:DisplayOn} -Thermal
+        Rest 'Screen wake stabilization' 12
+        Send-Checked 'sysctl kern.hakios.p7_cpu_park=1' 'p7-cpu: park_requested=1'
+        Send-Checked 'sysctl kern.hakios.p7_cpu_phase=31'
+        Send-Checked 'sysctl kern.hakios.p7_gpu_phase=31'
+        $script:DisplayOff=$false
+        $script:ParkedCount=0
+        Send-Checked 'button lock'
+        Wait-For 'display OFF before CPU power down' 30 {$script:DisplayOff} -Thermal
+        Wait-For 'BIG CPU_OFF confirmed (not scheduler-idle)' 45 {$script:ParkedCount -ge 1} -Thermal
+        Rest 'P7 opt-in BIG CPU_OFF residency measurement' 75
+        $script:DisplayOn=$false
+        Send-Checked 'button lock'
+        Wait-For 'display ON after BIG CPU_OFF' 50 {$script:DisplayOn} -Thermal
+        Send-Checked 'sysctl kern.hakios.p7_cpu_park=0' 'p7-cpu: park_requested=0'
+        Rest 'P7 BIG cores wake/restore and recovery window' 35
+        Send-Checked 'sysctl kern.hakios.p7_cpu_phase=32'
+        Send-Checked 'sysctl kern.hakios.p7_gpu_phase=32'
+    }
+    if($P7Unified){
+        Send-Checked 'sysctl kern.hakios.p7_cpu_stats'
+        Send-Checked 'sysctl kern.hakios.p7_gpu_stats'
+        Send-Checked 'sysctl kern.hakios.p7_cpu_record'
+        Send-Checked 'sysctl kern.hakios.p7_gpu_record'
+    }
     $script:Completed=$true
 }
 function Invoke-Report{
     if(-not $script:LogPathFinal -or -not(Test-Path -LiteralPath $script:LogPathFinal)){return}
-    $stem=[IO.Path]::ChangeExtension($script:LogPathFinal,$null)
+    $stem=([IO.Path]::ChangeExtension($script:LogPathFinal,$null)).TrimEnd('.')
     $events=$stem+'.events.txt'
     [IO.File]::WriteAllLines($events,$script:Events.ToArray(),[Text.UTF8Encoding]::new($false))
     Say ('HOST EVENTS: '+$events)
@@ -279,6 +402,18 @@ function Invoke-Report{
             Say ('AUTO REPORT: '+$report)
             foreach($line in @($result)){Write-Host $line}
         }catch{Say ('REPORT FAILED but RAW LOG preserved: '+$_.Exception.Message)}
+    }
+    if($P7Unified -or $DumpP7History){
+        $p7report=$stem+'.p7-report.txt'
+        $p7parser=Join-Path $PSScriptRoot 's9-p7-basepower-report.ps1'
+        if(Test-Path $p7parser){
+            try{
+                $lines=& $p7parser -Log $script:LogPathFinal 2>&1
+                $lines|Out-File -LiteralPath $p7report -Encoding UTF8
+                Say ('P7 BASE POWER REPORT: '+$p7report)
+                foreach($line in @($lines)){Write-Host $line}
+            }catch{Say ('P7 report failed but RAW LOG preserved: '+$_.Exception.Message)}
+        }
     }
     Say ('RAW LOG: '+$script:LogPathFinal)
 }
@@ -294,8 +429,10 @@ if($ReplayLog){
 Say ('S9 HI2 SERIAL AUTO: '+$(if($Execute){'EXECUTE'}else{'PREVIEW'}))
 if(-not $Execute){
     Say 'Preview: close PuTTY then re-run with -Port COMxxx -Execute; it will log DIRECTLY over USB.'
-    Say 'Preflight read sysctl+ping(250), button home, rearm(252), wait 5 auto markers, swipe, mark secondary, spawn+verify Settings.'
-    Say ('Safety: battery-stop '+$BatteryStopC+'C; no GPU voltage, sysctl governor or GL changes.')
+    Say 'Preflight read sysctl+ping(250), Home, rearm(252), Clock A/B/A/B, verified Clock policy and P7 CPU/GPU sampled ring, secondary, G3D shadow, Settings.'
+    if($ActiveCpuPark){Say 'EXPLICIT CPU_OFF A/B requested: requires sleep_cores=1 in verified bootargs, button lock, positive OFF/ON/CPU_OFF proof'}
+    if($DumpP7History){Say 'OFFLINE DUMP mode: 96 CPU+GPU ring rows collected after USB reconnect (no device state changes)'}
+    Say ('Safety: battery-stop '+$BatteryStopC+'C; P7Unified read-only by default; -ActiveG3DGate and -ActiveCpuPark are EXPLICIT optional power transitions; CPU park requires boot sleep_cores=1.')
     return
 }
 if($env:OS -ne 'Windows_NT'){throw 'The direct COM harness requires Windows PowerShell'}
@@ -334,8 +471,16 @@ try{
 }finally{
     if($script:Started){
         try{
+            if($P7Unified){
+                Send-Checked 'sysctl kern.hakios.hi_policy=0'
+                Send-Checked 'sysctl kern.hakios.p7_cpu_park=0'
+                Send-Checked 'sysctl kern.hakios.g3d_lab_gate=0'
+                Send-Checked 'sysctl kern.hakios.g3d_lab_rail_probe=0'
+                Send-Checked 'sysctl kern.hakios.p7_cpu_mode=0'
+                Send-Checked 'sysctl kern.hakios.p7_gpu_mode=0'
+            }
             Send-Checked 'sysctl kern.hakios.hi_cmd=201' 'hi: gate=usb-stop'
-        }catch{Say ('CLEANUP UNCONFIRMED (any cut has a 20-second hard deadline): '+$_.Exception.Message)}
+        }catch{Say ('CLEANUP UNCONFIRMED; safe Clock forward + optional G3D watchdog still apply: '+$_.Exception.Message)}
     }
     if($null -ne $script:Raw){
         try{$script:Raw.Flush()}catch{}
