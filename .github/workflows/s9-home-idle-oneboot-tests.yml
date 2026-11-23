@@ -282,6 +282,23 @@ jobs:
           # or a handset. A successful sysctl write MUST NOT suffice.
           $powerFixture='tools/tests/s9-p7-power-ab-fixture.log'
           $negativeFixture='tools/tests/s9-p7-power-ab-negative-fixture.log'
+          function Expect-P7PowerAbort([string]$Mode,[string]$Fixture,[string]$Reason){
+            # GitHub Windows pwsh forces ErrorActionPreference=Stop. A child
+            # PowerShell deliberately throwing on a NEGATIVE test sends stderr
+            # that stops the CI script *before* it can check the expected
+            # nonzero exit. Start-Process isolates stdout/stderr and returns
+            # the actual child exit code without swallowing unexpected errors.
+            $tag=('{0}-{1}' -f $Mode,[IO.Path]::GetFileNameWithoutExtension($Fixture))
+            $out=Join-Path $env:RUNNER_TEMP ($tag+'.stdout.txt')
+            $err=Join-Path $env:RUNNER_TEMP ($tag+'.stderr.txt')
+            $args=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$runner,
+                    '-P7PowerTest',$Mode,'-ReplayPowerLog',$Fixture)
+            $proc=Start-Process -FilePath (Get-Command powershell.exe).Source -ArgumentList $args -Wait -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
+            $text=[IO.File]::ReadAllText($out)+[IO.File]::ReadAllText($err)
+            if($proc.ExitCode -eq 0 -or !$text.Contains($Reason)){
+              throw "P7 $Mode reject fixture incorrect: exit=$($proc.ExitCode), expected=$Reason, output=$text"
+            }
+          }
           foreach($mode in @('G3D','CPU')){
             $pre=(& $runner -P7PowerTest $mode 6>&1) -join "`n"
             if(!$pre.Contains("P7PowerTest $mode uses EXISTING image")){
@@ -291,10 +308,7 @@ jobs:
             if(!$positive.Contains("P7 REPLAY $mode PASS")){
               throw "P7 $mode positive PMU/CPU_OFF recovery fixture not accepted"
             }
-            $negative=(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runner -P7PowerTest $mode -ReplayPowerLog $negativeFixture 2>&1) -join "`n"
-            if($LASTEXITCODE -eq 0 -or !$negative.Contains('REPLAY FAIL:')){
-              throw "P7 $mode false-positive: wrong hardware state fixture accepted"
-            }
+            Expect-P7PowerAbort $mode $negativeFixture 'REPLAY FAIL:'
           }
           $powerReport = (& ./tools/s9-p7-basepower-report.ps1 -Log $powerFixture) -join "`n"
           foreach($term in @('6 labelled phases','phase=51','G3D_off=3/3',
@@ -307,10 +321,7 @@ jobs:
           @((Get-Content $powerFixture),
             'cpufreq_gov: 840 s: lit 1053 MHz asked load 0% | big 650 MHz asked load 5% | temp big 88.0 lit 82.0 C') |
             ForEach-Object {$_} | Set-Content -Path $hotFile
-          $hot = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runner -P7PowerTest G3D -ReplayPowerLog $hotFile 2>&1) -join "`n"
-          if($LASTEXITCODE -eq 0 -or !$hot.Contains('BIG temperature')){
-            throw 'P7 thermal over-limit replay incorrectly passed'
-          }
+          Expect-P7PowerAbort 'G3D' $hotFile 'BIG temperature'
           Write-Host "S9 HomeIdle+P7 G3D/CPU one-command A/B/A + temperature-stop and fail-closed replays PASS"
   springboard-syntax:
     runs-on: macos-15
