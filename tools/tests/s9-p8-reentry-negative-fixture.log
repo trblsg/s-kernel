@@ -1,0 +1,8 @@
+p8: up=300000ms ph=83 disp=0 lit_on=4 big_on=0 idle=99/255 temp_mc=63000/61000/60000 cap=1794/650 pmu_valid=1 pmu_on=0xf pmu_cfg=0xf usb_valid=1 usb=2470 touch_valid=1 touch=1242 physical_off=unproven
+GenericARMPE: sleep_cores: cpu 3 taken off (0) in 999 us, 0 of its interrupts to cpu 0 first; 7 processors running
+GenericARMPE: sleep_cores: cpu 4 taken off (0) in 1006 us, 0 of its interrupts to cpu 0 first; 6 processors running
+psci: cpu 3: CPU_ON for a core taken off (sleep_cores=): AFFINITY_INFO 0 (still on) after 100373 us
+psci: cpu 3: the firmware answered 0 (success) in 100428 us
+psci: cpu 3: stage 1 after 100436 us
+psci: cpu 3 (MPIDR 0x100): no stage 3 in 5 s (last stage 1; AFFINITY_INFO 0; CPU_ON answered 0 success): the core did not come
+GenericARMPE: sleep_cores: cpu 3 NOT started again (5) in 5103438 us; 4 processors running

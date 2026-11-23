@@ -5,7 +5,8 @@
  */
 #ifndef HAKIOS_P7_GPU_LAB_H
 #define HAKIOS_P7_GPU_LAB_H
-#define P7_GPU_RING 96u
+/* P8 one-boot offline correlation: 512 x 5s ~= 42.7min of GPU PMU/PLL. */
+#define P7_GPU_RING 512u
 struct p7_gpu_row {
     volatile uint64_t seq;
     uint64_t uptime_ms, frame_age_ms, job_age_ms, off_total_ms;

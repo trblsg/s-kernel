@@ -10,7 +10,7 @@ name: xnu-linux
 on:
   workflow_dispatch:
   push:
-    branches: [main, "avf/**", "s9/g3d-power-lab", "s9/p4-idle-compositor-cpu-lab", "s9/p5-display-wake-gpu-lab"]
+    branches: [main, "avf/**", "s9/g3d-power-lab", "s9/p4-idle-compositor-cpu-lab", "s9/p5-display-wake-gpu-lab", "s9/p8-unified-power-m3-lab"]
   # every pull request gets the same kernel build before it is merged
   pull_request:
 

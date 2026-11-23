@@ -246,6 +246,14 @@ extern "C" int
 hakios_p7_cpu_park(unsigned enable)
 {
     if(enable>1)return EINVAL;
+    /* P8 fail-closed hardware interlock (log 2026-11-23 051827):
+     * XNU offlined CPU3..6, yet PSCI AFFINITY_INFO remained ON and
+     * CPU_ON never reached stage3. Neither host sysctl nor another
+     * caller may re-enable the unrecoverable BIG park path. */
+    if(enable){
+        hakios_say("p8-safety: BIG CPU_OFF REFUSED: prior M3 CPU_ON re-entry failed; use read-only P8 diagnostics\n");
+        return EPERM;
+    }
     if(enable && (gSleepCores!=1 || gSleepCoresCall==NULL))return ENODEV;
     __atomic_store_n(&gP7ParkEnabled,enable,__ATOMIC_RELEASE);
     if(gSleepCoresCall){

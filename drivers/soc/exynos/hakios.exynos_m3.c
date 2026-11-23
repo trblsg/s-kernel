@@ -72,6 +72,7 @@ extern void hakios_esslog_start(void);
 #include <sys/hakios.exynos_acpm.h>
 #include <sys/systm.h>
 #include <sys/hakios.exynos_soc.h>
+#include <sys/hakios.p8_soc_snapshot.h>
 #include <sys/hakios.log.h>
 #include <sys/hakios.xnu.h>
 
@@ -124,6 +125,29 @@ pmu_rd(uint32_t offset)
 	return *(volatile uint32_t *)(pmu + offset);
 }
 
+/* P8 passive PMU readback. No MMIO remap or power writes in the
+ * governor: use only the always-on PMU mapping created by m3_prep=3. */
+int
+hakios_p8_m3_snapshot(struct hakios_p8_m3_snapshot *out)
+{
+	if (out == NULL) return -1;
+	bzero(out, sizeof(*out));
+	if (pmu == 0) return -1;
+	for (unsigned i = 0; i < HAKIOS_P8_M3_CPUS; i++) {
+		out->cpu_config[i] = pmu_rd(PMU_CL1_CPU_CONFIG(i));
+		out->cpu_status[i] = pmu_rd(PMU_CL1_CPU_STATUS(i));
+	}
+	out->noncpu_config = pmu_rd(PMU_CL1_NONCPU_CONFIG);
+	out->noncpu_status = pmu_rd(PMU_CL1_NONCPU_STATUS);
+	out->l2_status = pmu_rd(PMU_CL1_L2_STATUS);
+	out->reset_sequence = pmu_rd(PMU_RESET_SEQ_CONFIG);
+	out->reset_disable_soft = pmu_rd(PMU_RESET_DIS_SOFT);
+	out->reset_disable_wdt = pmu_rd(PMU_RESET_DIS_WDT);
+	__builtin_arm_dsb(0xF);
+	out->valid = 1;
+	return 0;
+}
+
 static void
 pmu_wr(uint32_t offset, uint32_t value)
 {
@@ -136,6 +160,25 @@ static uint32_t
 buck_mv(uint8_t code)
 {
 	return 300 + (uint32_t)code * 25 / 4;
+}
+
+/* P8 demand-only PMIC/ACPM readback. Never modifies the rails and never
+ * runs from the 40ms cpufreq governor. Values are programmed VSEL codes,
+ * NOT independently measured electrical voltage. */
+int
+hakios_p8_rails_snapshot(struct hakios_p8_rails_snapshot *out)
+{
+	if (out == NULL) return -1;
+	bzero(out, sizeof(*out));
+	if (pmu == 0 || !hakios_acpm_init(say)) return -1;
+	out->err_big = hakios_acpm_dvfs_get(ACPM_DVFS_CPUCL1, &out->big_khz);
+	out->err_lit = hakios_acpm_dvfs_get(ACPM_DVFS_CPUCL0, &out->lit_khz);
+	out->err_b2c = hakios_acpm_pmic_read(S2MPS18_PMIC, S2MPS18_B2CTRL, &out->b2_ctrl);
+	out->err_b2v = hakios_acpm_pmic_read(S2MPS18_PMIC, S2MPS18_B2OUT1, &out->b2_vsel);
+	out->err_b3c = hakios_acpm_pmic_read(S2MPS18_PMIC, S2MPS18_B3CTRL, &out->b3_ctrl);
+	out->err_b3v = hakios_acpm_pmic_read(S2MPS18_PMIC, S2MPS18_B3OUT1, &out->b3_vsel);
+	out->valid = !out->err_b2c && !out->err_b2v && !out->err_b3c && !out->err_b3v;
+	return out->valid ? 0 : -1;
 }
 
 /* step 1: what says the big cluster's state, read only */

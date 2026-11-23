@@ -77,6 +77,7 @@ power/exynos bsd/dev/hakios.p4_cpu_lab.h
 power/exynos bsd/dev/hakios.p6_policy.h
 power/exynos bsd/dev/hakios.p6_lab.h
 power/exynos bsd/dev/hakios.p7_cpu_lab.h
+power/exynos bsd/dev/hakios.p8_unified_lab.h
 power/exynos bsd/dev/hakios.p610_gov_diag.h
 power/exynos bsd/dev/hakios.scion_gov.c
 power/exynos bsd/dev/hakios.exynos_tmu.c
@@ -114,6 +115,7 @@ soc/exynos bsd/dev/hakios.exynos_spi.c
 soc/exynos bsd/dev/hakios.exynos_acpm.c
 soc/exynos bsd/dev/hakios.soc_runtime.c
 soc/exynos bsd/dev/hakios.exynos_m3.c
+soc/exynos bsd/dev/hakios.p8_soc_snapshot.h
 soc/exynos bsd/dev/hakios.exynos_tee.c
 usb      bsd/dev/hakios.dwc3.c
 usb      bsd/dev/hakios.usb_acm.h

@@ -49,6 +49,12 @@ param(
     [switch]$ActiveCpuPark,
     [switch]$LeaveP7AuditRunning,
     [switch]$DumpP7History,
+    [switch]$P8Unified,
+    [switch]$P8LeaveAuditRunning,
+    [switch]$DumpP8History,
+    [ValidateRange(20,180)][int]$P8WindowSeconds=60,
+    [ValidateRange(1,512)][int]$P8DumpLimit=512,
+    [string]$ReplayP8Log='',
     [switch]$Execute
 )
 Set-StrictMode -Version 2
@@ -100,7 +106,10 @@ $script:Started=$false
 $script:PreflightPassed=$false
 $script:SafeStopNeeded=$false
 $script:Completed=$false
-$script:Allowed='^(?:sysctl kern\.hakios\.(?:hi_cmd(?:=(?:1|2|3|201|250|252|300|301))?|mali_gov_frame|hi_policy(?:=[01])?|p7_(?:cpu|gpu)_(?:mode=[01]|phase=\d{1,2}|slot=\d{1,2}|stats|record|park=[01])|g3d_lab_(?:gate=[013]|idle_ms=10000|rail_probe=[01]|stats))|button (?:home|lock)|swipe l 1 350 1000)$'
+$script:Allowed='^(?:sysctl kern\.hakios\.(?:hi_cmd(?:=(?:1|2|3|201|250|252|300|301))?|mali_gov_frame|hi_policy(?:=[01])?|p7_(?:cpu|gpu)_(?:mode=[01]|phase=\d{1,2}|slot=\d{1,3}|stats|record|park=[01])|g3d_lab_(?:gate=[013]|idle_ms=10000|rail_probe=[01]|stats))|button (?:home|lock)|swipe l 1 350 1000)$'
+# Extend the original conservative allowlist for P8 passive controls only.
+$script:Allowed=$script:Allowed.Substring(0,$script:Allowed.Length-2)+
+    '|sysctl kern\.hakios\.(?:p8_(?:mode=[012]|flags=\d{1,4}|phase=\d{1,2}|interval_ms=\d{4,5}|slot=\d{1,3}|psci_cpu=[3-6]|big_cap_khz=(?:0|1469000|1586000|1690000)|stats|record|psci_stats|pmu_stats|rail_stats)|p4_(?:mode=[012]|threads=[012]|phase=\d{1,2})|p6_(?:mode=[012]|flags=\d{1,2}|phase=\d{1,2})|p610_mode=[01]|p69_mode=[01]))$'
 function Say([string]$Message){
     $record=('{0:yyyy-MM-ddTHH:mm:ss.fffZ} {1}' -f [datetime]::UtcNow,$Message)
     $script:Events.Add($record)
@@ -264,7 +273,7 @@ function Check-Thermal{
     if($script:BatteryStop){
         throw "Battery reached $($script:BatteryC)C >= safety limit $BatteryStopC C; restore requested"
     }
-    if($P7PowerTest){
+    if($P7PowerTest -or $P8Unified){
         if($script:PowerThermalArmed){
             if($script:CpuThermalWhen -eq [datetime]::MinValue -or
                ([datetime]::UtcNow-$script:CpuThermalWhen).TotalSeconds -gt 15){
@@ -395,7 +404,16 @@ function Dump-P7-Rings{
     Say 'P7 all retained kernel RAM samples captured. Reconnect after battery-only idle.'
 }
 . (Join-Path $PSScriptRoot 's9-p7-power-ab.inc.ps1')
+. (Join-Path $PSScriptRoot 's9-p8-unified-serial.inc.ps1')
 function Run-Scenario{
+    if($P8Unified){
+        Run-P8Unified
+        return
+    }
+    if($DumpP8History){
+        Dump-P8-Rings
+        return
+    }
     if($P7PowerTest){
         Run-P7PowerScenario
         return
@@ -579,7 +597,27 @@ function Invoke-Report{
             }catch{Say ('P7 report failed but RAW LOG preserved: '+$_.Exception.Message)}
         }
     }
+    if($P8Unified -or $DumpP8History){
+        $p8report=$stem+'.p8-report.txt'
+        $p8parser=Join-Path $PSScriptRoot 's9-p8-report.ps1'
+        if(Test-Path $p8parser){
+            try{
+                $lines=& $p8parser -Log $script:LogPathFinal -CsvPath ($stem+'.p8-data.csv') 2>&1
+                $lines|Out-File -LiteralPath $p8report -Encoding UTF8
+                Say ('P8 UNIFIED REPORT: '+$p8report)
+                foreach($line in @($lines)){Write-Host $line}
+            }catch{Say ('P8 REPORT ERROR, raw log retained: '+$_.Exception.Message)}
+        }
+    }
     Say ('RAW LOG: '+$script:LogPathFinal)
+}
+if($ReplayP8Log){
+    if($ReplayLog -or $ReplayPowerLog -or $Execute){throw 'P8 replay is offline-only; cannot combine with COM or other replay'}
+    $p8parser=Join-Path $PSScriptRoot 's9-p8-report.ps1'
+    if(-not(Test-Path -LiteralPath $ReplayP8Log)){throw "No P8 replay fixture: $ReplayP8Log"}
+    & $p8parser -Log $ReplayP8Log
+    if(-not $?){throw 'P8 report replay failed'}
+    return
 }
 if($ReplayLog -and $ReplayPowerLog){
     throw 'Select only one replay mode (HI2 or P7 hardware power).'
@@ -673,13 +711,31 @@ if($ReplayPowerLog){
     }
     return
 }
+if(($P7PowerTest -eq 'CPU' -or $ActiveCpuPark) -and $Execute){
+    throw 'P8 HARDWARE SAFETY: runtime BIG CPU_OFF re-entry failed on real S9; p7_cpu_park=1 is blocked in kernel. Use -P8Unified passive instead.'
+}
+if(($P8Unified -or $DumpP8History) -and ($P7Unified -or $P7PowerTest -or $DumpP7History -or
+   $ActiveG3DGate -or $ActiveCpuPark -or $LeaveP7AuditRunning)){
+    throw 'P8 standalone options must not be combined with HI2/P7 destructive or legacy scenario switches.'
+}
+if($P8LeaveAuditRunning -and -not $P8Unified){throw '-P8LeaveAuditRunning requires -P8Unified'}
 if($P7PowerTest -and ($P7Unified -or $DumpP7History -or
    $ActiveG3DGate -or $ActiveCpuPark -or $LeaveP7AuditRunning)){
     throw 'P7PowerTest is standalone: do not combine it with HI2/other power flags or history dump.'
 }
-Say ('S9 '+$(if($P7PowerTest){'P7 '+$P7PowerTest+' A/B/A'}else{'HI2 SERIAL AUTO'})+': '+$(if($Execute){'EXECUTE'}else{'PREVIEW'}))
+Say ('S9 '+$(if($P8Unified){'P8 UNIFIED SAFE LAB'}elseif($DumpP8History){'P8 OFFLINE HISTORY DUMP'}elseif($P7PowerTest){'P7 '+$P7PowerTest+' A/B/A'}else{'HI2 SERIAL AUTO'})+': '+$(if($Execute){'EXECUTE'}else{'PREVIEW'}))
 if(-not $Execute){
     Say 'Preview: close PuTTY then re-run with -Port COMxxx -Execute; it will log DIRECTLY over USB.'
+    if($P8Unified -or $DumpP8History){
+        if($DumpP8History){
+            Say ('P8 dump: freeze the 512-row CPU/PMU/thermal ring, then retrieve up to '+$P8DumpLimit+' read-only records over USB.')
+        }else{
+            Say ('P8 phases 80/81/82/83/84/85/87(A1)/88(B)/89(A2)/90, read-only sensors + A/B/A lower-only BIG frequency cap; no M3 CPU_OFF or CPD/SICD.')
+            Say ('P8 per-window '+$P8WindowSeconds+' s; boot once after P8 image flash; stop BIG='+$BigStopC+' LITTLE='+$LittleStopC+' G3D='+$G3DStopC+' battery='+$BatteryStopC+' C.')
+            if($P8LeaveAuditRunning){Say 'P8 offline: after verified phase89 leave ONLY read-only P8 and P7 samplers running; reconnect for -DumpP8History.'}
+        }
+        return
+    }
     if($P7PowerTest){
         Say ('P7PowerTest '+$P7PowerTest+' uses EXISTING image; no Clock test, no flash, no automatic second hardware test.')
         Say ('Phases '+$(if($P7PowerTest -eq 'G3D'){'50=G3D ON, 51=verified G3D OFF with kernel 120s watchdog, 52=G3D ON restored'}else{'60=display OFF with BIG 4/4, 61=display OFF with confirmed BIG CPU_OFF, 62=display OFF with BIG 4/4 restored'}))
@@ -704,7 +760,7 @@ while([IO.Ports.SerialPort]::GetPortNames() -notcontains $Port){
 # If PuTTY still owns the port, SerialPort.Open throws before changing anything.
 Say ('Opening exclusive '+$Port+'. CLOSE PuTTY first; no manual commands will be required.')
 if([string]::IsNullOrWhiteSpace($LogPath)){
-    $prefix=if($P7PowerTest){'putty-S9-p7-'+$P7PowerTest.ToLowerInvariant()+'-'}else{'putty-S9-hi2-auto-'}
+    $prefix=if($P8Unified){'putty-S9-p8-unified-'}elseif($DumpP8History){'putty-S9-p8-dump-'}elseif($P7PowerTest){'putty-S9-p7-'+$P7PowerTest.ToLowerInvariant()+'-'}else{'putty-S9-hi2-auto-'}
     $LogPath=$prefix+(Get-Date -Format 'yyyyMMdd-HHmmss')+'.log'
 }
 $script:LogPathFinal=[IO.Path]::GetFullPath($LogPath)
@@ -733,6 +789,25 @@ try{
         # Each restore is independent; a missing/unresponsive sysctl must
         # not prevent the subsequent GPU/CPU/Clock safety restorations.
         $restore=New-Object 'System.Collections.Generic.List[string]'
+        if($P8Unified -or $DumpP8History){
+            [void]$restore.Add('sysctl kern.hakios.p8_big_cap_khz=0')
+            [void]$restore.Add('sysctl kern.hakios.hi_policy=0')
+            [void]$restore.Add('sysctl kern.hakios.p7_cpu_park=0')
+            [void]$restore.Add('sysctl kern.hakios.g3d_lab_gate=0')
+            [void]$restore.Add('sysctl kern.hakios.g3d_lab_rail_probe=0')
+            [void]$restore.Add('sysctl kern.hakios.p4_threads=0')
+            [void]$restore.Add('sysctl kern.hakios.p4_mode=0')
+            [void]$restore.Add('sysctl kern.hakios.p6_mode=0')
+            [void]$restore.Add('sysctl kern.hakios.p610_mode=0')
+            [void]$restore.Add('sysctl kern.hakios.p69_mode=0')
+            if(-not($P8LeaveAuditRunning -and $script:Completed -and $null -eq $failed)){
+                [void]$restore.Add('sysctl kern.hakios.p8_mode=0')
+                [void]$restore.Add('sysctl kern.hakios.p7_cpu_mode=0')
+                [void]$restore.Add('sysctl kern.hakios.p7_gpu_mode=0')
+            }else{
+                Say 'P8 CLEANUP: retain read-only P8/P7 rings only; all active caps and GPU gates OFF.'
+            }
+        }
         if($P7Unified -or $P7PowerTest){
             [void]$restore.Add('sysctl kern.hakios.hi_policy=0')
             [void]$restore.Add('sysctl kern.hakios.p7_cpu_park=0')
@@ -752,13 +827,13 @@ try{
             # CPU_OFF has no independent kernel expiry on this flashed
             # image. Request a visible ON state before USB acquisition
             # ends if a screen-OFF experiment was interrupted.
-            if($P7PowerTest -eq 'CPU' -and $item -eq 'sysctl kern.hakios.p7_cpu_park=0' -and
+            if(($P7PowerTest -eq 'CPU' -or $P8Unified) -and $item -eq 'sysctl kern.hakios.p7_cpu_park=0' -and
                 $null -ne $script:LastCpuSample -and $script:LastCpuSample.Display -eq 0){
                 try{
                     $script:DisplayOn=$false
                     Send-Checked 'button lock'
                     Wait-For 'emergency cleanup: display ON request' 38 {$script:DisplayOn}
-                    Say 'EMERGENCY CPU OFF CLEANUP: screen ON requested, park=0 already sent.'
+                    Say 'EMERGENCY DISPLAY CLEANUP: screen ON requested, CPU park=0 already sent.'
                 }catch{
                     Say ('EMERGENCY SCREEN ON UNCONFIRMED: '+$_.Exception.Message)
                 }
@@ -772,7 +847,7 @@ try{
     if($null -ne $script:Serial){$script:Serial.Dispose();$script:Serial=$null}
     Invoke-Report
 }
-$sessionName=if($P7PowerTest){'P7 '+$P7PowerTest+' hardware A/B/A'}else{'HI2'}
+$sessionName=if($P8Unified){'P8 unified passive'}elseif($DumpP8History){'P8 offline dump'}elseif($P7PowerTest){'P7 '+$P7PowerTest+' hardware A/B/A'}else{'HI2'}
 if($null -ne $failed){throw "$sessionName scenario incomplete. $failed . Raw log and reports retained."}
 if(-not $script:Completed){throw "$sessionName scenario did not complete all confirmed phases"}
-Say "$sessionName AUTOMATIC SESSION COMPLETE; send .log, .events.txt and .p7-report.txt for attribution."
+Say "$sessionName AUTOMATIC SESSION COMPLETE; send .log, .events.txt and .p8-report.txt (for P8) for attribution."

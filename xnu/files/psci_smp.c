@@ -45,6 +45,7 @@
 #include <arm/machine_routines.h>
 #include <arm64/proc_reg.h>
 #include <arm64/psci_smp.h>
+#include <sys/hakios.p8_soc_snapshot.h>
 #include <pexpert/pexpert.h>
 #include <pexpert/device_tree.h>
 #include <pexpert/arm64/board_config.h>
@@ -100,6 +101,11 @@ extern void ExceptionVectorsBase;
 extern uint32_t hakios_pan_off;         /* osfmk/arm/arm_init.c, patch 1509 */
 
 static uint32_t psci_smp_cpu_stage[MAX_CPUS];   /* PSCI_SMP_CPU_*, by cpu number */
+/* P8: separate caller-written stage1 from a stage reached by the target
+ * processor; no extra CPU_OFF/CPU_ON calls are introduced by this audit. */
+static uint32_t p8_psci_start_attempts[MAX_CPUS], p8_psci_off_attempts[MAX_CPUS];
+static uint32_t p8_psci_off_returned[MAX_CPUS];
+static int32_t p8_psci_last_on[MAX_CPUS], p8_psci_last_off[MAX_CPUS];
 uint32_t hakios_m3_park;                        /* start.s: a big core parks after writing its IDs (m3_ids=1) */
 static uint32_t psci_smp_started;               /* a bit per core that CPU_ON was granted for */
 
@@ -174,6 +180,34 @@ psci_call(uint64_t function, uint64_t arg1, uint64_t arg2, uint64_t arg3)
                     "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17");
 	}
 	return (int64_t)x0;
+}
+
+/* One read-only AFFINITY_INFO SMC per explicit sysctl request/CPU.
+ * Never perform this in the 40ms cpufreq governor loop. PSCI affinity
+ * is firmware state, not a guarantee that XNU's core has left a WFI. */
+int
+hakios_p8_psci_snapshot(unsigned cpu, struct hakios_p8_psci_snapshot *out)
+{
+    cpu_data_t *cdp;
+    if (out == NULL || cpu >= MAX_CPUS) return -1;
+    bzero(out, sizeof(*out));
+    cdp = cpu_datap((int)cpu);
+    if (cdp == NULL) return -1;
+    out->logical_cpu = cpu;
+    out->mpidr = cdp->cpu_phys_id;
+    out->stage = os_atomic_load(&psci_smp_cpu_stage[cpu], acquire);
+    out->start_attempts = os_atomic_load(&p8_psci_start_attempts[cpu], relaxed);
+    out->off_attempts = os_atomic_load(&p8_psci_off_attempts[cpu], relaxed);
+    out->off_returns = os_atomic_load(&p8_psci_off_returned[cpu], relaxed);
+    out->last_cpu_on_status = out->start_attempts ?
+        os_atomic_load(&p8_psci_last_on[cpu], relaxed) : -999;
+    /* PSCI CPU_OFF normally never returns. An unobserved return status is
+     * UNKNOWN, not the zero (success) with which static RAM is initialized. */
+    out->last_cpu_off_status = out->off_returns ?
+        os_atomic_load(&p8_psci_last_off[cpu], relaxed) : -999;
+    out->affinity = psci_call(PSCI_AFFINITY_INFO, cdp->cpu_phys_id, 0, 0);
+    out->valid = 1;
+    return 0;
 }
 
 static const char *
@@ -556,7 +590,9 @@ psci_smp_start_cpu(int cpu)
 		    cpu, affinity, affinity == PSCI_AFFINITY_OFF ? "(off)" : affinity == 0 ? "(still on)" : "(?)",
 		    psci_smp_us(mach_absolute_time() - t1));
 	}
+	os_atomic_inc(&p8_psci_start_attempts[cpu], relaxed);
 	status = psci_call(PSCI_CPU_ON, phys_id, entry, 0);
+	os_atomic_store(&p8_psci_last_on[cpu], (int32_t)status, relaxed);
 	if (hakios_m3_park) {
 		volatile uint64_t *slot = (volatile uint64_t *)ml_io_map(0xFDA10000 + 32 * ((phys_id >> 8) & 0xf), 0x1000);
 
@@ -847,7 +883,12 @@ psci_smp_cpu_off(void)
 		psci_smp_loader_give_back();    /* patch 1513: not off, back to the loader (returns only if it cannot) */
 	}
 	{
+		int this_cpu = cpu_number();
+		os_atomic_inc(&p8_psci_off_attempts[this_cpu], relaxed);
+		__builtin_arm_dsb(DSB_SY);
 		int64_t status = psci_call(PSCI_CPU_OFF, 0, 0, 0);
+		os_atomic_store(&p8_psci_last_off[this_cpu], (int32_t)status, relaxed);
+		os_atomic_inc(&p8_psci_off_returned[this_cpu], relaxed);
 
 		/*
 		 * Scion (patch 1517): a CPU_OFF the firmware takes does not return. If it does, this core

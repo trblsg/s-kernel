@@ -29,6 +29,8 @@ p7_cpu_park_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     int err=sysctl_io_number(req,value,sizeof(value),&value,NULL);
     if(err || req->newptr==USER_ADDR_NULL)return err;
     if(value<0 || value>1)return EINVAL;
+    /* P8 safety guard: this path failed M3 re-entry on a real S9. */
+    if(value==1)return EPERM;
     if(value==1 && !__atomic_load_n(&p7_cpu_mode,__ATOMIC_ACQUIRE))
         return EBUSY; /* never park without durable CPU observation */
     err=hakios_p7_cpu_park((unsigned)value);
@@ -40,7 +42,7 @@ p7_cpu_park_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
 }
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p7_cpu_park,
     CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,
-    p7_cpu_park_sysctl,"I","P7 opt-in BIG CPU_OFF with boot sleep_cores=1, default0");
+    p7_cpu_park_sysctl,"I","P8 safety: BIG CPU_OFF blocked pending PSCI/M3 recovery" );
 static bool
 p7_kernel_quad(const char *name,uint64_t *value)
 {

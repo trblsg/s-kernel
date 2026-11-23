@@ -1,0 +1,75 @@
+name: S9 P8 unified passive and fail-closed lab
+on:
+  push:
+    branches: [s9/p8-unified-power-m3-lab]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  safety-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: P8 integration, kernel interlock and provenance assertions
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          k = Path('drivers/power/exynos/hakios.p8_unified_lab.h').read_text()
+          x = Path('xnu/files/GenericARMPE.cpp').read_text()
+          s = Path('xnu/files/psci_smp.c').read_text()
+          m = Path('drivers/soc/exynos/hakios.exynos_m3.c').read_text()
+          c = Path('drivers/power/exynos/hakios.exynos_cpufreq.c').read_text()
+          p = Path('drivers/power/exynos/hakios.p7_cpu_lab.h').read_text()
+          r = Path('tools/s9-p8-unified-serial.inc.ps1').read_text()
+          host = Path('tools/s9-home-idle-serial-auto.ps1').read_text()
+          mapping = Path('drivers/map').read_text()
+          abi = Path('drivers/soc/exynos/hakios.p8_soc_snapshot.h').read_text()
+          assert 'p8_probe(now);' in c and '#include "hakios.p8_unified_lab.h"' in c
+          assert 'power/exynos bsd/dev/hakios.p8_unified_lab.h' in mapping
+          assert 'soc/exynos bsd/dev/hakios.p8_soc_snapshot.h' in mapping
+          assert 'P8_RING 512u' in k and 'P7_GPU_RING 512u' in Path('drivers/gpu/mali/hakios.p7_gpu_lab.h').read_text()
+          assert 'if(value==1)return EPERM;' in p
+          assert 'if(enable){' in x and 'p8-safety: BIG CPU_OFF REFUSED' in x
+          assert 'gP7ParkEnabled' in x and 'sleepCoreWanted' in x
+          assert 'PSCI_AFFINITY_INFO' in s and 'hakios_p8_psci_snapshot' in s
+          assert 'off_attempts, off_returns' in abi and 'out->off_returns' in s
+          assert 'out->last_cpu_off_status = out->off_returns ?' in s
+          assert 'hakios_p8_m3_snapshot' in m and 'hakios_p8_rails_snapshot' in m
+          assert 'p8_big_cap_khz' in k and 'max = MIN(max,p8_cap)' in c
+          assert 'psci=not_sampled_see_p8_psci_stats' in k
+          assert 'deep_C2_CPD_SICD=unmeasured' in k
+          assert 'no_power_writes=1' in k
+          assert 'P8-Read-PsciPmu' in r and 'P8-Assert-EightCores' in r
+          assert all('P8-Set-Phase %d'%v in r for v in (80,81,82,83,84,85,87,88,89,90,91))
+          assert r.index('P8-Set-Phase 87') < r.index('P8-Set-Phase 88') < r.index('P8-Set-Phase 89')
+          assert "p8_big_cap_khz=0" in r and "g3d_lab_gate=1" in r
+          assert 'P8 HARDWARE SAFETY' in host and "if(($P7PowerTest -eq 'CPU' -or $ActiveCpuPark) -and $Execute)" in host
+          assert Path('docs/s9-p8-unified-power-m3-lab.md').exists()
+          # No destructive CPU/PMU calls may be introduced into the P8 sampler.
+          body = k.split('static void p8_probe(uint64_t now)',1)[1]
+          assert not any(v in body for v in ('processor_exit(', 'PSCI_CPU_OFF', 'PMU_CL1_CPU_CONFIG(', 'pmu_wr(', 'hakios_acpm_dvfs_set('))
+          print('P8 kernel PSCI/PMU ABI, 512-row rings, source mapping and host fail-closed PASS')
+          PY
+          git diff --check
+  windows-offline-replay:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: PowerShell 5.1 syntax and positive/negative offline tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $files=@('tools/s9-home-idle-serial-auto.ps1',
+                   'tools/s9-p8-unified-serial.inc.ps1',
+                   'tools/s9-p8-report.ps1',
+                   'tools/tests/test-s9-p8-unified.ps1')
+          foreach($file in $files){
+            $tokens=$null;$errors=$null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path $PWD $file), [ref]$tokens, [ref]$errors) | Out-Null
+            if(@($errors).Count -gt 0){throw "PS parse failed: $file $errors"}
+          }
+          & ./tools/tests/test-s9-p8-unified.ps1
+          if($LASTEXITCODE -and $LASTEXITCODE -ne 0){throw 'P8 regression exit status is not 0'}

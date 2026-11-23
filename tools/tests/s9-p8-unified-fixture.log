@@ -1,0 +1,23 @@
+p8: mode=2 safe=read_only no_CPU_OFF=1 ring=512 reused_gov=1
+p7-gpu: up=180000ms phase=81 domain=1 pll=1 awake=1 clock=260MHz frame_age_ms=18000 job_age_ms=18000 off_total_ms=0 off=0 wake=0 wake_fail=0 gate=0 fault=0 gpu_safe=1 tz_ok=1 rail_valid=1 rail_mv=950 g3d_mc=61000 source=PMU_CMU_5s_not_watts
+p7-gpu: up=185000ms phase=81 domain=1 pll=1 awake=1 clock=260MHz frame_age_ms=23000 job_age_ms=23000 off_total_ms=0 off=0 wake=0 wake_fail=0 gate=0 fault=0 gpu_safe=1 tz_ok=1 rail_valid=1 rail_mv=950 g3d_mc=61000 source=PMU_CMU_5s_not_watts
+p8: PHASE=81 reset_delta=1 power_change=0
+p8: up=180000ms ph=81 disp=1 lit_on=4 big_on=4 idle=99/94 temp_mc=65000/63000/61000 cap=1794/1794 pmu_valid=1 pmu_on=0xf pmu_cfg=0xf usb_valid=1 usb=2470 touch_valid=1 touch=1242 physical_off=unproven
+p8: up=185000ms ph=81 disp=1 lit_on=4 big_on=4 idle=99/94 temp_mc=65000/63000/61000 cap=1794/1794 pmu_valid=1 pmu_on=0xf pmu_cfg=0xf usb_valid=1 usb=2470 touch_valid=1 touch=1242 physical_off=unproven
+p8: PHASE=83 reset_delta=1 power_change=0
+p8: up=205000ms ph=83 disp=0 lit_on=4 big_on=4 idle=99/95 temp_mc=63000/62000/59000 cap=1794/1794 pmu_valid=1 pmu_on=0xf pmu_cfg=0xf usb_valid=1 usb=2470 touch_valid=1 touch=1243 physical_off=unproven
+p8: up=210000ms ph=83 disp=0 lit_on=4 big_on=4 idle=99/95 temp_mc=63000/62000/59000 cap=1794/1794 pmu_valid=1 pmu_on=0xf pmu_cfg=0xf usb_valid=1 usb=2470 touch_valid=1 touch=1243 physical_off=unproven
+p8: PHASE=87 reset_delta=1 power_change=0
+p8: up=255000ms ph=87 disp=1 lit_on=4 big_on=4 idle=98/93 temp_mc=69000/66000/63000 cap=1794/1794 pmu_valid=1 pmu_on=0xf pmu_cfg=0xf usb_valid=1 usb=2470 touch_valid=1 touch=1242 physical_off=unproven
+p8: PHASE=88 reset_delta=1 power_change=0
+p8: thermal_cap_big_khz=1469000 lower_only=1 voltage_unchanged=1
+p8: up=260000ms ph=88 disp=1 lit_on=4 big_on=4 idle=98/93 temp_mc=69000/66000/63000 cap=1794/1469 pmu_valid=1 pmu_on=0xf pmu_cfg=0xf usb_valid=1 usb=2470 touch_valid=1 touch=1242 physical_off=unproven
+p8: thermal_cap_big_khz=0 lower_only=1 voltage_unchanged=1
+p8: PHASE=89 reset_delta=1 power_change=0
+p8: up=265000ms ph=89 disp=1 lit_on=4 big_on=4 idle=98/93 temp_mc=67500/66000/62000 cap=1794/1794 pmu_valid=1 pmu_on=0xf pmu_cfg=0xf usb_valid=1 usb=2470 touch_valid=1 touch=1242 physical_off=unproven
+usb: kern.hakios.p8_psci_stats = cpu=3 mpidr=0x100 stage=3 on_attempts=1 off_attempts=0 last_on=0 last_off=0 affinity=0 affinity_off=1 caller_stage1_not_target_execution=1 read_only=1
+usb: kern.hakios.p8_psci_stats = cpu=4 mpidr=0x101 stage=3 on_attempts=1 off_attempts=0 last_on=0 last_off=0 affinity=0 affinity_off=1 caller_stage1_not_target_execution=1 read_only=1
+usb: kern.hakios.p8_psci_stats = cpu=5 mpidr=0x102 stage=3 on_attempts=1 off_attempts=0 last_on=0 last_off=0 affinity=0 affinity_off=1 caller_stage1_not_target_execution=1 read_only=1
+usb: kern.hakios.p8_psci_stats = cpu=6 mpidr=0x103 stage=3 on_attempts=1 off_attempts=0 last_on=0 last_off=0 affinity=0 affinity_off=1 caller_stage1_not_target_execution=1 read_only=1
+usb: kern.hakios.p8_pmu_stats = valid=1 config=f,f,f,f status=100f0f,100f0f,100f0f,100f0f noncpu=f000f/10000f l2=1 reset=0 reset_disable_soft=fffffffc reset_disable_wdt=fffffffc source=always_on_PMU no_power_writes=1
+usb: kern.hakios.p8_rail_stats = valid=1 err=0 acpm_lit_khz=0 acpm_big_khz=0 b2ctrl=0x79 b2vsel=0x3a b2mv=662 b3ctrl=0x5d b3vsel=0x71 b3mv=1006 e=0,0,0,0,0,0 source=S2MPS18_VSEL_not_voltmeter

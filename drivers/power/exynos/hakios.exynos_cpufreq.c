@@ -162,6 +162,7 @@ extern int kernel_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, vo
 /* the TMU driver's last reading of a zone (0 BIG, 1 LITTLE), millidegrees; -273000 before one or without the driver */
 extern int32_t hakios_exynos_tmu_zone_mc(unsigned zone);
 extern uint64_t hakios_exynos_tmu_age_ms(void);       /* since its last reading */
+extern int hakios_battery_temperature(void); /* battery thermistor Celsius, -273 if unavailable */
 extern int32_t hakios_exynos_tmu_zone_now_mc(unsigned zone);
 extern void sched_perfcontrol_update_recommended_cores(uint32_t recommended_cores);
 extern void *cpu_to_processor(int cpu);
@@ -293,6 +294,8 @@ SYSCTL_DECL(_kern_hakios);
 #include "hakios.p4_cpu_lab.h" /* P4: scheduler-idle and frame cadence, read-only */
 #include "hakios.p6_lab.h" /* P6: integrated opt-in wake-proxy and policy shadow */
 #include "hakios.p7_cpu_lab.h" /* P7: ring-buffered base CPU idle/wake audit */
+static uint32_t ceiling_now(struct cluster *c); /* P8 uses the real post-thermal ceiling */
+#include "hakios.p8_unified_lab.h" /* P8: 512-row, 10-group passive timeline */
 #include "hakios.p610_gov_diag.h" /* P6.10 pure passive state classifier */
 /* Governor-owned single-thread counters. Never evaluated in the IRQ/frame callback. */
 static struct s9_p610_window p610_stats;
@@ -701,6 +704,10 @@ ceiling_now(struct cluster *c)
 	}
 	if (c->thermal > 0) {
 		max = MIN(max, c->levels[MIN(c->thermal, c->n - 1)]);
+	}
+	if (c == &clusters[1]) {
+		uint32_t p8_cap = __atomic_load_n(&p8_big_cap_khz,__ATOMIC_RELAXED);
+		if (p8_cap != 0) max = MIN(max,p8_cap); /* P8 explicit lower-only A/B */
 	}
 	return c->levels[level_at_most(c, max)];
 }
@@ -1452,6 +1459,7 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 		measure(now - then > 0 ? now - then : 1);
 		p4_cpu_probe(now); /* on-demand 5s read-only, no new kernel thread */
 		p7_cpu_probe(now); /* P7 ring captures USB-disconnected samples */
+		p8_probe(now); /* P8 single-build unified ring, read only; no new worker */
 		if (__atomic_load_n(&p6_mode,__ATOMIC_RELAXED)) {
 			__atomic_fetch_add(&p6_windows,1,__ATOMIC_RELAXED);
 			p6_probe(now);
