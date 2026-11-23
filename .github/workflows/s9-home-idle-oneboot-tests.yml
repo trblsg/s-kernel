@@ -182,6 +182,20 @@ jobs:
           assert '$script:CpuOffSamples -lt 2' in power
           assert '$script:G3DLastOffTotal' in power and '15000' in power
           assert 'P7-Parse-G3DStats' in power
+          # CPU hardware A/B must not repeat the 2026-11-23 failure:
+          # hi_cmd=300/301 is refused after autonomous HI2 was ABORTED.
+          # The standalone CPU route now reuses proved quiet Home secondary.
+          cpu_ab=power.split('function P7-Run-CPUAB{',1)[1].split(
+              'function Run-P7PowerScenario{',1)[0]
+          assert 'P7-Open-QuietHome' in cpu_ab
+          assert 'P7-Open-Settings' not in power
+          assert "Send-Checked 'sysctl kern.hakios.hi_cmd=300'" not in power
+          assert "Send-Checked 'sysctl kern.hakios.hi_cmd=301'" not in power
+          assert "Send-Checked 'sysctl kern.hakios.hi_cmd=2'" in power
+          assert cpu_ab.index('P7-Open-QuietHome') < cpu_ab.index('P7-Set-Phase 60')
+          assert 'P7-Assert-Safe-G3D' in cpu_ab
+          assert 'requires screen ON and all eight cores online before phase A1' in cpu_ab
+          assert Path('tools/tests/test-s9-p7-cpu-home-route.ps1').is_file()
           assert '$script:PowerThermalArmed=$true' in power
           assert 'P7 thermal sensors missing BIG/LITTLE/G3D values' in power
           assert '$script:G3DGateSamples -lt 6' in power
@@ -282,6 +296,13 @@ jobs:
           # or a handset. A successful sysctl write MUST NOT suffice.
           $powerFixture='tools/tests/s9-p7-power-ab-fixture.log'
           $negativeFixture='tools/tests/s9-p7-power-ab-negative-fixture.log'
+          # Execute the real CPU A/B function with mocked Home and phase
+          # controls: prove Home+8 cores advances, unknown Home/3 BIG fail
+          # closed, and no real COM / Settings opener can run.
+          $cpuSceneRoute = (& ./tools/tests/test-s9-p7-cpu-home-route.ps1 6>&1) -join "`n"
+          if(!$cpuSceneRoute.Contains('P7 CPU QUIET HOME ROUTE PASS')){
+            throw 'P7 CPU hardware test still depends on forbidden Settings URL or lacks a Home/online-core guard'
+          }
           function Expect-P7PowerAbort([string]$Mode,[string]$Fixture,[string]$Reason){
             # GitHub Windows pwsh forces ErrorActionPreference=Stop. A child
             # PowerShell deliberately throwing on a NEGATIVE test sends stderr

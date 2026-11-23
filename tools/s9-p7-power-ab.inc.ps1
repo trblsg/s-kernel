@@ -113,20 +113,12 @@ function P7-Start-PowerPreflight{
     P7-Assert-Safe-G3D $s
     Say ("P7 PREFLIGHT SAFE: G3D PMU=ON PLL=ON BUCK6=950mV DTZPC=1 no faults; BIG=$($script:BigC)C LITTLE=$($script:LittleC)C G3D=$($script:G3DC)C")
 }
-function P7-Open-Settings{
-    $script:SceneSettings=$false
-    Send-Checked 'sysctl kern.hakios.hi_cmd=300' 'hi: settings_open request=1 route=service_then_helper'
-    try{
-        Wait-For 'actual Settings foreground' 30 {$script:SceneSettings} -Thermal
-    }catch{
-        Check-Thermal
-        Say ('Settings service not confirmed; trying existing helper: '+$_.Exception.Message)
-        Send-Checked 'sysctl kern.hakios.hi_cmd=301' 'hi: settings_open request=1 route=helper'
-        Wait-For 'actual Settings foreground via helper' 30 {$script:SceneSettings} -Thermal
-    }
-    Rest 'Settings stable for CPU screen-OFF test' 12
-}
 function P7-Open-QuietHome{
+    # Shared CPU/G3D baseline. IMPORTANT: never open Settings via
+    # hi_cmd=300/301 during standalone P7 tests. SpringBoard only permits
+    # those after the HI2 auto crossover reaches FINISHED. The real
+    # 2026-11-23 CPU log recorded auto_state=aborted and a refusal.
+    # The secondary Home route is proven on the same flashed P7 image.
     # A HOME+one left-swipe is the existing tested navigation sequence.
     # We additionally require real foreground Home and >=15s without
     # jobs/frames to avoid power-gating while animating.
@@ -203,9 +195,23 @@ function P7-Run-G3DAB{
     Say 'P7 G3D A/B/A COMPLETED with PMU+PLL OFF proof, actual off-residency and verified wake'
 }
 function P7-Run-CPUAB{
-    P7-Open-Settings
+    Say 'P7 CPU A/B/A: use quiet secondary Home, never HI2-gated Settings URL'
+    P7-Open-QuietHome
+    if(-not $script:SceneHome -or $script:SceneSettings){
+        throw 'CPU A/B aborted: secondary Home foreground proof was lost'
+    }
+    $g=P7-Read-G3DStats
+    P7-Assert-Safe-G3D $g
+    if($null -eq $script:LastCpuSample -or $script:LastCpuSample.Display -ne 1 -or
+       $script:LastCpuSample.LittleOnline -ne 4 -or $script:LastCpuSample.BigOnline -ne 4){
+        throw 'CPU A/B requires screen ON and all eight cores online before phase A1'
+    }
     P7-Set-Phase 60
-    Wait-For 'screen ON before CPU A/B' 24 {P7-CpuSample 60 1} -Thermal
+    Wait-For 'screen ON, 4 LITTLE and 4 BIG online before CPU A/B' 24 {
+        (P7-CpuSample 60 1) -and $script:LastCpuSample.LittleOnline -eq 4 -and
+        $script:LastCpuSample.BigOnline -eq 4
+    } -Thermal
+    Say 'P7 CPU BASELINE VERIFIED: quiet secondary Home, G3D remains ON, disp=1, LITTLE=4 BIG=4'
     P7-SwitchDisplay 0 60
     Rest 'A1 CPU screen-OFF, BIG all online reference' $PowerWindowSeconds
     if($script:CpuBaselineSamples -lt 2 -or
@@ -252,6 +258,9 @@ function P7-Run-CPUAB{
     }
     P7-SwitchDisplay 1 62
     P7-VerifyCpuRestored
+    $g=P7-Read-G3DStats
+    P7-Assert-Safe-G3D $g
+    Say 'P7 CPU A/B/A G3D CONTROL VERIFIED: G3D gate=0, PMU=ON PLL=ON, no GPU/TZ faults'
     Say ("P7 CPU A/B/A COMPLETED: OFF A1={0} online8 samples; OFF B={1} BIG CPU_OFF samples; OFF A2={2} online8 samples; fully unparked" -f
         $script:CpuBaselineSamples,$script:CpuOffSamples,$script:CpuRecoverySamples)
 }

@@ -62,14 +62,23 @@ không tuyên bố thành công chỉ từ ACK `set (0)` hoặc xung GPU giảm.
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\s9-home-idle-serial-auto.ps1 -Port COM125 -P7PowerTest CPU -Execute
 ```
 
-Script tự mở Settings và xác nhận `com.apple.Preferences` ở foreground,
-sau đó tự nhấn phím khóa để đổi trạng thái màn hình. Bản BOOT đang chạy
-phải có `sleep_cores=1`; thiếu boot arg, kernel trả `ENODEV (19)`,
-script dừng, **không giả lập thành công**.
+**Script đã được sửa theo log `putty-S9-p7-cpu-20261123-035500.log`.**
+Bản trước gọi `hi_cmd=300` để mở Settings, nhưng SpringBoard trả
+`hi: settings_open REFUSED mode=1 auto_state=aborted need_finished=1`.
+Đó là điều kiện của bộ thử Clock, **không phải lỗi CPU_OFF**.
+
+Bản hiện tại **không gọi `hi_cmd=300/301`**. Nó dùng đường Home phụ
+đã được xác minh trong lượt G3D: nhấn Home, vuốt trái, đợi Home foreground
+và tối thiểu 15 giây không có frame/job hay Clock 10 Hz. Sau đó kiểm
+tra màn hình ON, 4 LITTLE + 4 BIG online và G3D an toàn trước A1;
+script tự khóa/mở màn hình và cần `disp=0` ở các cửa sổ OFF.
+
+Bản BOOT đang chạy phải có `sleep_cores=1`; thiếu boot arg, kernel trả
+`ENODEV (19)`, script dừng, **không giả lập thành công**.
 
 | Pha | Thao tác tự động | Xác nhận |
 |---|---|---|
-| `60` A1 | Màn hình OFF, CPU park=0, đo 50 giây | `disp=0`, LITTLE=4 BIG=4 online |
+| `60` A1 | Home phụ yên → màn hình OFF, CPU park=0, đo 50 giây | `disp=0`, LITTLE=4 BIG=4 online |
 | `61` B | Mở màn hình, bật `p7_cpu_park=1`, khóa lại, đo 50 giây | `GenericARMPE: sleep_cores: cpu N taken off (0)` và P7 BIG online giảm trong ít nhất 2 mẫu 5 giây |
 | `62` A2 | Mở màn hình, tắt park, xác minh **từng lõi** `started again (0)`, khóa lại 50 giây | BIG=4 LITTLE=4 online trở lại; mở màn hình sau cùng |
 
@@ -77,7 +86,10 @@ script dừng, **không giả lập thành công**.
 CPD/SICD, CPU_SUSPEND/C2 hay system sleep. **Không có watchdog CPU_OFF
 độc lập trong firmware hiện tại**; nếu điện thoại/COM treo hoàn toàn,
 khôi phục từ PowerShell có thể không thành công và cần recovery.
-Không rút USB trong lượt này.
+Không rút USB trong lượt này. Sau một lần bật màn hình, hệ thống có
+thể hiển thị màn hình khóa; phép thử dùng trạng thái `disp`/CPU_ON thực
+và không cần Settings foreground. `disp=0` chỉ xác nhận yêu cầu màn
+hình OFF từ iOS, chưa chứng minh DECON/panel đã deep-power-down.
 
 ## Tập tin kết quả
 
