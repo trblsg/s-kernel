@@ -227,9 +227,19 @@ jobs:
           }
           $auto = (& ./tools/s9-home-idle-report.ps1 -Log tools/tests/s9-home-idle-auto-fixture.log) -join "`n"
           foreach ($value in @('5 autonomous phases','auto_finished=True',
-                              'auto-baseline','auto-cut1','auto-recover1',
-                              'auto-cut2','auto-recover2','cut=92')) {
+                              'auto-baseline fps=10.00','auto-cut1 fps=1.00',
+                              'auto-recover1 fps=10.00','auto-cut2 fps=1.00',
+                              'auto-recover2 fps=10.00','cut=92')) {
             if (!$auto.Contains($value)) { throw "Autonomous cross-over report missing: $value" }
+          }
+          # Serial attachment occurs after registration in a real boot.
+          # The parser must extract source class from live link reports.
+          $late = Join-Path $env:RUNNER_TEMP 'hi2-late-serial.log'
+          Get-Content tools/tests/s9-home-idle-auto-fixture.log |
+            Where-Object { $_ -notmatch '^hi: link group=' } | Set-Content -Path $late
+          $lateReport = (& ./tools/s9-home-idle-report.ps1 -Log $late) -join "`n"
+          if (!$lateReport.Contains('link 3: SBHClockApplicationIconImageView._timerFired:')) {
+            throw "Late-attached serial report still lost the Clock source class"
           }
           $p7 = (& ./tools/s9-p7-basepower-report.ps1 -Log tools/tests/s9-p7-basepower-fixture.log) -join "`n"
           foreach ($value in @('5 labelled phases','unknown=1 visible=0 detached=1',

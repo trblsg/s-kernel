@@ -91,8 +91,12 @@ foreach($line in [IO.File]::ReadLines((Resolve-Path -LiteralPath $Log).Path)){
         if(!$active.FirstUp){$active.FirstUp=$up}
         $active.LastUp=$up
     }
-    if($line -match '^hi: link=(\d+) target=\S+ action=\S+ ticks_5s=(\d+) forwarded=\d+ cut=(\d+)'){
-        $id=[int]$Matches[1];$ticks=[int]$Matches[2];$cut=[int]$Matches[3]
+    if($line -match '^hi: link=(\d+) target=(\S+) action=(\S+) ticks_5s=(\d+) forwarded=\d+ cut=(\d+)'){
+        $id=[int]$Matches[1];$ticks=[int]$Matches[4];$cut=[int]$Matches[5]
+        # A host COM connection may begin AFTER the CADisplayLink group
+        # registration at boot. Every live link report includes its exact
+        # target and selector, so reconstruct the name without guessing.
+        $groupNames[$id]="$($Matches[2]).$($Matches[3])"
         if(!$active.LinkTicks.ContainsKey($id)){$active.LinkTicks[$id]=0;$active.LinkCut[$id]=0}
         $active.LinkTicks[$id]+=$ticks
         $active.LinkCut[$id]+=$cut
@@ -125,14 +129,21 @@ Write-Output "S9 HomeIdle A/B: $($runs.Count) serial windows; $autoPhases autono
 if($unconfirmed){
     Write-Output 'WARNING: hi_cmd=EPERM; stages are USB-REQUESTED scenes only, NOT confirmed hi: mark. No source cut succeeded.'
 }
-Write-Output 'fps_window = frames reported / sampled window uptime; navigation transitions are included; idle FPS reports are sparse, not OLED scanout.'
+Write-Output 'fps_window: autonomous 20s phases use frame totals / actual one-second FPS records (prevents 13fps false positives from 5s HI uptime snapshots); other scenes use scene uptime. Idle FPS records may be sparse. This is NOT OLED scanout.'
 $i=0
 foreach($r in $runs){
     $i++
     $seconds=$r.SecondsWithFps
     $duration=$r.LastUp-$r.FirstUp
-    $fps=if($duration -ge 10){'{0:0.00}' -f ($r.Frames/$duration)}
-         elseif($seconds){'{0:0.00}' -f ($r.Frames/$seconds)}else{'n/a'}
+    # HI auto phases last 20s but hi:phase snapshots occur only each 5s.
+    # First/last timestamps often span just 15s. Dividing frames by 15s
+    # fabricated 13.3fps where one-second FPS reports prove 10fps.
+    # Use report counts for auto phases, scene uptime for navigation windows.
+    $fps=if($r.Phase -like 'auto-*' -and $seconds){
+             '{0:0.00}' -f ($r.Frames/$seconds)
+         }elseif($duration -ge 10){
+             '{0:0.00}' -f ($r.Frames/$duration)
+         }elseif($seconds){'{0:0.00}' -f ($r.Frames/$seconds)}else{'n/a'}
     $commits=if($r.Snapshots){'{0:0.0}' -f ($r.Commits/($r.Snapshots*5.0))}else{'n/a'}
     Write-Output ('{0,2}. {1,-9} fps={2,-6} backboardd={3,-5}% SB={4,-5}% GPU={5,-6}MHz busy={6,-5}% CA commits/s={7,-6} fg_current={8}/{9}mA (device charging state NOT inferred)' -f
         $i,$r.Phase,$fps,(Avg $r.Backboard),(Avg $r.SpringBoard),(Avg $r.GpuClock),(Avg $r.GpuBusy),$commits,
@@ -144,4 +155,5 @@ foreach($r in $runs){
         Write-Output ("     link {0}: {1} tick_count={2} cut={3}" -f $g.Key,$who,$g.Value,$r.LinkCut[$g.Key])
     }
 }
+Write-Output 'CA commits/s is a SUM of window context commitId deltas: one global transaction may increment many contexts. It is NOT unique compositor transactions or GPU jobs.'
 Write-Output 'Reminder: auto CUT vs BASELINE/RECOVER with cut_count>0 is a source-specific causal intervention, but neither commits nor FPS alone prove pixel identity or permanent safety.'
