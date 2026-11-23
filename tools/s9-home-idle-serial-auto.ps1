@@ -757,9 +757,9 @@ if(-not $Execute){
     if($P9Fix -or $P9Restore){
         Say 'P9 preview: uses the matching P9 firmware, NEVER CPU_OFF or voltage writes.'
         if($P9Fix){
-            Say ('P9 actual reversible source fixes: GPU auto OFF after real screen OFF + 10s idle; panel DCS 28/10 and 11/29; touch32ms USB8ms while off; Clock hidden callback 1Hz; BIG wake cap1469/4s. Safety stop BIG='+$BigStopC+'C.')
-            Say 'Physical validation: 8 CPUs/PMU/TZ preflight, 1 real screen OFF/ON, GPU domain+PLL OFF then ON, panel DCS ACK and wake; leave policies ON only after full pass.'
-        }else{Say 'P9 restore: safely turn the screen ON if needed, set every P9 runtime policy to zero, then verify PMU and panel status.'}
+            Say ('P9 safe recovery: GPU auto OFF after real screen OFF + 10s idle; panel DCS OFF (prior wake flash/tear); touch32ms USB8ms while off; hidden Clock1Hz; BIG wake cap1469/4s. Safety stop BIG='+$BigStopC+'C.')
+            Say 'Physical validation: 8 CPUs/PMU/TZ preflight, panel mode0 confirmed, 1 real screen OFF/ON, GPU domain+PLL OFF then ON; DCS 28/10/11/29 MUST NOT fire. Leave GPU policy ON only after full pass.'
+        }else{Say 'P9 restore: safely turn the screen ON, DISABLE PANEL DCS FIRST, then clear GPU/touch/USB/Clock/wake policies; verify PMU and panel status.'}
         return
     }
     if($P8Unified -or $DumpP8History){

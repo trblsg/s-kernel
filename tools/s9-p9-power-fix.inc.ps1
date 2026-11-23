@@ -1,7 +1,12 @@
 # P9 functional power fixes on the already paired P9 BOOT+SYSTEM.
 # Direct COM reuses P8 echo+kernel ACK+exact readback. This is NOT P8
-# diagnostics: P9 toggles actual panel DCS and a validated GPU power gate.
+# diagnostics: P9 keeps the validated GPU power gate but deliberately
+# BYPASSES experimental panel DCS sleep following a real S9 wake glitch.
+# This is a HOST-ONLY safety update; no kernel rebuild/flash required.
 function P9-Restore-Policy {
+    # First disarm the known-bad experimental panel sleep while display ON.
+    # This is a software policy change, not a DCS sleep/wake transaction.
+    Send-Checked 'sysctl kern.hakios.p9_panel_mode=0'
     # GPU may be physically OFF; its own sysctl restores/validates SMC,
     # PLL, MMU, GPU core and TZ state BEFORE clearing the power gate.
     Send-Checked 'sysctl kern.hakios.p9_auto_gpu=0'
@@ -9,8 +14,6 @@ function P9-Restore-Policy {
     Send-Checked 'sysctl kern.hakios.p9_touch_off_ms=0'
     Send-Checked 'sysctl kern.hakios.p9_usb_off_ms=0'
     Send-Checked 'sysctl kern.hakios.hi_policy=0'
-    # The panel sysctl refuses a screen-OFF disable; wake visibly first.
-    Send-Checked 'sysctl kern.hakios.p9_panel_mode=0'
     Send-Checked 'sysctl kern.hakios.g3d_lab_stats'
     Send-Checked 'sysctl kern.hakios.p9_panel_stats'
 }
@@ -59,14 +62,25 @@ function Run-P9Fix {
     }
     $script:PowerThermalArmed=$true
     Say 'P9 PREFLIGHT PASS: 8 online cores, G3D/PLL/TZ safe, Samsung panel initialized.'
+    # Real P9 hardware run 2026-11-23T20:17:29Z proved that DCS 0x29
+    # preceded the very first post-sleep GPU job and visible scanout.
+    # The user observed a blurred flash and a torn top screen region.
+    # Turn off DCS sleep BEFORE the physical GPU power-gate test, keeping
+    # the already proven GPU OFF/ON policy independently. Fail closed if
+    # the panel is still asleep or the host cannot verify exact status.
+    Send-Checked 'sysctl kern.hakios.p9_panel_mode=0'
+    Send-Checked 'sysctl kern.hakios.p9_panel_stats'
+    if($script:Recent -notmatch 'mode=0 panel_sleep=0 panel_asleep=0 display_requested=1'){
+        throw 'P9 panel DCS bypass not confirmed. Run -P9Restore with display ON; no GPU gate attempted.'
+    }
+    Say 'P9 PANEL BYPASS VERIFIED: software blank only, no DCS sleep-in/out. Do not re-enable panel_mode=1 on this firmware.'
     # No G3D power writes yet; enable lower-work policies while display ON.
     Send-Checked 'sysctl kern.hakios.p9_touch_off_ms=32'
     Send-Checked 'sysctl kern.hakios.p9_usb_off_ms=8'
     Send-Checked 'sysctl kern.hakios.p9_wake_guard=1'
     Send-Checked 'sysctl kern.hakios.hi_policy=2'
-    Send-Checked 'sysctl kern.hakios.p9_panel_mode=1'
     Send-Checked 'sysctl kern.hakios.p9_auto_gpu=1'
-    Say 'P9 ACTIVE: Samsung DCS sleep, G3D real OFF after 10s, touch32ms/USB8ms only OFF, Clock hidden-link, 4s BIG wake cap.'
+    Say 'P9 ACTIVE SAFE: panel DCS=0 (wake image regression bypass), G3D real OFF after 10s, touch32ms/USB8ms only OFF, hidden Clock, 4s BIG wake cap.'
     Rest 'P9 ON stable before first real OFF/ON' 10
     $script:P9PanelOffAck=$false
     $script:P9PanelOnAck=$false
@@ -75,7 +89,6 @@ function Run-P9Fix {
     $wakeBefore=$script:LastGpuSample.WakeCount
     Send-Checked 'button lock'
     Wait-For 'P9 actual display OFF request' 30 {$script:DisplayOff} -Thermal
-    Wait-For 'P9 panel DCS 28+10 sent' 20 {$script:P9PanelOffAck} -Thermal
     Wait-For 'P9 G3D PMU domain=0 PLL=0, no GPU faults' 50 {
         $null -ne $script:LastGpuSample -and
         $script:LastGpuSample.Domain -eq 0 -and
@@ -83,11 +96,11 @@ function Run-P9Fix {
         $script:LastGpuSample.OffCount -gt $offBefore -and
         $script:LastGpuSample.Fault -eq 0
     } -Thermal
-    Rest 'P9 real panel+GPU sleep residency; USB console responsive' 20
+    Rest 'P9 real GPU OFF with panel DCS disabled; USB console responsive' 20
+    if($script:P9PanelOffAck){throw 'P9 panel sleep unexpectedly executed while disabled; fail closed'}
     $script:DisplayOn=$false
     Send-Checked 'button lock'
     Wait-For 'P9 actual display ON request' 30 {$script:DisplayOn} -Thermal
-    Wait-For 'P9 panel DCS 11+29 sent' 30 {$script:P9PanelOnAck} -Thermal
     Wait-For 'P9 G3D recovery domain=1 PLL=1 safe=1 TZ=1, 8 CPUs online' 35 {
         $null -ne $script:LastGpuSample -and $null -ne $script:LastCpuSample -and
         $script:LastGpuSample.Domain -eq 1 -and
@@ -102,7 +115,11 @@ function Run-P9Fix {
     } -Thermal
     Send-Checked 'sysctl kern.hakios.g3d_lab_stats'
     Send-Checked 'sysctl kern.hakios.p9_panel_stats'
-    Say 'P9 REAL HARDWARE PASS: G3D physically OFF then recovered, panel DCS off/on, 8 CPU online.'
+    if($script:Recent -notmatch 'mode=0 panel_sleep=0 panel_asleep=0 display_requested=1' -or
+       $script:P9PanelOffAck -or $script:P9PanelOnAck){
+        throw 'P9 GPU recovered but panel DCS safety bypass was lost; abort and rollback.'
+    }
+    Say 'P9 REAL HARDWARE PASS: GPU PMU+PLL OFF then ON, 8 CPU online; panel DCS DISABLED. Visual tear check is still required.'
     # These are diagnostic-only ring switches, NOT the functional policies.
     Send-Checked 'sysctl kern.hakios.p7_cpu_mode=0'
     Send-Checked 'sysctl kern.hakios.p7_gpu_mode=0'

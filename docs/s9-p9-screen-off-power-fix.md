@@ -3,6 +3,38 @@
 Branch: `trblsg/s-kernel` `s9/p9-screenoff-power-render`.
 P8 CPU fault interlocks are retained. **Do not use P7 CPU_OFF / sleep_cores=1**.
 
+## 2026-11-23 real-device wake regression and immediate P9.1 HOST-ONLY mitigation
+
+The P9 12:16:37 COM run succeeded at real GPU PMU+PLL OFF for **22,682ms**,
+physical GPU wake in **973us**, 0 GPU faults, all 8 CPU cores online.
+Fallback touch and USB polling dropped from approximately 250/493 to
+31/125 callbacks per second when screen OFF. However, **the user saw a
+blurred flash followed by upper-corner tearing during display ON**.
+The RAW log proves DCS `0x11/0x29` completed **before the first GPU
+post-OFF job**; after wake, the first rendered interval missed 27/57
+refreshes with the longest gap 67.6ms. S6E3HA8 driver still relies on
+the bootloader's DSC/TE configuration and does not reinitialize the
+complete panel state after sleep-in. Whether the corner tearing is due
+to retained TE/DSC state, prematurely shown stale GRAM or compositor
+frame timing is not yet individually proven.
+
+**Mitigation requiring NO NEW BUILD OR FLASH:** replace ONLY the Windows
+host files `tools/s9-home-idle-serial-auto.ps1` and
+`tools/s9-p9-power-fix.inc.ps1` from the updated P9 branch. Run
+`-P9Restore -Execute` with panel requested ON first, because the prior
+P9 test left ALL P9 policies active. This updated script first disables
+panel DCS, then restores GPU/touch/USB/Clock. Next `-P9Fix -Execute`
+keeps `p9_panel_mode=0` **by default**, verifies the panel is awake,
+and tests real GPU OFF/ON with DCS 28/10/11/29 completely disabled.
+It rejects unexpected DCS logs. Device must be cool, 8 cores online,
+and COM exclusive. On-screen visual verification is still required.
+Do NOT manually set `p9_panel_mode=1` on this hardware until the wake
+pipeline is fixed and tested with a safe first-frame latch/TE sequence.
+This mitigation preserves GPU gating benefit but deliberately does NOT
+claim panel power-down. If tear persists with DCS off, next target is
+DECON VGF0/TE shadow latch and first-frame presentation, not CPU idle.
+
+
 ## What this *changes*, beyond P8 passive logging
 
 1. **Real automatic G3D OFF.** `kern.hakios.p9_auto_gpu=1` activates the
@@ -19,7 +51,7 @@ P8 CPU fault interlocks are retained. **Do not use P7 CPU_OFF / sleep_cores=1**.
    P9 policy deliberately. Avoid P8 runner on a P9 active policy because
    its cleanup intentionally sets `g3d_lab_gate=0`.
 
-2. **Samsung panel sleep/wake, not brightness-only blank.**
+2. **Experimental Samsung panel sleep/wake, now disabled in the safe host script.**
    `kern.hakios.p9_panel_mode=1` requires initialized `panel=1`.
    iOS backboardd's existing display request triggers DCS
    `0x28 -> 0x10` (screen OFF), `0x11 -> 0x29` (ON), with the
@@ -29,7 +61,9 @@ P8 CPU fault interlocks are retained. **Do not use P7 CPU_OFF / sleep_cores=1**.
    accidental illumination; turn display ON then disable. This is
    **not** proven DECON/DSIM clocks OFF or panel power rails OFF: do
    not write unverified registers or claim full display power-down.
-   On missing DCS/black screen, use COM rollback and known-good image.
+   **Real device produced a blurred flash and upper-corner tear on wake.**
+   Safe P9.1 Windows host now forces `p9_panel_mode=0` before GPU gating.
+   On missing display/black screen, use COM rollback and known-good image.
 
 3. **Stop needless periodic work.**
    `p9_touch_off_ms=32` changes S6SY761's *fallback* polling from
@@ -97,11 +131,12 @@ run one functional pass:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\s9-home-idle-serial-auto.ps1 -P9Fix -Port COM125 -Execute
 ```
 
-The runner confirms direct COM echo+kernel ACK+readback for all
-controls, active 4+4 CPU cores, GPU domain+PLL+TZ safe, initialized
-Samsung panel. It applies reversible policies, performs one OFF->ON
-transition, requires DCS OFF/ON logs, real G3D PMU+PLL OFF then a
-successful GPU core/TZ wake and no fault. On ANY failure it tries
+The updated P9.1 runner confirms direct COM echo+kernel ACK+readback
+for all controls, active 4+4 CPU cores, GPU domain+PLL+TZ safe, and an
+initialized Samsung panel. It explicitly **disables DCS sleep**, checks
+`mode=0 panel_sleep=0 panel_asleep=0`, then performs one OFF->ON
+transition and validates real G3D PMU+PLL OFF then successful GPU
+core/TZ wake with no fault. On ANY failure it tries
 independent hardware restores, keeps all logs, and never marks success.
 On complete success **policies stay on** (diagnostic rings stop).
 
@@ -121,8 +156,9 @@ current only after functional stability is proven.
 
 - The success flag MUST include G3D PMU=OFF and PLL=OFF while display
   request=OFF and a verified GPU ON, safe=1, TZ=1, wake_fail=0 after ON.
-- Panel DCS OFF and ON packets reported sent; verify actual image by
-  visual inspection (log does not prove correct picture).
+- Safe P9.1 session must show `panel_sleep=0` and **no** DCS sleep/wake
+  packets. Visually confirm that startup flash and corner tearing stop;
+  PMU/console logs alone do not prove the picture is correct.
 - During OFF, touch poll should fall from 250/s to approximately31/s
   if fallback mode used; 8 cores remain online, no XNU CPU_OFF.
 - Static Home/lockscreen improvement from the exact Clock source is

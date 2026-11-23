@@ -15,6 +15,7 @@ $restore=(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runner -P9R
 if($preview -notmatch 'P9 SOURCE FIX: PREVIEW' -or
    $preview -notmatch 'NEVER CPU_OFF' -or
    $preview -notmatch 'GPU auto OFF' -or
+   $preview -notmatch 'panel DCS OFF' -or
    $restore -notmatch 'P9 RESTORE: PREVIEW'){
     throw 'P9 preview or rollback description missing'
 }
@@ -71,7 +72,26 @@ if(-not $s.sb.Contains('s9_p9_hidden_clock_skip') -or
    -not $s.sb.Contains('hi_p9_hidden_clock_enabled')){
     throw 'P9 guarded Clock source-level fix missing'
 }
-if(-not (Get-Content $p9 -Raw).Contains('P9 REAL HARDWARE PASS')){
+$safe=Get-Content $p9 -Raw
+if(-not $safe.Contains('P9 REAL HARDWARE PASS')){
     throw 'P9 physical OFF+ON validation not part of runtime script'
 }
-Write-Output 'P9 SOURCE FIX PASS: GPU screen-verified physical OFF, panel DCS, touch/USB, wake cap, Clock allowlist, P7 CPU_OFF EPERM, COM rollback and previews.'
+# Hardware regression at 20:17:29 UTC: panel 0x29 showed an image
+# BEFORE the first post-idle GPU submit. The safer host version MUST
+# never enable DCS sleep automatically. No kernel rebuild required.
+if($safe.Contains("Send-Checked 'sysctl kern.hakios.p9_panel_mode=1'") -or
+   $safe.Contains("Wait-For 'P9 panel DCS 28+10 sent'") -or
+   $safe.Contains("Wait-For 'P9 panel DCS 11+29 sent'")){
+    throw 'P9 wake-regression: host still enables dangerous panel DCS sleep'
+}
+if(-not $safe.Contains("Send-Checked 'sysctl kern.hakios.p9_panel_mode=0'") -or
+   -not $safe.Contains('mode=0 panel_sleep=0 panel_asleep=0 display_requested=1') -or
+   -not $safe.Contains('P9 PANEL BYPASS VERIFIED') -or
+   -not $safe.Contains('$script:P9PanelOffAck -or $script:P9PanelOnAck')){
+    throw 'P9 wake-regression: missing panel-DCS OFF guard or fail-closed verification'
+}
+if($safe.IndexOf("Send-Checked 'sysctl kern.hakios.p9_panel_mode=0'") -gt
+   $safe.IndexOf("Send-Checked 'sysctl kern.hakios.p9_auto_gpu=0'")){
+    throw 'P9 wake-regression: rollback must disarm panel DCS first'
+}
+Write-Output 'P9 SOURCE FIX PASS: GPU screen-verified physical OFF, panel DCS runtime bypass, touch/USB, wake cap, Clock allowlist, P7 CPU_OFF EPERM, COM rollback and previews.'
