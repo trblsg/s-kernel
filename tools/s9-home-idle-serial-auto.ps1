@@ -41,6 +41,7 @@ param(
     [switch]$P7Unified,
     [switch]$ActiveG3DGate,
     [switch]$ActiveCpuPark,
+    [switch]$LeaveP7AuditRunning,
     [switch]$DumpP7History,
     [switch]$Execute
 )
@@ -187,6 +188,17 @@ function Rest([string]$Label,[int]$Seconds){
     $deadline=[datetime]::UtcNow.AddSeconds($Seconds)
     while([datetime]::UtcNow -lt $deadline){Pump;Check-Thermal}
 }
+function Test-UsbRejected([string]$Text){
+    # The USB console actually prints "EPERM (1)", not "EPERM:".
+    return $Text -match '(?m)^usb: sysctl [^\r\n]+: (?:EPERM|ENOENT|ENODEV|EIO|EINVAL|EBUSY) \([1-9]\d*\)|not a command \(help\)|usb: swipe: one is going on|usb: button: no thread'
+}
+function Test-G3DRestored([string]$Text){
+    return $Text -match '(?m)^usb: kern\.hakios\.g3d_lab_stats = [^\r\n]*mode=0 [^\r\n]*domain=1 pll=1 gpu_safe=1 tz_ok=1 [^\r\n]*fault=0(?: |\r|$)'
+}
+function Test-SysctlReadback([string]$Text,[string]$Name,[string]$Expected){
+    # Exact numeric line, NOT substring: =1 must never accept =100.
+    return $Text -match ('(?m)^usb: '+[regex]::Escape($Name+' = '+$Expected)+'\r?$')
+}
 function Send-Checked([string]$Cmd,[string]$Additional='',[int]$ExtraAppWaitSeconds=0){
     if($Cmd -cnotmatch $script:Allowed){throw "Command outside conservative HI2 allowlist: $Cmd"}
     if(-not $Execute){Say "PREVIEW SEND $Cmd";return}
@@ -198,8 +210,10 @@ function Send-Checked([string]$Cmd,[string]$Additional='',[int]$ExtraAppWaitSeco
     $script:Serial.Write($payload,0,$payload.Length)
     Say ("TX $Cmd")
     $echo='usb> '+$Cmd
+    $readbackName='';$readbackValue=''
     if($Cmd -match '^sysctl (kern\.hakios\.[A-Za-z0-9_]+)=(\d+)$'){
         $ack='usb: '+$Cmd+': set (0)'
+        $readbackName=$Matches[1];$readbackValue=$Matches[2]
     }elseif($Cmd -match '^sysctl (kern\.hakios\.[A-Za-z0-9_]+)$'){
         $ack='usb: '+$Matches[1]+' = '
     }elseif($Cmd -eq 'button home' -or $Cmd -eq 'button lock'){
@@ -210,23 +224,25 @@ function Send-Checked([string]$Cmd,[string]$Additional='',[int]$ExtraAppWaitSeco
     $kernelDeadline=[datetime]::UtcNow.AddSeconds($AckTimeoutSeconds)
     $until=$kernelDeadline.AddSeconds([Math]::Max(0,$ExtraAppWaitSeconds))
     $gotEcho=$false;$gotAck=$false;$gotExtra=[string]::IsNullOrEmpty($Additional)
+    $gotReadback=[string]::IsNullOrEmpty($readbackName)
     while([datetime]::UtcNow -lt $until){
         Pump
         if($script:Recent.Contains($echo)){$gotEcho=$true}
         if($script:Recent.Contains($ack)){$gotAck=$true}
+        if($readbackName -and (Test-SysctlReadback $script:Recent $readbackName $readbackValue)){$gotReadback=$true}
         if($Additional -and $script:Recent.Contains($Additional)){$gotExtra=$true}
-        if($script:Recent -match 'not a command \(help\)|EPERM:|ENOENT:|EINVAL:|EBUSY:|usb: swipe: one is going on|usb: button: no thread'){
+        if(Test-UsbRejected $script:Recent){
             throw ("USB rejected $Cmd; "+$script:Recent.Substring([Math]::Max(0,$script:Recent.Length-430)))
         }
-        if([datetime]::UtcNow -ge $kernelDeadline -and (-not $gotEcho -or -not $gotAck)){
-            throw "No kernel echo+ACK for $Cmd within $AckTimeoutSeconds seconds"
+        if([datetime]::UtcNow -ge $kernelDeadline -and (-not $gotEcho -or -not $gotAck -or -not $gotReadback)){
+            throw "No kernel echo+ACK+exact-readback for $Cmd within $AckTimeoutSeconds seconds"
         }
-        if($gotEcho -and $gotAck -and $gotExtra){
-            Say ("ACK echo+kernel"+$(if($Additional){"+SpringBoard"}else{""})+": $Cmd")
+        if($gotEcho -and $gotAck -and $gotReadback -and $gotExtra){
+            Say ("ACK echo+kernel+readback"+$(if($Additional){"+SpringBoard"}else{""})+": $Cmd")
             return
         }
     }
-    throw "No exact echo/ACK for $Cmd (echo=$gotEcho ack=$gotAck SB=$gotExtra) within $AckTimeoutSeconds seconds"
+    throw "No exact echo/ACK/readback for $Cmd (echo=$gotEcho ack=$gotAck readback=$gotReadback SB=$gotExtra) within $AckTimeoutSeconds seconds"
 }
 function Check-Auto-Crossover{
     $want=@('baseline','cut1','recover1','cut2','recover2')
@@ -236,8 +252,21 @@ function Check-Auto-Crossover{
         throw ('Incomplete auto phase order; expected '+($want -join ',')+' got '+($got -join ','))
     }
 }
+function Confirm-G3DRestored{
+    Send-Checked 'sysctl kern.hakios.g3d_lab_stats'
+    # A successful USB write isn't a verified power-domain restore.
+    # The kernel report includes mode, domain/PLL, protection and fault.
+    if(-not (Test-G3DRestored $script:Recent)){
+        throw ('G3D RESTORE NOT PROVEN: require PMU=ON PLL=ON GPU/TZ safe and fault=0; '+$script:Recent.Substring([Math]::Max(0,$script:Recent.Length-450)))
+    }
+    Say 'G3D RESTORE VERIFIED by independent readback: mode=0 domain=1 pll=1 gpu_safe=1 tz_ok=1 fault=0'
+}
 function Dump-P7-Rings{
-    Say 'P7 OFFLINE HISTORY: retrieve up to 96 samples per ring, no CPU/GPU power writes'
+    Say 'P7 OFFLINE HISTORY: freeze 5s sample writers and retrieve retained history; no CPU/GPU power-state changes'
+    # Ring data survives mode=0, so a new CPU/GPU sample cannot wrap the
+    # oldest offline evidence while hundreds of slow sysctl ACKs are read.
+    Send-Checked 'sysctl kern.hakios.p7_cpu_mode=0'
+    Send-Checked 'sysctl kern.hakios.p7_gpu_mode=0'
     Send-Checked 'sysctl kern.hakios.p7_cpu_stats'
     Send-Checked 'sysctl kern.hakios.p7_gpu_stats'
     for($slot=0;$slot -lt 96;$slot++){
@@ -255,7 +284,7 @@ function Run-Scenario{
         $script:Completed=$true
         return
     }
-    if(($ActiveG3DGate -or $ActiveCpuPark) -and -not $P7Unified){throw 'ActiveG3DGate and ActiveCpuPark require P7Unified'}
+    if(($ActiveG3DGate -or $ActiveCpuPark -or $LeaveP7AuditRunning) -and -not $P7Unified){throw 'P7 power and offline capture options require P7Unified'}
     if($P7Unified){
         Send-Checked 'sysctl kern.hakios.p7_cpu_mode=1' 'p7-cpu: mode=1'
         Send-Checked 'sysctl kern.hakios.p7_gpu_mode=1' 'p7-gpu: mode=1'
@@ -316,13 +345,17 @@ function Run-Scenario{
             # and makes a validated domain power cycle. Kernel P7 watchdog
             # restores gate=0 after 120s even if the host disappears.
             Send-Checked 'sysctl kern.hakios.g3d_lab_idle_ms=10000'
+            Send-Checked 'sysctl kern.hakios.g3d_lab_stats'
+            if($script:Recent -notmatch '(?m)^usb: kern\.hakios\.g3d_lab_stats = [^\r\n]*requested_mv=950 domain=1 [^\r\n]*gpu_safe=1 tz_ok=1 [^\r\n]*fault=0(?: |\r|$)'){
+                throw 'G3D PRE-GATE FAILED: 950mV, domain=ON, GPU/TZ safe and fault=0 NOT all confirmed'
+            }
             Send-Checked 'sysctl kern.hakios.p7_gpu_phase=21'
             Send-Checked 'sysctl kern.hakios.p7_cpu_phase=21'
             Send-Checked 'sysctl kern.hakios.g3d_lab_gate=3' 'g3d-lab: gate mode=3'
             Rest 'P7 real G3D quiet power gating (bounded; no voltage changes)' 80
             Send-Checked 'sysctl kern.hakios.g3d_lab_gate=0' 'g3d-lab: gate mode=0'
-            Send-Checked 'sysctl kern.hakios.g3d_lab_stats'
-            Say 'G3D gate restored, read back off/wake/fault counters'
+            Confirm-G3DRestored
+            Say 'G3D actual domain/gpu_safe/tz_ok restored, read back off/wake/fault counters'
         }else{
             Send-Checked 'sysctl kern.hakios.g3d_lab_gate=0' 'g3d-lab: gate mode=0'
             Say 'P7 real G3D OFF skipped (safe default); opt-in with -ActiveG3DGate'
@@ -367,6 +400,7 @@ function Run-Scenario{
         Send-Checked 'sysctl kern.hakios.p7_gpu_phase=31'
         $script:DisplayOff=$false
         $script:ParkedCount=0
+        $script:UnparkedCount=0
         Send-Checked 'button lock'
         Wait-For 'display OFF before CPU power down' 30 {$script:DisplayOff} -Thermal
         Wait-For 'BIG CPU_OFF confirmed (not scheduler-idle)' 45 {$script:ParkedCount -ge 1} -Thermal
@@ -375,6 +409,9 @@ function Run-Scenario{
         Send-Checked 'button lock'
         Wait-For 'display ON after BIG CPU_OFF' 50 {$script:DisplayOn} -Thermal
         Send-Checked 'sysctl kern.hakios.p7_cpu_park=0' 'p7-cpu: park_requested=0'
+        Wait-For 'all previously parked BIG CPUs explicitly logged CPU_ON' 45 {
+            $script:ParkedCount -gt 0 -and $script:UnparkedCount -ge $script:ParkedCount
+        } -Thermal
         Rest 'P7 BIG cores wake/restore and recovery window' 35
         Send-Checked 'sysctl kern.hakios.p7_cpu_phase=32'
         Send-Checked 'sysctl kern.hakios.p7_gpu_phase=32'
@@ -384,6 +421,11 @@ function Run-Scenario{
         Send-Checked 'sysctl kern.hakios.p7_gpu_stats'
         Send-Checked 'sysctl kern.hakios.p7_cpu_record'
         Send-Checked 'sysctl kern.hakios.p7_gpu_record'
+        if($LeaveP7AuditRunning){
+            Send-Checked 'sysctl kern.hakios.p7_cpu_phase=40'
+            Send-Checked 'sysctl kern.hakios.p7_gpu_phase=40'
+            Say 'P7 OFFLINE READY: after cleanup, kernel CPU/GPU read-only rings remain ON; disconnect USB then reconnect and run -DumpP7History'
+        }
     }
     $script:Completed=$true
 }
@@ -423,7 +465,34 @@ if($ReplayLog){
         Scan-Line $line
     }
     Check-Auto-Crossover
-    Say 'REPLAY SELFTEST PASS: correctly saw A/B/A/B and FINISHED, no COM port opened'
+    $failCases=@(
+        'usb: sysctl kern.hakios.hi_cmd=1: EPERM (1)',
+        'usb: sysctl kern.hakios.p7_cpu_park=1: ENODEV (19)',
+        'usb: sysctl kern.hakios.g3d_lab_gate=3: EBUSY (16)',
+        'usb: sysctl kern.hakios.p7_cpu_mode=1: EIO (5)',
+        'usb: sysctl kern.hakios.hi_policy=1: EINVAL (22)'
+    )
+    foreach($failure in $failCases){
+        if(-not (Test-UsbRejected $failure)){throw ('REPLAY FAILED: missed kernel rejection '+$failure)}
+    }
+    if(Test-UsbRejected 'usb: sysctl kern.hakios.hi_cmd=250: set (0)'){
+        throw 'REPLAY FAILED: success ACK considered USB rejection'
+    }
+    if(-not (Test-SysctlReadback "usb: kern.hakios.hi_cmd = 252`r`n" 'kern.hakios.hi_cmd' '252')){
+        throw 'REPLAY FAILED: USB exact readback 252 rejected'
+    }
+    if(Test-SysctlReadback "usb: kern.hakios.hi_cmd = 2520`r`n" 'kern.hakios.hi_cmd' '252'){
+        throw 'REPLAY FAILED: USB accepted readback 2520 as 252'
+    }
+    $ok='usb: kern.hakios.g3d_lab_stats = phase=21 mode=0 grace_ms=10000 requested_mv=950 domain=1 pll=1 gpu_safe=1 tz_ok=1 off_count=2 wake_count=2 fault=0 rail_valid=1'
+    if(-not (Test-G3DRestored $ok)){throw 'REPLAY FAILED: correct G3D restore rejected'}
+    if(Test-G3DRestored ($ok -replace 'tz_ok=1','tz_ok=0')){
+        throw 'REPLAY FAILED: invalid TZ accepted as G3D restored'
+    }
+    if(Test-G3DRestored ($ok -replace 'fault=0','fault=4')){
+        throw 'REPLAY FAILED: GPU fault accepted as recovered'
+    }
+    Say 'REPLAY SELFTEST PASS: ABAB + USB error ACK / GPU PMU recovery verification, no COM port opened'
     return
 }
 Say ('S9 HI2 SERIAL AUTO: '+$(if($Execute){'EXECUTE'}else{'PREVIEW'}))
@@ -432,6 +501,7 @@ if(-not $Execute){
     Say 'Preflight read sysctl+ping(250), Home, rearm(252), Clock A/B/A/B, verified Clock policy and P7 CPU/GPU sampled ring, secondary, G3D shadow, Settings.'
     if($ActiveCpuPark){Say 'EXPLICIT CPU_OFF A/B requested: requires sleep_cores=1 in verified bootargs, button lock, positive OFF/ON/CPU_OFF proof'}
     if($DumpP7History){Say 'OFFLINE DUMP mode: 96 CPU+GPU ring rows collected after USB reconnect (no device state changes)'}
+    if($LeaveP7AuditRunning){Say 'After all phases, leave ONLY read-only P7 rings active; disconnect USB for <=8min and reconnect for -DumpP7History'}
     Say ('Safety: battery-stop '+$BatteryStopC+'C; P7Unified read-only by default; -ActiveG3DGate and -ActiveCpuPark are EXPLICIT optional power transitions; CPU park requires boot sleep_cores=1.')
     return
 }
@@ -470,17 +540,26 @@ try{
     Say ('STOPPED: '+$failed)
 }finally{
     if($script:Started){
-        try{
-            if($P7Unified){
-                Send-Checked 'sysctl kern.hakios.hi_policy=0'
-                Send-Checked 'sysctl kern.hakios.p7_cpu_park=0'
-                Send-Checked 'sysctl kern.hakios.g3d_lab_gate=0'
-                Send-Checked 'sysctl kern.hakios.g3d_lab_rail_probe=0'
-                Send-Checked 'sysctl kern.hakios.p7_cpu_mode=0'
-                Send-Checked 'sysctl kern.hakios.p7_gpu_mode=0'
+        # Each restore is independent; a missing/unresponsive sysctl must
+        # not prevent the subsequent GPU/CPU/Clock safety restorations.
+        $restore=New-Object 'System.Collections.Generic.List[string]'
+        if($P7Unified){
+            [void]$restore.Add('sysctl kern.hakios.hi_policy=0')
+            [void]$restore.Add('sysctl kern.hakios.p7_cpu_park=0')
+            [void]$restore.Add('sysctl kern.hakios.g3d_lab_gate=0')
+            [void]$restore.Add('sysctl kern.hakios.g3d_lab_rail_probe=0')
+            if(-not ($LeaveP7AuditRunning -and $script:Completed -and $null -eq $failed)){
+                [void]$restore.Add('sysctl kern.hakios.p7_cpu_mode=0')
+                [void]$restore.Add('sysctl kern.hakios.p7_gpu_mode=0')
+            }else{
+                Say 'P7 CLEANUP: retain ONLY read-only CPU/GPU ring acquisition for battery-only sampling.'
             }
-            Send-Checked 'sysctl kern.hakios.hi_cmd=201' 'hi: gate=usb-stop'
-        }catch{Say ('CLEANUP UNCONFIRMED; safe Clock forward + optional G3D watchdog still apply: '+$_.Exception.Message)}
+        }
+        [void]$restore.Add('sysctl kern.hakios.hi_cmd=201')
+        foreach($item in $restore){
+            try{Send-Checked $item}
+            catch{Say ('CLEANUP UNCONFIRMED '+$item+' : '+$_.Exception.Message)}
+        }
     }
     if($null -ne $script:Raw){
         try{$script:Raw.Flush()}catch{}

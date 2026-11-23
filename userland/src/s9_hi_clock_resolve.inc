@@ -93,7 +93,15 @@ hi_clock_resolve(id target,char *how,size_t how_size)
     char selected[82]="none";
     for(unsigned i=0;i<sizeof(props)/sizeof(props[0]);i++){
         SEL sel=sel_registerName(props[i]);
-        if(!class_respondsToSelector(object_getClass(target),sel))continue;
+        /* A matching selector name does not guarantee an object return.
+         * Casting a scalar/CGRect/void method result to 'id' and calling
+         * isKindOfClass: would dereference a bogus pointer and crash
+         * SpringBoard. Inspect the runtime ABI BEFORE invoking any getter. */
+        Method getter=class_getInstanceMethod(object_getClass(target),sel);
+        char return_type[20]={0};
+        if(!getter || method_getNumberOfArguments(getter)!=2)continue;
+        method_getReturnType(getter,return_type,sizeof(return_type));
+        if(return_type[0]!='@')continue;
         id candidate=((id(*)(id,SEL))objc_msgSend)(target,sel);
         if(!hi_is_ui_view(candidate))continue;
         char why[70];

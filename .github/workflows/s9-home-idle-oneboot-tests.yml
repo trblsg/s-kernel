@@ -117,6 +117,11 @@ jobs:
           g3dlab = Path('drivers/gpu/mali/hakios.mali_lab.h').read_text()
           doc7=Path('docs/s9-p7-clock-basepower-unified.md').read_text()
           assert 'hi_view_state(id view' in proof and 'class_copyIvarList' in proof
+          assert 'class_getInstanceMethod' in proof
+          assert 'method_getNumberOfArguments(getter)!=2' in proof
+          assert 'method_getReturnType(getter,return_type,sizeof(return_type))' in proof
+          assert "return_type[0]!='@'" in proof
+          assert proof.index("return_type[0]!='@'") < proof.index('id candidate=((id(*)(id,SEL))objc_msgSend)(target,sel);')
           assert 'HI_VIEW_UNKNOWN' in verified and 'hi_verified_should_skip' in verified
           assert 'hi_verified_should_skip(' in inc and 'verified_cut=' in inc
           assert 'hi_auto_state==HI_AUTO_FINISHED' in inc
@@ -142,8 +147,34 @@ jobs:
           assert '-ActiveCpuPark' in doc7 and 'sleep_cores=1' in doc7
           assert '-DumpP7History' in doc7
           for value in ('p7_cpu_mode=1','p7_gpu_mode=1','hi_policy=1',
-                        'g3d_lab_gate=3','p7_cpu_park=1','Dump-P7-Rings'):
+                        'g3d_lab_gate=3','p7_cpu_park=1','Dump-P7-Rings',
+                        'LeaveP7AuditRunning','Test-UsbRejected',
+                        'Test-SysctlReadback','Test-G3DRestored',
+                        'Confirm-G3DRestored','p7_cpu_mode=0',
+                        'all previously parked BIG CPUs explicitly logged CPU_ON'):
               assert value in runner,value
+          assert 'readback=$gotReadback' in runner
+          assert 'No kernel echo+ACK+exact-readback' in runner
+          assert 'USB error ACK / GPU PMU recovery verification' in runner
+          assert "'kern.hakios.hi_cmd' '252'" in runner
+          assert 'kernel_sysctlbyname(name,value,&length,NULL,0)' in cpu
+          # Assert every requested USB sysctl is available to KERNEL
+          # rather than just iOS userland, preventing another HI2 EPERM.
+          import re
+          sysctl_sources='\n'.join(Path(p).read_text() for p in (
+              'drivers/gpu/mali/hakios.mali.c',
+              'drivers/gpu/mali/hakios.mali_lab.h',
+              'drivers/gpu/mali/hakios.p7_gpu_lab.h',
+              'drivers/power/exynos/hakios.p7_cpu_lab.h'))
+          required=('hi_cmd','hi_policy','g3d_lab_gate','g3d_lab_idle_ms',
+                    'g3d_lab_rail_probe','g3d_lab_stats','p7_cpu_mode',
+                    'p7_cpu_phase','p7_cpu_slot','p7_cpu_stats','p7_cpu_record',
+                    'p7_cpu_park','p7_gpu_mode','p7_gpu_phase','p7_gpu_slot',
+                    'p7_gpu_stats','p7_gpu_record')
+          for name in required:
+              match=re.search(r'SYSCTL_(?:UINT|PROC)\s*\(\s*_kern_hakios\s*,\s*OID_AUTO\s*,\s*'
+                              +re.escape(name)+r'\b[^;]*;',sysctl_sources,re.S)
+              assert match and 'CTLFLAG_KERN' in match.group(0),name
           extra='shub=6 bt=7 fps_log=1 metal=2 camtl=0 '
           unified=next(s for s in doc7.splitlines() if s.startswith('hi=2 sleep_cores=1 '))
           assert len(unified.encode()) == 177, len(unified)

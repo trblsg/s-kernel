@@ -21,6 +21,10 @@ inheritance, looks for an actual UIView via direct target, typed view
 properties or object-typed view/icon ivars, and classifies:
 `unknown,visible,detached,hidden,outside`.
 It does NOT guess an ivar offset or infer visibility from the class name.
+**Before calling a runtime property getter**, its Objective-C method signature
+must have exactly self/_cmd arguments and an object return type. A
+same-named selector returning an integer/struct is rejected without calling
+it, preventing bogus-pointer dereference on SpringBoard.
 A visible view overrides an offscreen candidate; conflicting view states
 fail open. An offscreen state must remain identical for **8 continuous
 seconds** and there must be **3 seconds without touch**, verified Home
@@ -126,8 +130,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\s9-home-idle-serial-
 Additional changes: G3D gate3 80s with independent kernel auto-expire
 at120s; an OFF-screen baseline 75s with BIG cores online versus an
 OFF-screen CPU_OFF 75s confirmed by `GenericARMPE: sleep_cores`
-and actual display-OFF/ON requests. USB host ACK is checked at every
-transition. A failed or uncertain wake is **an incomplete test**, not
+and actual display-OFF/ON requests. USB host command echo, kernel success, **exact numeric sysctl readback**
+and SpringBoard acknowledgment (where applicable) are checked at every
+transition. The host parser recognizes real kernel errors such as
+`EPERM (1)`, `ENODEV (19)` and `EIO (5)` instead of timing out.
+For G3D real gating it also requires an independent kernel report proving
+`mode=0, domain=1, pll=1, gpu_safe=1, tz_ok=1, fault=0` after
+restore; CPU_OFF is considered restored only when every parked BIG core
+emits a matching CPU_ON/started again message. A failed or uncertain wake is **an incomplete test**, not
 a successful optimization. On abort it attempts `hi_policy=0`,
 `p7_cpu_park=0`, `g3d_lab_gate=0`, then turns observers off.
 Do not manually disconnect panel hardware while powered.
@@ -144,18 +154,33 @@ The always-on serial USB gadget is a major measurement confound:
 P6 logged ~495 USB periodic calls/s and ~249 touch pin polls/s when
 connected, which are NOT actual CPU wake-from-WFI counts.
 
-While `p7_cpu_mode=1` and `p7_gpu_mode=1`, the two 96-sample rings
-retain ~8min of history. You may physically disconnect USB for a
-controlled battery-only idle interval, reconnect USB, then run the
-host script in **dump-only** mode (CLOSE PuTTY):
+To perform USB-disconnected sampling **in the SAME build**, run
+the safe unified test with `-P7Unified -LeaveP7AuditRunning -Execute`
+instead of only `-P7Unified -Execute`. Its cleanup explicitly
+restores `hi_policy=0`, `p7_cpu_park=0`, `g3d_lab_gate=0`
+and stops PMIC rail polling but **retains only the two read-only ring
+samplers**. The host confirms `P7 OFFLINE READY`.
+
+For example, before disconnect:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\s9-home-idle-serial-auto.ps1 -Port COM125 -P7Unified -LeaveP7AuditRunning -Execute
+```
+
+The two 96-sample rings retain approximately 8min of history. Then
+physically disconnect USB for a controlled battery-only idle interval
+(no new image or manual sysctl needed), reconnect USB, then run the
+script in **dump-only** mode (CLOSE PuTTY):
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\s9-home-idle-serial-auto.ps1 -Port COM125 -DumpP7History -Execute
 ```
 
-It reads all `p7_cpu_slot=0..95` and `p7_gpu_slot=0..95` records,
-without making CPU/GPU power changes, and writes `.log` plus
-`.p7-report.txt`. A reconnect that fails to enumerate COM cannot
+It first **stops the two read-only samplers (mode=0, without clearing
+their ring data)**, preventing the 96-row history from wrapping during
+slow COM reads. It then reads all `p7_cpu_slot=0..95` and
+`p7_gpu_slot=0..95` records without changing actual CPU/GPU power
+states and writes `.log` plus `.p7-report.txt`. A reconnect that fails to enumerate COM cannot
 be reconstructed by software. Ring is in RAM, so reboot loses it.
 A USB power disconnect changes charger conditions, so compare
 carefully; also record battery SOC, thermistors, external USB meter
