@@ -618,6 +618,16 @@ hakios_s6e3ha8_blank(int (*say_as)(const char *, ...))
  */
 static uint32_t panel_sleep;
 static bool panel_asleep;
+/* P9 runtime selection. Boot-arg panel_sleep=1 remains supported as before;
+ * P9 is intentionally OFF by default and NEVER changes panel supplies. */
+static uint32_t p9_panel_auto, panel_sleep_boot;
+extern int hakios_display_requested_on(void);
+
+int
+hakios_p9_panel_auto_on(void)
+{
+    return (int)__atomic_load_n(&p9_panel_auto, __ATOMIC_ACQUIRE);
+}
 
 int hakios_s6e3ha8_power(bool on);
 
@@ -671,6 +681,57 @@ hakios_s6e3ha8_power(bool on)
 	return first && second ? 0 : EIO;
 }
 
+/* P9: use the ALREADY IMPLEMENTED Samsung 28/10 and 11/29 sequence,
+ * instead of pretending a brightness change is panel sleep. Run-time
+ * opt-in needs panel=1 initialized. Refuse mutation while the display
+ * request is OFF so disabling never lights the locked screen unexpectedly.
+ * On failed wake, leave the mode armed for another ON retry/rollback.
+ * This is panel DCS only: NOT a DECON/DSIM clock-gating claim.
+ */
+static int
+p9_panel_mode_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
+    __unused int arg2, struct sysctl_req *req)
+{
+    int value=(int)__atomic_load_n(&p9_panel_auto,__ATOMIC_RELAXED);
+    int err=sysctl_io_number(req,value,sizeof(value),&value,NULL);
+    if(err || req->newptr==USER_ADDR_NULL)return err;
+    if(value!=0 && value!=1)return EINVAL;
+    if(!dsim || !panel_lock)return ENODEV;
+    /* No asynchronous panel state transition from a kernel sysctl. The
+     * normal GenericARMPE display event is the sole OFF/ON executor. */
+    if(hakios_display_requested_on()!=1)return EBUSY;
+    if(value==0 && panel_asleep){
+        err=hakios_s6e3ha8_power(true);
+        if(err)return err;
+    }
+    lck_mtx_lock(panel_lock);
+    panel_sleep=value?1u:panel_sleep_boot;
+    __atomic_store_n(&p9_panel_auto,(uint32_t)value,__ATOMIC_RELEASE);
+    lck_mtx_unlock(panel_lock);
+    say("p9-panel: mode=%d DCS_28_10_off=1 DCS_11_29_on=1 "
+        "power_rails_unchanged=1 DECON_DSIM_clocks_unmodified=1\n",value);
+    return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p9_panel_mode,
+    CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,
+    p9_panel_mode_sysctl,"I","P9 live opt-in Samsung panel sleep on display OFF (requires panel=1)");
+
+static int
+p9_panel_stats_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
+    __unused int arg2,struct sysctl_req *req)
+{
+    char out[200];
+    snprintf(out,sizeof(out),"mode=%u panel_sleep=%u panel_asleep=%u "
+        "display_requested=%d panel_ready=%u DCS_only=1 DECON_DSIM_gated=unproven",
+        __atomic_load_n(&p9_panel_auto,__ATOMIC_ACQUIRE),panel_sleep,
+        panel_asleep?1u:0u,hakios_display_requested_on(),
+        dsim&&panel_lock?1u:0u);
+    return SYSCTL_OUT(req,out,strlen(out)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p9_panel_stats,
+    CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,
+    p9_panel_stats_sysctl,"A","P9 panel request/DCS state; does not imply DECON or power-rail OFF");
+
 void
 hakios_s6e3ha8_init(void)
 {
@@ -697,6 +758,7 @@ hakios_s6e3ha8_init(void)
 	}
 	(void)hakios_panel_register("s6e3ha8", panel_set);
 	(void)PE_parse_boot_argn("panel_sleep", &panel_sleep, sizeof(panel_sleep));
+	panel_sleep_boot=panel_sleep;
 	if (panel_sleep) {
 		say("s6e3ha8: panel_sleep=%u: the screen's off from iOS puts the panel to sleep (28, 10), its on wakes it (11, 29)\n",
 		    panel_sleep);

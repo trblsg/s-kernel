@@ -291,6 +291,32 @@ static struct {
 } nums;
 
 SYSCTL_DECL(_kern_hakios);
+/* P9: bounded transient M3 boost cap on display wake. Opt-in, never
+ * increases frequency or defeats a thermal/online ceiling. This is NOT
+ * physical CPU power-down or CPU_SUSPEND. */
+static uint32_t p9_wake_guard;
+static uint64_t p9_wake_until;
+static int p9_previous_display = -1;
+extern int hakios_display_requested_on(void);
+static int
+p9_wake_guard_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
+    __unused int arg2,struct sysctl_req *req)
+{
+    int v=(int)__atomic_load_n(&p9_wake_guard,__ATOMIC_RELAXED);
+    int err=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(err || req->newptr==USER_ADDR_NULL)return err;
+    if(v<0 || v>1)return EINVAL;
+    __atomic_store_n(&p9_wake_guard,(uint32_t)v,__ATOMIC_RELEASE);
+    /* Establish the correct baseline rather than capping at enable time. */
+    p9_previous_display=hakios_display_requested_on();
+    p9_wake_until=0;
+    say("p9-cpu: display_wake_guard=%d duration_ms=4000 "
+        "BIG_ceiling_khz=1469000 thermal_caps_preserved=1 CPU_OFF=0\\n",v);
+    return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p9_wake_guard,
+    CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,
+    p9_wake_guard_sysctl,"I","P9 optional 4s lower-only BIG boost cap on display wake");
 #include "hakios.p4_cpu_lab.h" /* P4: scheduler-idle and frame cadence, read-only */
 #include "hakios.p6_lab.h" /* P6: integrated opt-in wake-proxy and policy shadow */
 #include "hakios.p7_cpu_lab.h" /* P7: ring-buffered base CPU idle/wake audit */
@@ -706,6 +732,19 @@ ceiling_now(struct cluster *c)
 		max = MIN(max, c->levels[MIN(c->thermal, c->n - 1)]);
 	}
 	if (c == &clusters[1]) {
+        if (__atomic_load_n(&p9_wake_guard,__ATOMIC_RELAXED)) {
+            int display=hakios_display_requested_on();
+            if (display == 0) {
+                p9_previous_display=0;
+                p9_wake_until=0;
+            } else if (display == 1) {
+                if (p9_previous_display == 0)
+                    clock_interval_to_deadline(4000,NSEC_PER_MSEC,&p9_wake_until);
+                p9_previous_display=1;
+                if (p9_wake_until && mach_absolute_time() < p9_wake_until)
+                    max=MIN(max,1469000u);
+            }
+        }
 		uint32_t p8_cap = __atomic_load_n(&p8_big_cap_khz,__ATOMIC_RELAXED);
 		if (p8_cap != 0) max = MIN(max,p8_cap); /* P8 explicit lower-only A/B */
 	}

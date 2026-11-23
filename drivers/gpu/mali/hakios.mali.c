@@ -167,7 +167,7 @@ SYSCTL_DECL(_kern_hakios);              /* the node is drivers/core/hakios.platf
 static uint32_t hi_policy;
 SYSCTL_UINT(_kern_hakios, OID_AUTO, hi_policy,
     CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY | CTLFLAG_KERN,
-    &hi_policy, 0, "S9 Clock visibility-verified reduction; OFF unless explicitly 1");
+    &hi_policy, 0, "Clock reduction: 0 disabled, 1 view-verified Home offscreen, 2 P9 hidden Home-icon offscene";
 static uint32_t hi_cmd;
 SYSCTL_UINT(_kern_hakios, OID_AUTO, hi_cmd, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_ANYBODY | CTLFLAG_KERN,
     &hi_cmd, 0, "S9 Home idle oneboot: 0 stop; 1 main; 2 secondary; 3 Settings; 101..148 gate source; 199 top; 200 layers; 201 stop");
@@ -194,6 +194,9 @@ static uint32_t g3d_lab_phase; /* 0..99, user-set phase marker; NO hardware effe
 /* P5: runtime-only read-only display/GPU diagnostics; never a boot arg. */
 static uint32_t p5_mode, p5_phase, p5_threads;
 static uint32_t p68_mode; /* read-only PMU/quiet-window correlation, independent of real G3D gating */
+/* P9: user-opt-in production screen-OFF GPU policy. Never infer OFF from quiet frames alone. */
+static uint32_t p9_auto_gpu;
+extern int hakios_display_requested_on(void);
 static uint32_t g3d_lab_rail_probe, g3d_lab_fault, g3d_lab_monitor_started;
 static uint32_t g3d_lab_off_count, g3d_lab_wake_count, g3d_lab_wake_failed;
 static uint32_t g3d_lab_shadow_count, g3d_lab_denied_count, g3d_lab_job_faults;
@@ -2595,6 +2598,10 @@ g3d_idle_gate(void)
 	if ((!g3d_sleep && g3d_lab_gate != 1) || !gov_on || !g3d_awake || g3d_lab_fault)
 		return;
 	gate_mode = g3d_lab_gate != 0 ? g3d_lab_gate : 2;
+	/* Mode 2 and P9 are SCREEN-OFF policies, not generic quiet-frame gates.
+	 * Display request -1/ON fails closed; mode 3 remains explicit long-quiet. */
+	if (gate_mode == 2 && hakios_display_requested_on() != 0)
+		return;
 	ms = g3d_lab_gate != 0 ? g3d_lab_idle_ms : g3d_sleep_ms;
 	if (gate_mode == 3 && ms < 1500)
 		ms = 1500;
@@ -2605,6 +2612,12 @@ g3d_idle_gate(void)
 		return;
 
 	lck_mtx_lock(&mali_job_lock);
+	/* Recheck after locking, so a concurrent display-ON request never
+	 * authorizes a new OFF transition based on the earlier observation. */
+	if (gate_mode == 2 && hakios_display_requested_on() != 0) {
+		lck_mtx_unlock(&mali_job_lock);
+		return;
+	}
 	now = mach_absolute_time();
 	job_age = g3d_lab_age_ms(now, __atomic_load_n(&g3d_last_busy, __ATOMIC_RELAXED));
 	frame_age = g3d_lab_age_ms(now, __atomic_load_n(&gov_frame_last, __ATOMIC_RELAXED));
@@ -2720,6 +2733,7 @@ g3d_sleep_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 			return EBUSY; /* existing sysctl cannot bypass Lab rail/fault guards */
 		}
 		g3d_lab_gate = 0; /* direct legacy sysctl overrides Lab mode */
+		p9_auto_gpu = 0; /* manual control explicitly overrides P9 auto policy */
 		g3d_sleep = 1;
 		lck_mtx_unlock(&mali_job_lock);
 		lck_mtx_lock(&mali_queue_lock);
@@ -2740,6 +2754,7 @@ g3d_sleep_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 		return EIO;
 	}
 	g3d_sleep = 0;
+	p9_auto_gpu = 0;
 	g3d_lab_gate = 0; /* direct legacy sysctl overrides Lab mode */
 	lck_mtx_unlock(&mali_job_lock);
 	say("mali: g3d_sleep=0: the gate is off (kern.hakios.g3d_sleep)\n");

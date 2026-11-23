@@ -1,0 +1,78 @@
+name: S9 P9 screen-off power and compositor source fixes
+on:
+  push:
+    branches: [s9/p9-screenoff-power-render]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile C11 Clock policy regression
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -O2 tools/tests/test_s9_p9_clock_policy.c -o /tmp/s9-p9-clock
+          /tmp/s9-p9-clock
+      - name: Check real source paths, interlocks, safety, and no blind frame skipping
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          read=lambda p:Path(p).read_text()
+          gpu=read('drivers/gpu/mali/hakios.mali.c')
+          lab=read('drivers/gpu/mali/hakios.mali_lab.h')
+          panel=read('drivers/display/panel/hakios.s6e3ha8.c')
+          pe=read('xnu/files/GenericARMPE.cpp')
+          touch=read('drivers/input/touch/hakios.s6sy761.c')
+          usb=read('drivers/usb/hakios.dwc3.c')
+          cpu=read('drivers/power/exynos/hakios.exynos_cpufreq.c')
+          sb=read('userland/src/s9_home_idle.inc')
+          host=read('tools/s9-home-idle-serial-auto.ps1')
+          run=read('tools/s9-p9-power-fix.inc.ps1')
+          assert 'p9_auto_gpu_sysctl' in lab
+          assert 'g3d_lab_gate = 2;' in lab and 'g3d_sleep = 1;' in lab
+          assert gpu.count('gate_mode == 2 && hakios_display_requested_on() != 0') == 2
+          assert 'g3d_lab_gpu_safe' in lab and 'g3d_lab_protection_ok' in lab
+          assert '!g3d_awake && !g3d_power_on()' in lab
+          assert 'p7_gpu_gate_watchdog' in read('drivers/gpu/mali/hakios.p7_gpu_lab.h')
+          assert 'p9_panel_mode_sysctl' in panel
+          assert all(x in panel for x in ('display_off[] = { 0x28 }','sleep_in[] = { 0x10 }','sleep_out[] = { 0x11 }','display_on[] = { 0x29 }'))
+          assert 'gPanelSleep || hakios_p9_panel_auto_on()' in pe
+          assert 'int hakios_p9_panel_auto_on(void) { return 0; }' in read('drivers/core/hakios.stubs.c')
+          assert 'p9_touch_off_ms_sysctl' in touch and 'if (!active)' in touch
+          assert 'p9_usb_off_ms_sysctl' in usb and 'ring_head==ring_tail && hakios_display_requested_on()==0' in usb
+          assert 'p9_wake_guard_sysctl' in cpu and 'max=MIN(max,1469000u)' in cpu
+          assert 'if(enable){' in pe and 'p8-safety: BIG CPU_OFF REFUSED' in pe
+          assert 'if(value==1)return EPERM;' in read('drivers/power/exynos/hakios.p7_cpu_lab.h')
+          assert 'hi_p9_hidden_clock_enabled' in sb and 's9_p9_hidden_clock_skip' in sb
+          assert 'wallpaper_home_showing()' in sb
+          assert 'P9 REAL HARDWARE PASS' in run and 'P9-Restore-Policy' in run
+          assert 'P9Allowed' in host and 'P9Restore' in host
+          assert not any(x in sb for x in ('p9_skip_all_frames','p9_force_idle_vsync'))
+          print('P9 paths and hardware fail-closed source gates PASS')
+          PY
+          git diff --check
+  windows-host:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: P9 and P8 Windows PowerShell 5.1 offline regressions
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach($test in @('tools/tests/test-s9-p9-power-fix.ps1','tools/tests/test-s9-p8-unified.ps1')){
+            $stdout=Join-Path $env:RUNNER_TEMP ([IO.Path]::GetFileName($test)+'.out')
+            $stderr=Join-Path $env:RUNNER_TEMP ([IO.Path]::GetFileName($test)+'.err')
+            $p=Start-Process -FilePath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList @(
+              '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$test) -Wait -PassThru -NoNewWindow `
+              -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            $out=[IO.File]::ReadAllText($stdout)
+            $err=[IO.File]::ReadAllText($stderr)
+            Write-Output $out
+            if($err){Write-Output $err}
+            if($p.ExitCode -ne 0){throw "Windows offline test failed: $test, exit $($p.ExitCode)"}
+            if($test -match 'p9' -and $out -notmatch 'P9 SOURCE FIX PASS'){throw 'P9 regression marker missing'}
+            if($test -match 'p8' -and $out -notmatch 'P8 SAFE UNIFIED PASS'){throw 'P8 regression marker missing'}
+          }

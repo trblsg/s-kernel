@@ -108,6 +108,10 @@ static vm_offset_t alive;
 static uint32_t res_x = 4096, res_y = 4096;
 static uint32_t ldo_cycles = 1;       /* s6sy761_ldo=0: never switch the chip's supplies */
 static bool irq_wanted;               /* s6sy761_irq=1: use gpa1-0's SPI instead of polling */
+/* P9: opt-in, bounded fallback polling reduction only while screen is OFF.
+ * IRQ mode remains unchanged; an active finger always uses original 4ms. */
+static uint32_t p9_touch_off_ms;
+extern int hakios_display_requested_on(void);
 static volatile bool irq_attached;    /* the GIC's SPI 44 and the pin's EINT are set up */
 static volatile bool irq_running;     /* the IRQ thread is reading the queue */
 static uint32_t irq_pending;          /* the line has fired, the IRQ thread has not read the queue yet */
@@ -189,6 +193,23 @@ SYSCTL_QUAD(_kern_hakios, OID_AUTO, p69_touch_pin_low, CTLFLAG_RD|CTLFLAG_LOCKED
     &p69_touch_pin_low, "P6.9 fallback 4ms polls that observed IRQ GPIO low");
 SYSCTL_QUAD(_kern_hakios, OID_AUTO, p69_touch_event_reads, CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,
     &p69_touch_event_reads, "P6.9 fallback poll rounds that invoked read_events");
+
+static int
+p9_touch_off_ms_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
+    __unused int arg2, struct sysctl_req *req)
+{
+    int v = (int)__atomic_load_n(&p9_touch_off_ms, __ATOMIC_RELAXED);
+    int err = sysctl_io_number(req, v, sizeof(v), &v, NULL);
+    if (err || req->newptr == USER_ADDR_NULL) return err;
+    if (v != 0 && v != 16 && v != 32 && v != 64) return EINVAL;
+    __atomic_store_n(&p9_touch_off_ms, (uint32_t)v, __ATOMIC_RELEASE);
+    say("p9-touch: fallback_screen_off_poll_ms=%d screen_on_poll_ms=4 "
+        "IRQ_mode_unmodified=1 wake_touch_poll_preserved=1\n", v);
+    return 0;
+}
+SYSCTL_PROC(_kern_hakios, OID_AUTO, p9_touch_off_ms,
+    CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN, NULL, 0,
+    p9_touch_off_ms_sysctl, "I", "P9 fallback touchscreen poll interval when display OFF, 0/16/32/64ms");
 
 /* tell the CPU governor how many fingers are down: its touch boost is held while any is (gov_policy=2) */
 static void
@@ -629,7 +650,20 @@ touch_thread(void *arg, __unused wait_result_t wr_)
 				all_up();               /* (no finger left down for good) */
 				break;
 			}
-			delay_for_interval(POLL_MS, NSEC_PER_MSEC);
+			/* Preserve full-rate motion tracking and immediate wake handling:
+			 * only idle, screen-OFF fallback polling is relaxed. 4ms stays
+			 * the default, and no IRQ/GIC reconfiguration is attempted. */
+			uint32_t interval = POLL_MS;
+			if (hakios_display_requested_on() == 0) {
+				bool active = false;
+				for (unsigned f = 0; f < FINGERS; f++)
+					active |= finger_down[f];
+				if (!active) {
+					uint32_t off_ms = __atomic_load_n(&p9_touch_off_ms, __ATOMIC_ACQUIRE);
+					if (off_ms) interval = off_ms;
+				}
+			}
+			delay_for_interval(interval, NSEC_PER_MSEC);
 		}
 	}
 out:

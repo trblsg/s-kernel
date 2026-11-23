@@ -328,6 +328,9 @@ struct trb {
 enum { EP0_IDLE, EP0_SETUP, EP0_DATA, EP0_STATUS_WAIT, EP0_STATUS };
 
 static uint32_t steps, poll_ms = 2, drain_ms = 1000, crlf = 1, full_speed, susphy, glue_flags;
+/* P9 optional idle USB poll relaxation; NEVER slow a pending log/shot. */
+static uint32_t p9_usb_off_ms;
+extern int hakios_display_requested_on(void);
 static const struct hakios_usb_glue *glue;
 static vm_offset_t regs;
 static volatile uint8_t *dma;
@@ -420,6 +423,22 @@ SYSCTL_QUAD(_kern_hakios, OID_AUTO, p69_usb_disconnected_ticks, CTLFLAG_RD|CTLFL
     &p69_usb_disconnected_ticks, "P6.9 callback ticks when USB host disconnected (20ms scheduled)");
 SYSCTL_QUAD(_kern_hakios, OID_AUTO, p69_usb_link_stopped_ticks, CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,
     &p69_usb_link_stopped_ticks, "P6.9 callback ticks when USB link stopped");
+static int
+p9_usb_off_ms_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
+    __unused int arg2,struct sysctl_req *req)
+{
+    int v=(int)__atomic_load_n(&p9_usb_off_ms,__ATOMIC_RELAXED);
+    int err=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(err || req->newptr==USER_ADDR_NULL)return err;
+    if(v!=0 && v!=4 && v!=8)return EINVAL;
+    __atomic_store_n(&p9_usb_off_ms,(uint32_t)v,__ATOMIC_RELEASE);
+    say("p9-usb: screen_off_quiet_poll_ms=%d original_when_active=%u "
+        "serial_commands_preserved=1\\n",v,poll_ms);
+    return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p9_usb_off_ms,
+    CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,
+    p9_usb_off_ms_sysctl,"I","P9 optional quiet USB gadget poll when screen off, 0/4/8ms");
 
 /* the console's answers: into the log (and so to the host) as whole lines, not onto the screen */
 static void con(const char *format, ...) __printflike(1, 2);
@@ -2072,6 +2091,7 @@ static void
 tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 {
 	uint64_t deadline;
+	uint32_t next_ms;
 
 	__atomic_fetch_add(&p6_usb_ticks, 1, __ATOMIC_RELAXED);
 	if (connected)
@@ -2119,7 +2139,17 @@ tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 		return_check();
 	}
 again:
-	clock_interval_to_deadline(connected ? poll_ms : 20, NSEC_PER_MSEC, &deadline);
+    /* Screen OFF is not system suspend: keep enumerated USB responsive.
+     * Relax only when there are NO queued log bytes nor screenshot bulk
+     * transfer; command/DFU/link-reset paths still poll at stock cadence.
+     * Link-down's existing 20ms schedule is unchanged. */
+    next_ms=connected?poll_ms:20;
+    if(connected && !link_stopped && shot.phase==SHOT_OFF &&
+       ring_head==ring_tail && hakios_display_requested_on()==0) {
+        uint32_t off=__atomic_load_n(&p9_usb_off_ms,__ATOMIC_ACQUIRE);
+        if(off>next_ms)next_ms=off;
+    }
+	clock_interval_to_deadline(next_ms, NSEC_PER_MSEC, &deadline);
 	thread_call_enter_delayed(call, deadline);
 }
 

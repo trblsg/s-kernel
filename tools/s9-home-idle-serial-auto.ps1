@@ -50,6 +50,8 @@ param(
     [switch]$LeaveP7AuditRunning,
     [switch]$DumpP7History,
     [switch]$P8Unified,
+    [switch]$P9Fix,
+    [switch]$P9Restore,
     [switch]$P8LeaveAuditRunning,
     [switch]$DumpP8History,
     [ValidateRange(20,180)][int]$P8WindowSeconds=60,
@@ -74,6 +76,8 @@ $script:SceneSettings=$false
 $script:SceneHome=$false
 $script:DisplayOff=$false
 $script:DisplayOn=$false
+$script:P9PanelOffAck=$false
+$script:P9PanelOnAck=$false
 $script:ParkedCount=0
 $script:UnparkedCount=0
 $script:ParkedCPUIds=@{}
@@ -110,6 +114,7 @@ $script:Allowed='^(?:sysctl kern\.hakios\.(?:hi_cmd(?:=(?:1|2|3|201|250|252|300|
 # Extend the original conservative allowlist for P8 passive controls only.
 $script:Allowed=$script:Allowed.Substring(0,$script:Allowed.Length-2)+
     '|sysctl kern\.hakios\.(?:p8_(?:mode=[012]|flags=\d{1,4}|phase=\d{1,2}|interval_ms=\d{4,5}|slot=\d{1,3}|psci_cpu=[3-6]|big_cap_khz=(?:0|1469000|1586000|1690000)|stats|record|psci_stats|pmu_stats|rail_stats)|p4_(?:mode=[012]|threads=[012]|phase=\d{1,2})|p6_(?:mode=[012]|flags=\d{1,2}|phase=\d{1,2})|p610_mode=[01]|p69_mode=[01]))$'
+$script:P9Allowed='^sysctl kern\.hakios\.(?:p9_auto_gpu=[01]|p9_panel_mode=[01]|p9_panel_stats|p9_touch_off_ms=(?:0|16|32|64)|p9_usb_off_ms=(?:0|4|8)|p9_wake_guard=[01]|hi_policy=2)$'
 function Say([string]$Message){
     $record=('{0:yyyy-MM-ddTHH:mm:ss.fffZ} {1}' -f [datetime]::UtcNow,$Message)
     $script:Events.Add($record)
@@ -187,7 +192,7 @@ function Scan-Line([string]$Line){
                 $script:G3DOffCountObserved=[Math]::Max($script:G3DOffCountObserved,$script:LastGpuSample.OffCount)
             }
         }
-        if($P7PowerTest -and ($script:LastGpuSample.Fault -ne 0 -or
+        if(($P7PowerTest -or $P9Fix) -and ($script:LastGpuSample.Fault -ne 0 -or
              $script:LastGpuSample.WakeFail -ne 0)){
             $script:HardwareFault="G3D fault=$($script:LastGpuSample.Fault) wake_fail=$($script:LastGpuSample.WakeFail)"
         }
@@ -207,6 +212,14 @@ function Scan-Line([string]$Line){
     }
     if($Line -match '^(p7-cpu:|p7-gpu:|g3d-lab: FAULT|g3d-lab: gate timeout|hi: verified_policy=|hi: clock_proof)'){
         Say ('DEVICE '+$Line.Substring(0,[Math]::Min($Line.Length,250)))
+    }
+    if($Line -match 's6e3ha8: panel_sleep: screen off: display off \(28\) sent, sleep-in \(10\) sent'){
+        $script:P9PanelOffAck=$true
+        Say 'P9 VERIFIED: panel DCS 28+10 sent'
+    }
+    if($Line -match 's6e3ha8: panel_sleep: screen on: sleep-out \(11\) sent, display on \(29\) sent'){
+        $script:P9PanelOnAck=$true
+        Say 'P9 VERIFIED: panel DCS 11+29 sent'
     }
     if($Line -match '^GenericARMPE: the display off'){
         $script:DisplayOff=$true;$script:DisplayOn=$false
@@ -273,7 +286,7 @@ function Check-Thermal{
     if($script:BatteryStop){
         throw "Battery reached $($script:BatteryC)C >= safety limit $BatteryStopC C; restore requested"
     }
-    if($P7PowerTest -or $P8Unified){
+    if($P7PowerTest -or $P8Unified -or $P9Fix){
         if($script:PowerThermalArmed){
             if($script:CpuThermalWhen -eq [datetime]::MinValue -or
                ([datetime]::UtcNow-$script:CpuThermalWhen).TotalSeconds -gt 15){
@@ -330,7 +343,7 @@ function Test-SysctlReadback([string]$Text,[string]$Name,[string]$Expected){
     return $Text -match ('(?m)usb: '+[regex]::Escape($Name+' = '+$Expected)+'\r?$')
 }
 function Send-Checked([string]$Cmd,[string]$Additional='',[int]$ExtraAppWaitSeconds=0){
-    if($Cmd -cnotmatch $script:Allowed){throw "Command outside conservative HI2 allowlist: $Cmd"}
+    if($Cmd -cnotmatch $script:Allowed -and $Cmd -cnotmatch $script:P9Allowed){throw "Command outside conservative HI2/P9 allowlist: $Cmd"}
     if(-not $Execute){Say "PREVIEW SEND $Cmd";return}
     # Never treat stale ACKs from preceding phases as proof of this command.
     $drain=[datetime]::UtcNow.AddMilliseconds(210)
@@ -409,7 +422,12 @@ function Dump-P7-Rings{
 }
 . (Join-Path $PSScriptRoot 's9-p7-power-ab.inc.ps1')
 . (Join-Path $PSScriptRoot 's9-p8-unified-serial.inc.ps1')
+. (Join-Path $PSScriptRoot 's9-p9-power-fix.inc.ps1')
 function Run-Scenario{
+    if($P9Fix -or $P9Restore){
+        Run-P9Fix
+        return
+    }
     if($P8Unified){
         Run-P8Unified
         return
@@ -723,13 +741,27 @@ if(($P8Unified -or $DumpP8History) -and ($P7Unified -or $P7PowerTest -or $DumpP7
     throw 'P8 standalone options must not be combined with HI2/P7 destructive or legacy scenario switches.'
 }
 if($P8LeaveAuditRunning -and -not $P8Unified){throw '-P8LeaveAuditRunning requires -P8Unified'}
+if($P9Fix -and $P9Restore){throw 'Choose P9Fix or P9Restore, never both.'}
+if(($P9Fix -or $P9Restore) -and ($P8Unified -or $DumpP8History -or $P7Unified -or
+   $P7PowerTest -or $DumpP7History -or $ActiveG3DGate -or $ActiveCpuPark -or
+   $LeaveP7AuditRunning -or $P8LeaveAuditRunning)){
+    throw 'P9 policy is a standalone hardware source-fix scenario; no legacy P7/P8 flags allowed.'
+}
 if($P7PowerTest -and ($P7Unified -or $DumpP7History -or
    $ActiveG3DGate -or $ActiveCpuPark -or $LeaveP7AuditRunning)){
     throw 'P7PowerTest is standalone: do not combine it with HI2/other power flags or history dump.'
 }
-Say ('S9 '+$(if($P8Unified){'P8 UNIFIED SAFE LAB'}elseif($DumpP8History){'P8 OFFLINE HISTORY DUMP'}elseif($P7PowerTest){'P7 '+$P7PowerTest+' A/B/A'}else{'HI2 SERIAL AUTO'})+': '+$(if($Execute){'EXECUTE'}else{'PREVIEW'}))
+Say ('S9 '+$(if($P9Fix){'P9 SOURCE FIX'}elseif($P9Restore){'P9 RESTORE'}elseif($P8Unified){'P8 UNIFIED SAFE LAB'}elseif($DumpP8History){'P8 OFFLINE HISTORY DUMP'}elseif($P7PowerTest){'P7 '+$P7PowerTest+' A/B/A'}else{'HI2 SERIAL AUTO'})+': '+$(if($Execute){'EXECUTE'}else{'PREVIEW'}))
 if(-not $Execute){
     Say 'Preview: close PuTTY then re-run with -Port COMxxx -Execute; it will log DIRECTLY over USB.'
+    if($P9Fix -or $P9Restore){
+        Say 'P9 preview: uses the matching P9 firmware, NEVER CPU_OFF or voltage writes.'
+        if($P9Fix){
+            Say ('P9 actual reversible source fixes: GPU auto OFF after real screen OFF + 10s idle; panel DCS 28/10 and 11/29; touch32ms USB8ms while off; Clock hidden callback 1Hz; BIG wake cap1469/4s. Safety stop BIG='+$BigStopC+'C.')
+            Say 'Physical validation: 8 CPUs/PMU/TZ preflight, 1 real screen OFF/ON, GPU domain+PLL OFF then ON, panel DCS ACK and wake; leave policies ON only after full pass.'
+        }else{Say 'P9 restore: safely turn the screen ON if needed, set every P9 runtime policy to zero, then verify PMU and panel status.'}
+        return
+    }
     if($P8Unified -or $DumpP8History){
         if($DumpP8History){
             Say ('P8 dump: freeze the 512-row CPU/PMU/thermal ring, then retrieve up to '+$P8DumpLimit+' read-only records over USB.')
@@ -764,7 +796,7 @@ while([IO.Ports.SerialPort]::GetPortNames() -notcontains $Port){
 # If PuTTY still owns the port, SerialPort.Open throws before changing anything.
 Say ('Opening exclusive '+$Port+'. CLOSE PuTTY first; no manual commands will be required.')
 if([string]::IsNullOrWhiteSpace($LogPath)){
-    $prefix=if($P8Unified){'putty-S9-p8-unified-'}elseif($DumpP8History){'putty-S9-p8-dump-'}elseif($P7PowerTest){'putty-S9-p7-'+$P7PowerTest.ToLowerInvariant()+'-'}else{'putty-S9-hi2-auto-'}
+    $prefix=if($P9Fix){'putty-S9-p9-fix-'}elseif($P9Restore){'putty-S9-p9-restore-'}elseif($P8Unified){'putty-S9-p8-unified-'}elseif($DumpP8History){'putty-S9-p8-dump-'}elseif($P7PowerTest){'putty-S9-p7-'+$P7PowerTest.ToLowerInvariant()+'-'}else{'putty-S9-hi2-auto-'}
     $LogPath=$prefix+(Get-Date -Format 'yyyyMMdd-HHmmss')+'.log'
 }
 $script:LogPathFinal=[IO.Path]::GetFullPath($LogPath)
@@ -793,6 +825,31 @@ try{
         # Each restore is independent; a missing/unresponsive sysctl must
         # not prevent the subsequent GPU/CPU/Clock safety restorations.
         $restore=New-Object 'System.Collections.Generic.List[string]'
+        if($P9Fix -or $P9Restore){
+            if(($null -ne $failed -or -not $script:Completed) -and $script:DisplayOff){
+                try{
+                    $script:DisplayOn=$false
+                    Send-Checked 'button lock'
+                    Wait-For 'P9 emergency: display ON before panel DCS restore' 28 {$script:DisplayOn}
+                }catch{Say ('P9 WARNING: emergency display wake unconfirmed: '+$_.Exception.Message)}
+            }
+            if($null -ne $failed -or -not $script:Completed){
+                foreach($p9 in @(
+                    'sysctl kern.hakios.p9_auto_gpu=0',
+                    'sysctl kern.hakios.p9_wake_guard=0',
+                    'sysctl kern.hakios.p9_touch_off_ms=0',
+                    'sysctl kern.hakios.p9_usb_off_ms=0',
+                    'sysctl kern.hakios.hi_policy=0',
+                    'sysctl kern.hakios.p9_panel_mode=0')){
+                    [void]$restore.Add($p9)
+                }
+            }elseif($P9Fix){
+                Say 'P9 functional power policies intentionally remain enabled; no CPU_OFF ever requested.'
+            }
+            [void]$restore.Add('sysctl kern.hakios.p7_cpu_mode=0')
+            [void]$restore.Add('sysctl kern.hakios.p7_gpu_mode=0')
+            [void]$restore.Add('sysctl kern.hakios.g3d_lab_rail_probe=0')
+        }
         if($P8Unified -or $DumpP8History){
             [void]$restore.Add('sysctl kern.hakios.p8_big_cap_khz=0')
             [void]$restore.Add('sysctl kern.hakios.hi_policy=0')
@@ -851,7 +908,7 @@ try{
     if($null -ne $script:Serial){$script:Serial.Dispose();$script:Serial=$null}
     Invoke-Report
 }
-$sessionName=if($P8Unified){'P8 unified passive'}elseif($DumpP8History){'P8 offline dump'}elseif($P7PowerTest){'P7 '+$P7PowerTest+' hardware A/B/A'}else{'HI2'}
+$sessionName=if($P9Fix){'P9 screen-off source fixes'}elseif($P9Restore){'P9 restore'}elseif($P8Unified){'P8 unified passive'}elseif($DumpP8History){'P8 offline dump'}elseif($P7PowerTest){'P7 '+$P7PowerTest+' hardware A/B/A'}else{'HI2'}
 if($null -ne $failed){throw "$sessionName scenario incomplete. $failed . Raw log and reports retained."}
 if(-not $script:Completed){throw "$sessionName scenario did not complete all confirmed phases"}
 Say "$sessionName AUTOMATIC SESSION COMPLETE; send .log, .events.txt and .p8-report.txt (for P8) for attribution."

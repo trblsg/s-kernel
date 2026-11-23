@@ -175,6 +175,7 @@ g3d_lab_gate_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
 		lck_mtx_unlock(&mali_job_lock);
 		return EIO;          /* do NOT clear g3d_sleep while GPU is OFF */
 	}
+	p9_auto_gpu = 0; /* explicit manual Lab gate overrides P9 auto */
 	g3d_lab_gate = (uint32_t)value;
 	g3d_sleep = value >= 2 ? 1u : 0u;
 	lck_mtx_unlock(&mali_job_lock);
@@ -189,6 +190,68 @@ g3d_lab_gate_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
 SYSCTL_PROC(_kern_hakios, OID_AUTO, g3d_lab_gate,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
     g3d_lab_gate_sysctl, "I", "G3D Lab gating: 0=OFF, 1=shadow, 2=screen-off quiet, 3=long quiet");
+
+/* P9: promote the physically verified P7 OFF/ON path to an opt-in
+ * screen-OFF policy. Always require the real display request *as well as*
+ * ten seconds without GPU work or a new displayed frame.
+ * No PMIC voltage changes, no new G3D reset implementation.
+ * Explicit legacy G3D sysctls take precedence, so P8 cleanup still works.
+ */
+static int
+p9_auto_gpu_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
+    __unused int arg2, struct sysctl_req *req)
+{
+    int value = (int)__atomic_load_n(&p9_auto_gpu, __ATOMIC_RELAXED);
+    int err = sysctl_io_number(req, value, sizeof(value), &value, NULL);
+    if (err || req->newptr == USER_ADDR_NULL) return err;
+    if (value < 0 || value > 1) return EINVAL;
+    if (reached < STEPS || !mali_gov || !gov_on || !pmu || !cmu_g3d)
+        return ENODEV;
+    lck_mtx_lock(&mali_job_lock);
+    if (value == (int)p9_auto_gpu) {
+        lck_mtx_unlock(&mali_job_lock);
+        return 0;
+    }
+    if (value) {
+        /* Refuse to steal the GPU while another experiment owns it. */
+        if (g3d_sleep || g3d_lab_gate || g3d_lab_fault || gov_dvs ||
+            g3d_lab_mv != 950 || !g3d_awake || !g3d_lab_gpu_safe ||
+            !g3d_lab_protection_ok) {
+            lck_mtx_unlock(&mali_job_lock);
+            return EBUSY;
+        }
+        g3d_lab_idle_ms = 10000;
+        g3d_sleep = 1;
+        g3d_lab_gate = 2;
+        p9_auto_gpu = 1;
+    } else {
+        /* May be physically OFF. Restore BEFORE clearing the sleep gate:
+         * otherwise the next submit could use inaccessible GPU MMIO. */
+        if (!g3d_awake && !g3d_power_on()) {
+            lck_mtx_unlock(&mali_job_lock);
+            say("p9-gpu: disable REFUSED GPU wake failed; fault held\n");
+            return EIO;
+        }
+        if (!g3d_lab_gpu_safe || !g3d_lab_protection_ok) {
+            lck_mtx_unlock(&mali_job_lock);
+            return EIO;
+        }
+        g3d_sleep = 0;
+        g3d_lab_gate = 0;
+        p9_auto_gpu = 0;
+    }
+    lck_mtx_unlock(&mali_job_lock);
+    if (value) g3d_lab_monitor_start();
+    lck_mtx_lock(&mali_queue_lock);
+    wakeup((caddr_t)&mali_queue_count);
+    lck_mtx_unlock(&mali_queue_lock);
+    say("p9-gpu: auto=%d screen_off_required=1 idle_ms=10000 "
+        "queue_empty_required=1 voltage_write=0 CPU_OFF=0\n", value);
+    return 0;
+}
+SYSCTL_PROC(_kern_hakios, OID_AUTO, p9_auto_gpu,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
+    p9_auto_gpu_sysctl, "I", "P9 screen-off automatic physical G3D gate, 0=stock 1=auto");
 
 static int
 g3d_lab_idle_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
@@ -417,6 +480,7 @@ g3d_lab_reset_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
 	}
 	g3d_lab_mv = 950;
 	g3d_lab_gate = 0;
+	p9_auto_gpu = 0;
 	g3d_lab_fault = 0;
 	g3d_sleep = 0;
 	lck_mtx_unlock(&mali_job_lock);

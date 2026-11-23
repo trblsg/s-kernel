@@ -9,16 +9,18 @@
 #include "s9_home_idle_policy.h"
 #include "s9_hi_auto_policy.h"
 #include "s9_hi_verified_policy.h"
+#include "s9_p9_clock_policy.h"
 #define HI_GROUPS 48
 #define HI_CONTEXTS 40
 static bool hi_enabled, hi_event_hook_ok, hi_auto_mode;
 static bool hi_verified_enabled; /* sysctl hi_policy=1; only after prior A/B FINISHED */
+static bool hi_p9_hidden_clock_enabled; /* hi_policy=2: hidden Home Clock target only */
 static uint32_t hi_verified_refusals;
 static os_unfair_lock hi_group_lock = OS_UNFAIR_LOCK_INIT;
 static struct hi_group {
     char target[92], action[72];
     uint64_t callbacks, forwarded, cut, last_callbacks;
-    uint64_t last_tick_us, last_view_us, verified_cuts;
+    uint64_t last_tick_us, last_view_us, verified_cuts, p9_cuts;
     uint32_t requested_fps, instances;
 } hi_groups[HI_GROUPS];
 static unsigned hi_groups_used, hi_stage;
@@ -140,6 +142,19 @@ hi_proxy_tick(id self,SEL cmd,id link)
             hi_event_hook_ok,exact_clock,hi_verified_enabled);
     if(verified_cut){
         __atomic_fetch_add(&hi_groups[group-1].verified_cuts,1,__ATOMIC_RELAXED);
+        __atomic_fetch_add(&hi_groups[group-1].cut,1,__ATOMIC_RELAXED);
+        return;
+    }
+    /* P9 source fix: Clock Home-icon can continue ticking behind the
+     * lockscreen or another app. When Home is definitely NOT visible and
+     * input is quiet, forward >=1 callback/second. Unlike a global
+     * compositor throttle, non-Clock links and real UI frames are untouched.
+     * Never invoke this path for an unrecognized Objective-C target. */
+    if(exact_clock && s9_p9_hidden_clock_skip(now,
+        __atomic_load_n(&hi_last_input,__ATOMIC_ACQUIRE),p->last_forward,
+        wallpaper_home_showing(),exact_clock,hi_event_hook_ok,
+        hi_p9_hidden_clock_enabled)){
+        __atomic_fetch_add(&hi_groups[group-1].p9_cuts,1,__ATOMIC_RELAXED);
         __atomic_fetch_add(&hi_groups[group-1].cut,1,__ATOMIC_RELAXED);
         return;
     }
@@ -324,13 +339,14 @@ hi_sample(void)
         uint64_t forwarded=__atomic_exchange_n(&g->forwarded,0,__ATOMIC_ACQ_REL);
         uint64_t cut=__atomic_exchange_n(&g->cut,0,__ATOMIC_ACQ_REL);
         uint64_t verified=__atomic_exchange_n(&g->verified_cuts,0,__ATOMIC_ACQ_REL);
+        uint64_t p9=__atomic_exchange_n(&g->p9_cuts,0,__ATOMIC_ACQ_REL);
         g->last_callbacks=callbacks;
         if(callbacks || cut)
             say("hi: link=%u target=%s action=%s ticks_5s=%llu forwarded=%llu "
-                "cut=%llu fps_req=%u verified_cut=%llu\n",
+                "cut=%llu fps_req=%u verified_cut=%llu p9_hidden_clock_cut=%llu\n",
                 i+1,g->target,g->action,(unsigned long long)callbacks,
                 (unsigned long long)forwarded,(unsigned long long)cut,
-                g->requested_fps,(unsigned long long)verified);
+                g->requested_fps,(unsigned long long)verified,(unsigned long long)p9);
     }
     hi_auto_sample(now);
 }
@@ -380,6 +396,13 @@ hi_pump(void)
     hi_usb_command();
     int policy=sysctl_int("kern.hakios.hi_policy");
     bool verified=hi_auto_mode && policy==1;
+    bool p9_hidden=hi_auto_mode && policy==2;
+    if(hi_p9_hidden_clock_enabled!=p9_hidden){
+        hi_p9_hidden_clock_enabled=p9_hidden;
+        say("hi: p9_hidden_clock_policy=%u target=SBHClockApplicationIconImageView "
+            "home_not_visible=1 input_quiet_s=3 min_forward_hz=1 "
+            "global_CA_GL_frames_unchanged=1\\n",p9_hidden?1u:0u);
+    }
     if(hi_verified_enabled!=verified){
         hi_verified_enabled=verified;
         say("hi: verified_policy=%u ui_owner_proof_required=1 "

@@ -221,6 +221,7 @@ GenericARMCPU::getCPUName(void)
  * CPU_ON takes at boot (milliseconds); the screen-on does not wait for them.
  */
 extern "C" int hakios_s6e3ha8_power(bool on);
+extern "C" int hakios_p9_panel_auto_on(void); /* runtime opt-in, 0 by default */
 extern "C" bool psci_smp_cpu_is_loaders(int cpu);
 extern "C" uint32_t hakios_cpu_exit_mask;       /* osfmk/arm/cpu_common.c: the cores ml_cpu_can_exit() lets go */
 extern "C" uint32_t gic_v3_spi_move(int from_cpu, int to_cpu);  /* osfmk/arm64/gic_v3_irq.c: its devices' interrupts */
@@ -371,7 +372,7 @@ hakios_display_power(int on)
 	gDisplayOn = on;
 	hakios_say("GenericARMPE: the display %s (iOS's power request)%s%s\n", on ? "on" : "off",
 	    gPanelSleep ? "; panel_sleep=1" : "", gSleepCores ? "; sleep_cores=" : "");
-	if (gPanelSleep) {
+	if (gPanelSleep || hakios_p9_panel_auto_on()) {
 		int error = hakios_s6e3ha8_power(on);
 
 		if (error != 0) {
