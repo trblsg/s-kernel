@@ -232,6 +232,9 @@ static uint32_t p5_mode, p5_phase, p5_threads;
 static uint32_t p68_mode; /* read-only PMU/quiet-window correlation, independent of real G3D gating */
 /* P9: user-opt-in production screen-OFF GPU policy. Never infer OFF from quiet frames alone. */
 static uint32_t p9_auto_gpu;
+/* P12: request P9 autonomous G3D gate once per boot, ONLY after STEPS
+ * and the governor are running. Opt-in boot argument, default OFF. */
+static uint32_t p12_gpu_boot_auto, p12_gpu_boot_status;
 static uint32_t g3d_lab_rail_probe, g3d_lab_fault, g3d_lab_monitor_started;
 static uint32_t g3d_lab_off_count, g3d_lab_wake_count, g3d_lab_wake_failed;
 static uint32_t g3d_lab_shadow_count, g3d_lab_denied_count, g3d_lab_job_faults;
@@ -3151,6 +3154,9 @@ mali_thread(__unused void *parameter, __unused wait_result_t result)
 	}
 	say("mali: came up to step %u of %u: the GPU is there for programs (HakiosMali)\n", reached, STEPS);
 	gov_start();
+	/* One-time, fail-closed activation of the already validated P9 GPU gate;
+	 * worker still waits >=10s after the LAST job and frame AND display OFF. */
+	if (p12_gpu_boot_auto) p12_gpu_boot_enable();
 	for (;;) {
 		delay(60 * 1000 * 1000);
 		printf("mali: step %u of %u; user space says %u%s; %u clients, %u buffers, %u job chains (%u failed), "
@@ -3200,6 +3206,9 @@ hakios_mali_init(void)
 	(void)PE_parse_boot_argn("mali_mhz", &mali_mhz, sizeof(mali_mhz));
 	(void)PE_parse_boot_argn("mali_acpm", &mali_acpm, sizeof(mali_acpm));
 	(void)PE_parse_boot_argn("mali_gov", &mali_gov, sizeof(mali_gov));
+	/* p12_gpu_boot_auto=1: Arm the existing guarded P9 automatic G3D screen-OFF gate after GPU initialization. */
+	(void)PE_parse_boot_argn("p12_gpu_boot_auto", &p12_gpu_boot_auto, sizeof(p12_gpu_boot_auto));
+	p12_gpu_boot_auto = p12_gpu_boot_auto == 1 ? 1u : 0u;
 	(void)PE_parse_boot_argn("mali_probe", &mali_probe, sizeof(mali_probe));
 	mali_probe = mali_probe != 0;
 	(void)PE_parse_boot_argn("p3power", &p3power, sizeof(p3power));

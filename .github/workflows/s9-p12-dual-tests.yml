@@ -1,0 +1,89 @@
+name: S9 P12 thermal efficiency and deep-idle observability
+on:
+  push:
+    branches: [s9/p12-thermal-deep-idle]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  portable-policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and execute exact adaptive CPU guard helper
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -O2 tools/tests/test_s9_p12_thermal_policy.c -o /tmp/s9-p12
+          /tmp/s9-p12
+          cc -std=c11 -Wall -Wextra -Werror -O2 tools/tests/test_s9_p10_lock_policy.c -o /tmp/s9-p10
+          /tmp/s9-p10
+          cc -std=c11 -Wall -Wextra -Werror -O2 tools/tests/test_s9_p9_clock_policy.c -o /tmp/s9-p9
+          /tmp/s9-p9
+      - name: Check source guards, preserving P9 panel and P7 CPU recovery safety
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          s=lambda p: Path(p).read_text()
+          cpu=s('drivers/power/exynos/hakios.exynos_cpufreq.c')
+          thermal=s('drivers/power/exynos/hakios.p12_thermal.h')
+          mali=s('drivers/gpu/mali/hakios.mali.c')
+          g3d=s('drivers/gpu/mali/hakios.mali_lab.h')
+          xnu=s('xnu/files/cpu.c')
+          bb=s('userland/src/inject.c')
+          pe=s('xnu/files/GenericARMPE.cpp')
+          assert 's9_p12_cpu_eligible' in cpu and 'p12_cpu_mode_sysctl' in cpu
+          assert 'p12_late_until' in cpu and 'p12_frame_streak' in cpu
+          assert 'big_millidegrees < 83000' in thermal
+          assert 'p12_gpu_boot_auto' in mali and 'p12_gpu_boot_enable()' in mali
+          assert all(w in g3d for w in ('reached >= STEPS', 'g3d_lab_gpu_safe', 'g3d_lab_protection_ok', 'g3d_lab_idle_ms = 10000;', 'g3d_sleep = 1;', 'p9_auto_gpu = 1;', 'p12_gpu_boot_stats_sysctl'))
+          assert 'hakios_display_requested_on() != 0' in mali
+          assert 'g3d_lab_stats_sysctl' in g3d
+          assert 'hakios_p12_wfi_entries' in xnu and 'hakios_p12_wfi_ticks' in xnu
+          assert '__builtin_arm_wfi();' in xnu
+          assert 'p12_wfi_probe_sysctl' in cpu and 'p12_wfi_stats_sysctl' in cpu
+          assert 'orig_render_update(server, update, flags)' in bb
+          assert 'p12-ca: forwarded=' in bb and 'skipped=0 GL_present_unchanged=1' in bb
+          assert 'p8-safety: BIG CPU_OFF REFUSED' in pe
+          assert 'if(value==1)return EPERM;' in s('drivers/power/exynos/hakios.p7_cpu_lab.h')
+          assert 'int hakios_p9_panel_auto_on(void) { return 0; }' in s('drivers/core/hakios.stubs.c')
+          assert 'panel_sleep=1' not in s('tools/s9-p12-dual-serial.ps1')
+          print('P12 two tracks and all historical P9/P7 rollback safety paths PASS')
+          PY
+          git diff --check
+  windows-host:
+    runs-on: windows-latest
+    timeout-minutes: 13
+    steps:
+      - uses: actions/checkout@v4
+      - name: P12 and P11/P10/P9/P8 host tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach($test in @(
+            'tools/tests/test-s9-p12-dual-serial.ps1',
+            'tools/tests/test-s9-p11-lifecycle-serial.ps1',
+            'tools/tests/test-s9-p10-lockscreen-source.ps1',
+            'tools/tests/test-s9-p10-serial-harness.ps1',
+            'tools/tests/test-s9-p9-power-fix.ps1',
+            'tools/tests/test-s9-p8-unified.ps1')){
+            $out=Join-Path $env:RUNNER_TEMP ([IO.Path]::GetFileName($test)+'.out')
+            $err=Join-Path $env:RUNNER_TEMP ([IO.Path]::GetFileName($test)+'.err')
+            $p=Start-Process -FilePath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList @(
+              '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$test) -Wait -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
+            $stdout=[IO.File]::ReadAllText($out)
+            $stderr=[IO.File]::ReadAllText($err)
+            Write-Output $stdout
+            if($stderr){Write-Output $stderr}
+            if($p.ExitCode -ne 0){throw "Regression failed $test exit=$($p.ExitCode)"}
+          }
+  ios-userland-syntax:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: iOS arm64 userland CA/render injection syntax
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=gnu11 -fblocks -Wno-deprecated-declarations \
+            -fsyntax-only userland/src/inject.c

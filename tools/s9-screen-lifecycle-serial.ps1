@@ -64,6 +64,9 @@ $script:LifeHI2CutPhases=0
 $script:LifeUnexpectedPanelDCS=0
 $script:LifeFatal=''
 $script:LifeHostOnly=$true
+# P12 optional line observer for a standalone dual-source controller.
+# Unset in original P11; no extra serial commands or power writes.
+$script:LifeLineObserver=$null
 
 function Life-Now { return [datetime]::UtcNow }
 function Life-Say([string]$Message) {
@@ -363,6 +366,9 @@ function Life-CheckSafety([datetime]$At) {
 }
 function Life-Feed([string]$Line,[datetime]$At) {
     Life-ParseLine $Line $At
+    if($null -ne $script:LifeLineObserver){
+        & $script:LifeLineObserver $Line $At
+    }
     Life-CheckStable $At
 }
 function Life-Pump {

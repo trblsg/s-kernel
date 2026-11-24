@@ -115,6 +115,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `mali_probe` | K | `hakios.mali.c` | `CONFIG_MALI_PROBE` |  |
 | `mali_trace` | K | `hakios.mali.c` | `CONFIG_MALI_TRACE` |  |
 | `metal` | KU | `MiniIOMobileFramebuffer.cpp`, `inject_sb.c` | `CONFIG_METAL` |  |
+| `p12_gpu_boot_auto` | K | `hakios.mali.c` | `CONFIG_P12_GPU_BOOT_AUTO` |  |
 | `p3power` | K | `hakios.mali.c` | `CONFIG_P3POWER` |  |
 | `p3rail` | K | `hakios.mali.c` | `CONFIG_P3RAIL` |  |
 | `panel` | K | `hakios.s6e3ha8.c` | `CONFIG_PANEL` |  |

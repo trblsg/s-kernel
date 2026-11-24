@@ -119,6 +119,10 @@ static unsigned calls_ready, calls_ignore, calls_begin, calls_finish, calls_rend
 /* P10 observational CA truth source: count whether WindowServer itself
  * rejects or accepts updates. Never change the answer or a render call. */
 static uint64_t p10_ignore_true, p10_ignore_false;
+/* P12: measure REAL CA WindowServer render duration, never suppress it.
+ * Raw mach ticks converted only once per 256 forwarded calls. */
+static uint64_t p12_ca_ticks_sum, p12_ca_ticks_max;
+static uint64_t p12_ca_render_count;
 static int last_ready = -1, last_ignore = -1;
 
 static int
@@ -206,7 +210,13 @@ my_renderer(void *server)
 static uintptr_t
 my_render_update(void *server, void *update, unsigned *flags)
 {
+    uint64_t began=mach_absolute_time();
 	uintptr_t r = orig_render_update(server, update, flags);
+    uint64_t ended=mach_absolute_time();
+    uint64_t ticks=ended>=began?ended-began:0;
+    p12_ca_ticks_sum+=ticks;
+    if(ticks>p12_ca_ticks_max)p12_ca_ticks_max=ticks;
+    p12_ca_render_count++;
 
 	if (calls_render++ < 6) {
 		say("hakios: render_update -> %#lx (flags %#x)\n", r, flags ? *flags : 0);
@@ -215,6 +225,20 @@ my_render_update(void *server, void *update, unsigned *flags)
      * CA itself classified input updates as skippable. This is source
      * attribution, NOT a command to skip the frame or to turn off GPU. */
     if((calls_render & 255u)==0){
+        /* A/B source truth: sampled render cost rather than a guessed FPS
+         * saving. Count remains 256 even if hooks report CA "ignored". */
+        mach_timebase_info_data_t tb={0};
+        if(mach_timebase_info(&tb)==KERN_SUCCESS && tb.denom){
+            unsigned long long mean_us=(unsigned long long)(
+                (p12_ca_ticks_sum/tb.denom)*tb.numer/1000/
+                (p12_ca_render_count?p12_ca_render_count:1));
+            unsigned long long max_us=(unsigned long long)(
+                (p12_ca_ticks_max/tb.denom)*tb.numer/1000);
+            say("p12-ca: forwarded=%llu mean_render_us=%llu max_render_us=%llu "
+                "skipped=0 GL_present_unchanged=1\n",
+                (unsigned long long)p12_ca_render_count,mean_us,max_us);
+        }
+        p12_ca_ticks_sum=p12_ca_ticks_max=p12_ca_render_count=0;
         uint64_t rejected=__atomic_exchange_n(&p10_ignore_true,0,__ATOMIC_ACQ_REL);
         uint64_t accepted=__atomic_exchange_n(&p10_ignore_false,0,__ATOMIC_ACQ_REL);
         int policy=0;

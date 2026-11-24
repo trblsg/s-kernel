@@ -82,6 +82,12 @@
 
 extern boolean_t        idle_enable;
 extern uint64_t         wake_abstime;
+/* P12 scheduler-clock-idle ground truth, strictly observational. This
+ * does NOT call PSCI, CPU_OFF, CPU_SUSPEND, CPD, SICD or system suspend.
+ * Disabled by default; the governor exposes read-only per-core counters. */
+volatile uint32_t hakios_p12_wfi_probe_enable;
+volatile uint64_t hakios_p12_wfi_entries[8];
+volatile uint64_t hakios_p12_wfi_ticks[8];
 
 #if WITH_CLASSIC_S2R
 void sleep_token_buffer_init(void);
@@ -600,11 +606,24 @@ cpu_idle(void)
 		typhoon_prepare_for_wfi();
 #endif
 		__builtin_arm_dsb(DSB_SY);
+		/* P12: wrap only the already existing architectural idle opcode.
+		 * Sampling is opt-in because even two timestamps cost energy. */
+		uint64_t p12_began = 0;
+		unsigned p12_cpu = (unsigned)cpu_data_ptr->cpu_id;
+		if (p12_cpu < 8 && __atomic_load_n(&hakios_p12_wfi_probe_enable, __ATOMIC_RELAXED))
+			p12_began = mach_absolute_time();
 #if HAS_RETENTION_STATE
 		arm64_retention_wfi();
 #else
 		__builtin_arm_wfi();
 #endif
+		if (p12_began && p12_cpu < 8) {
+			uint64_t p12_ended = mach_absolute_time();
+			if (p12_ended >= p12_began) {
+				__atomic_fetch_add(&hakios_p12_wfi_entries[p12_cpu], 1, __ATOMIC_RELAXED);
+				__atomic_fetch_add(&hakios_p12_wfi_ticks[p12_cpu], p12_ended-p12_began, __ATOMIC_RELAXED);
+			}
+		}
 
 #if defined(APPLETYPHOON)
 		// <rdar://problem/15827409> CPU1 Stuck in WFIWT Because of MMU Prefetch

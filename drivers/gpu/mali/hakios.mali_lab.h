@@ -253,6 +253,55 @@ SYSCTL_PROC(_kern_hakios, OID_AUTO, p9_auto_gpu,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
     p9_auto_gpu_sysctl, "I", "P9 screen-off automatic physical G3D gate, 0=stock 1=auto");
 
+/* P12 boot opt-in is equivalent to P9's validated enable path, but never
+ * bypasses its GPU safe, protection, voltage, active experiment, MMU or
+ * readiness checks. The actual OFF is still deferred >=10s and only after
+ * both GPU job and display frame have gone quiet with display OFF. */
+static void
+p12_gpu_boot_enable(void)
+{
+    bool allow;
+    lck_mtx_lock(&mali_job_lock);
+    allow = reached >= STEPS && mali_gov && gov_on && pmu && cmu_g3d &&
+        !g3d_sleep && !g3d_lab_gate && !g3d_lab_fault && !gov_dvs &&
+        g3d_lab_mv == 950 && g3d_awake && g3d_lab_gpu_safe &&
+        g3d_lab_protection_ok;
+    if (allow) {
+        g3d_lab_idle_ms = 10000;
+        g3d_sleep = 1;
+        g3d_lab_gate = 2;
+        p9_auto_gpu = 1;
+        p12_gpu_boot_status = 1;
+    } else {
+        p12_gpu_boot_status = 2; /* DENIED: no power or voltage writes */
+    }
+    lck_mtx_unlock(&mali_job_lock);
+    if (allow) {
+        g3d_lab_monitor_start(); /* independent 5s PMU/PLL while G3D OFF */
+        lck_mtx_lock(&mali_queue_lock);
+        wakeup((caddr_t)&mali_queue_count);
+        lck_mtx_unlock(&mali_queue_lock);
+    }
+    say("p12-gpu: boot_request=1 status=%u p9_auto=%u "
+        "pmu_worker=%u screen_off_only=1 quiet_ms=10000 "
+        "CPU_OFF=0 voltage_write=0\n",
+        p12_gpu_boot_status, p9_auto_gpu, allow ? 1u : 0u);
+}
+
+static int
+p12_gpu_boot_stats_sysctl(__unused struct sysctl_oid *oidp,
+    __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+    char line[160];
+    snprintf(line, sizeof(line), "boot_arg=%u status=%u p9_auto=%u mode=%u domain_awake_hint=%u fault=%u voltage_write=0",
+        p12_gpu_boot_auto, p12_gpu_boot_status, p9_auto_gpu,
+        g3d_lab_gate, g3d_awake ? 1u : 0u, g3d_lab_fault);
+    return SYSCTL_OUT(req, line, strlen(line) + 1);
+}
+SYSCTL_PROC(_kern_hakios, OID_AUTO, p12_gpu_boot_stats,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
+    p12_gpu_boot_stats_sysctl, "A", "P12 boot-autonomous GPU-gate status; read-only");
+
 static int
 g3d_lab_idle_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
     __unused int arg2, struct sysctl_req *req)

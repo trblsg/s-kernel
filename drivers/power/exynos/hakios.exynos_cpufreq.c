@@ -150,6 +150,7 @@
 #include <sys/hakios.exynos_acpm.h>
 #include <sys/hakios.exynos_soc.h>
 #include <sys/hakios.scion_gov.h>
+#include "hakios.p12_thermal.h"
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/sysctl.h>
@@ -262,6 +263,14 @@ static uint32_t frames_late, frames_on_time;    /* scion_pace()'s, since the las
 static uint64_t late_span;
 static uint64_t frame_gap, moving_span;         /* the last two frames apart; scion's frame floor is for frames closer than moving_span */
 static uint64_t touch_last, frame_last;         /* the last finger event's and frame's time (0: none yet) */
+/* P12: optional, fully reversible smooth-animation efficiency A/B.
+ * Never modify the frame callbacks, CA/GL presents, touch floor, scheduler
+ * core count, thermal ceilings, or ACPM voltage. 0=existing governor. */
+static uint32_t p12_cpu_mode, p12_frame_streak;
+static uint64_t p12_late_until;
+static uint64_t p12_eligible_windows, p12_scaled_windows, p12_touch_bypass,
+    p12_late_bypass, p12_static_bypass;
+
 static uint32_t touch_count, frame_count;       /* this second's, for the summary */
 static uint32_t boost_raises;                   /* this second's: times a boost raised a cluster's rate */
 static bool gov_running;
@@ -348,6 +357,8 @@ hakios_exynos_cpufreq_touch(void)
 		return;
 	}
 	now = mach_absolute_time();
+	/* Any real touch immediately withdraws the no-finger thermal experiment. */
+	__atomic_store_n(&p12_frame_streak, 0, __ATOMIC_RELEASE);
 	before = __atomic_exchange_n(&touch_last, now, __ATOMIC_RELEASE);
 	__atomic_fetch_add(&touch_count, 1, __ATOMIC_RELAXED);
 	if (!boost_on(before, boost_span, now)) {
@@ -375,6 +386,7 @@ hakios_exynos_cpufreq_fingers(uint32_t down)
 	}
 	now = mach_absolute_time();
 	before = __atomic_exchange_n(&fingers, down, __ATOMIC_RELEASE);
+	if (down != 0) __atomic_store_n(&p12_frame_streak, 0, __ATOMIC_RELEASE);
 	if (before == 0 && down != 0) {
 		if (gov_wake) {
 			hakios_mali_frame();
@@ -418,6 +430,22 @@ hakios_exynos_cpufreq_frame(void)
 	now = mach_absolute_time();
 	before = __atomic_exchange_n(&frame_last, now, __ATOMIC_RELEASE);
 	__atomic_store_n(&frame_gap, now - before, __ATOMIC_RELAXED);
+	/* Only 11..22ms of uninterrupted real presents can authorize the
+	 * reduced work-target. One late present (>22ms) invalidates proof and
+	 * holds the stock target for 3s; a resumed touch does so immediately. */
+	if (before != 0 && now >= before) {
+		uint64_t gap_ns = 0;
+		absolutetime_to_nanoseconds(now - before, &gap_ns);
+		if (gap_ns >= 11ull * NSEC_PER_MSEC && gap_ns <= 22ull * NSEC_PER_MSEC &&
+		    __atomic_load_n(&fingers, __ATOMIC_ACQUIRE) == 0) {
+			uint32_t streak = __atomic_load_n(&p12_frame_streak, __ATOMIC_RELAXED);
+			if (streak < 1000) __atomic_store_n(&p12_frame_streak, streak + 1, __ATOMIC_RELEASE);
+		} else {
+			__atomic_store_n(&p12_frame_streak, 0, __ATOMIC_RELEASE);
+			if (gap_ns > 22ull * NSEC_PER_MSEC && gap_ns <= 50ull * NSEC_PER_MSEC)
+				clock_interval_to_deadline(3000, NSEC_PER_MSEC, &p12_late_until);
+		}
+	}
 	if (now - before <= moving_span) {
 		__atomic_fetch_add(now - before > late_span ? &frames_late : &frames_on_time, 1, __ATOMIC_RELAXED);
 	}
@@ -456,6 +484,87 @@ frame_big_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 }
 SYSCTL_PROC(_kern_hakios, OID_AUTO, gov_frame_big, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
     frame_big_sysctl, "I", "the M3s' floor while frames come, kHz (gov_frame_big=; 0: none)");
+
+/* P12 performance A/B is deliberately opt-in. Readback and counters permit
+ * one-build comparison without unsafe voltage/frequency overrides. */
+static int
+p12_cpu_mode_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
+    __unused int arg2, struct sysctl_req *req)
+{
+	int v = (int)__atomic_load_n(&p12_cpu_mode, __ATOMIC_RELAXED);
+	int e = sysctl_io_number(req, v, sizeof(v), &v, NULL);
+	if (e || req->newptr == USER_ADDR_NULL) return e;
+	if (v < 0 || v > 1) return EINVAL;
+	__atomic_store_n(&p12_cpu_mode, (uint32_t)v, __ATOMIC_RELEASE);
+	__atomic_store_n(&p12_frame_streak, 0, __ATOMIC_RELEASE);
+	say("p12-cpu: mode=%d optional_target=70%% stock_target=60%% "
+	    "stable_frames_required=30 touch_and_late_fail_open=1\n", v);
+	return 0;
+}
+SYSCTL_PROC(_kern_hakios, OID_AUTO, p12_cpu_mode,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN,
+    NULL, 0, p12_cpu_mode_sysctl, "I", "P12 no-touch stable animation CPU efficiency A/B; 0=stock 1=guarded");
+
+static int
+p12_cpu_stats_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
+    __unused int arg2, struct sysctl_req *req)
+{
+	char buf[256];
+	snprintf(buf, sizeof(buf), "mode=%u streak=%u eligible=%llu scaled=%llu touch_bypass=%llu late_bypass=%llu static_bypass=%llu stock_target=60 trial_target=70 writes_voltage=0 cpu_off=0",
+	    __atomic_load_n(&p12_cpu_mode, __ATOMIC_RELAXED),
+	    __atomic_load_n(&p12_frame_streak, __ATOMIC_RELAXED),
+	    (unsigned long long)__atomic_load_n(&p12_eligible_windows, __ATOMIC_RELAXED),
+	    (unsigned long long)__atomic_load_n(&p12_scaled_windows, __ATOMIC_RELAXED),
+	    (unsigned long long)__atomic_load_n(&p12_touch_bypass, __ATOMIC_RELAXED),
+	    (unsigned long long)__atomic_load_n(&p12_late_bypass, __ATOMIC_RELAXED),
+	    (unsigned long long)__atomic_load_n(&p12_static_bypass, __ATOMIC_RELAXED));
+	return SYSCTL_OUT(req, buf, strlen(buf) + 1);
+}
+SYSCTL_PROC(_kern_hakios, OID_AUTO, p12_cpu_stats,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN,
+    NULL, 0, p12_cpu_stats_sysctl, "A", "P12 source/fail-open counters read-only");
+
+/* XNU cpu_idle() P12 observation counters: WFI clock-idle, NOT C2 or
+ * power-domain OFF. Disabled by default and never changes the idle path. */
+extern volatile uint32_t hakios_p12_wfi_probe_enable;
+extern volatile uint64_t hakios_p12_wfi_entries[8];
+extern volatile uint64_t hakios_p12_wfi_ticks[8];
+static int
+p12_wfi_probe_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
+    __unused int arg2, struct sysctl_req *req)
+{
+    int v=(int)__atomic_load_n(&hakios_p12_wfi_probe_enable,__ATOMIC_RELAXED);
+    int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(e || req->newptr==USER_ADDR_NULL)return e;
+    if(v<0 || v>1)return EINVAL;
+    __atomic_store_n(&hakios_p12_wfi_probe_enable,(uint32_t)v,__ATOMIC_RELEASE);
+    say("p12-wfi: probe=%d observational_only=1 CPU_SUSPEND=0 CPD=0 SICD=0 CPU_OFF=0\n",v);
+    return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p12_wfi_probe,
+    CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,
+    p12_wfi_probe_sysctl,"I","P12 optional existing WFI instruction residency profiler; 0=OFF 1=READ_ONLY");
+
+static int
+p12_wfi_stats_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
+    __unused int arg2,struct sysctl_req *req)
+{
+    char buf[480];
+    int at=snprintf(buf,sizeof(buf),"enabled=%u WFI_ONLY=1 CPU_SUSPEND=0 CPD=0 SICD=0 SYSTEM_SLEEP=0 CORE_POWER_OFF=0",
+        __atomic_load_n(&hakios_p12_wfi_probe_enable,__ATOMIC_RELAXED));
+    for(unsigned i=0;i<8 && at>0 && at<(int)sizeof(buf)-55;i++){
+        uint64_t ticks=__atomic_load_n(&hakios_p12_wfi_ticks[i],__ATOMIC_RELAXED);
+        uint64_t cnt=__atomic_load_n(&hakios_p12_wfi_entries[i],__ATOMIC_RELAXED);
+        uint64_t ns=0;
+        absolutetime_to_nanoseconds(ticks,&ns);
+        at+=snprintf(buf+at,sizeof(buf)-(size_t)at," cpu%u=%llu/%llums",i,
+            (unsigned long long)cnt,(unsigned long long)(ns/NSEC_PER_MSEC));
+    }
+    return SYSCTL_OUT(req,buf,strlen(buf)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p12_wfi_stats,
+    CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,
+    p12_wfi_stats_sysctl,"A","P12 cumulative per-core WFI counts and time, not domain OFF");
 
 /* kern.hakios.gov_policy: gov_policy=, changed while the system runs (the USB console's "sysctl kern.hakios.gov_policy=N") */
 static int
@@ -1206,7 +1315,33 @@ decide_scion(struct cluster *c, uint64_t now, uint32_t window)
 		}
 	}
 	max = ceiling_now(c);
-	target = scion_rate(&c->rate, c->levels, c->n, c->cur, c->load, MAX(c->floor, c->boost_floor), max, window);
+	/* P12 only alters the BIG target after >=30 consecutive on-time
+	 * ~60Hz presents with no input, fresh sensible TMU, screen requested ON
+	 * and no recent late frame. The actual frame deadline and touch boosts
+	 * always retain the stock 60%% target; any missed frame auto-aborts. */
+	uint32_t rated_load = c->load;
+	if (c == &clusters[1] && gov_policy == 2 &&
+	    __atomic_load_n(&p12_cpu_mode, __ATOMIC_RELAXED)) {
+		if (__atomic_load_n(&fingers, __ATOMIC_ACQUIRE) != 0 || touch_held(now)) {
+			__atomic_fetch_add(&p12_touch_bypass, 1, __ATOMIC_RELAXED);
+		} else if (now < __atomic_load_n(&p12_late_until, __ATOMIC_ACQUIRE)) {
+			__atomic_fetch_add(&p12_late_bypass, 1, __ATOMIC_RELAXED);
+		} else if (!s9_p12_cpu_eligible(
+		    __atomic_load_n(&p12_cpu_mode, __ATOMIC_RELAXED), gov_policy,
+		    __atomic_load_n(&p12_frame_streak, __ATOMIC_ACQUIRE),
+		    __atomic_load_n(&fingers, __ATOMIC_ACQUIRE), false, false,
+		    hakios_display_requested_on(), temp_fresh(c),
+		    hakios_exynos_tmu_zone_now_mc(c->tmu_zone))) {
+			__atomic_fetch_add(&p12_static_bypass, 1, __ATOMIC_RELAXED);
+		} else {
+			__atomic_fetch_add(&p12_eligible_windows, 1, __ATOMIC_RELAXED);
+			rated_load = s9_p12_cpu_rated_load(c->load, true);
+			if (rated_load < c->load)
+				__atomic_fetch_add(&p12_scaled_windows, 1, __ATOMIC_RELAXED);
+		}
+	}
+	target = scion_rate(&c->rate, c->levels, c->n, c->cur, rated_load,
+	    MAX(c->floor, c->boost_floor), max, window);
 	if (target != c->cur) {
 		set_rate(c, target, max);
 	}
