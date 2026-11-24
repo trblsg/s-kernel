@@ -2423,7 +2423,74 @@ static uint32_t gov_probe_windows, gov_probe_frames, gov_probe_floor_forced, gov
  */
 #define GOV_FRAME_MS    100
 static uint32_t gov_frame_mhz = 572;
+static bool gov_on;
 static uint64_t gov_frame_last;
+/* P12.3 trial is independent from the existing p122 diagnostic mode.
+ * Deadline is absolute, max 30s; never changes configured gov_frame_mhz.
+ * Frame cadence evidence is collected from actual display presents. */
+static uint64_t p123_floor_until, p123_gap_ms, p123_present_count;
+static uint32_t p123_static_streak;
+static uint64_t p123_eligible_windows, p123_bypass_windows;
+extern bool hakios_p123_input_quiet(uint64_t now);
+extern uint64_t hakios_exynos_tmu_age_ms(void);
+
+static bool
+p123_floor_active(uint64_t now)
+{
+    uint64_t until=__atomic_load_n(&p123_floor_until,__ATOMIC_ACQUIRE);
+    return s9_p123_trial_active(now,until);
+}
+static int
+p123_floor_mode_sysctl(__unused struct sysctl_oid *oidp,
+    __unused void *arg1,__unused int arg2,struct sysctl_req *req)
+{
+    int v=p123_floor_active(mach_absolute_time())?1:0;
+    int error=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(error || req->newptr==NULL)return error;
+    if(v!=0 && v!=1)return EINVAL;
+    if(v==0){
+        __atomic_store_n(&p123_floor_until,0,__ATOMIC_RELEASE);
+        return 0;
+    }
+    uint64_t now=mach_absolute_time(),span=0;
+    if(!__atomic_load_n(&p122_enabled,__ATOMIC_ACQUIRE) ||
+        !mali_gov || !gov_on || mali_dvs || g3d_nrates!=3 ||
+        gov_frame_mhz!=450 || hakios_display_requested_on()!=1 ||
+        !hakios_p123_input_quiet(now))return EPERM;
+    /* No extension of an already armed trial; restore0 before rearm. */
+    if(p123_floor_active(now))return EBUSY;
+    nanoseconds_to_absolutetime(30ull*NSEC_PER_SEC,&span);
+    __atomic_store_n(&p123_floor_until,now+span,__ATOMIC_RELEASE);
+    return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p123_floor_mode,
+    CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,
+    NULL,0,p123_floor_mode_sysctl,"I",
+    "P12.3 30-second lower-only adaptive frame-floor experiment, default 0");
+static int
+p123_floor_stats_sysctl(__unused struct sysctl_oid *oidp,
+    __unused void *arg1,__unused int arg2,struct sysctl_req *req)
+{
+    uint64_t now=mach_absolute_time();
+    char buf[512];
+    snprintf(buf,sizeof(buf),
+        "version=1 active=%u configured_floor=%u quiet=%u display=%d "
+        "streak=%u gap_ms=%llu eligible=%llu bypass=%llu presents=%llu last_present_ticks=%llu now_ticks=%llu",
+        p123_floor_active(now)?1u:0u,gov_frame_mhz,
+        hakios_p123_input_quiet(now)?1u:0u,hakios_display_requested_on(),
+        __atomic_load_n(&p123_static_streak,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p123_gap_ms,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p123_eligible_windows,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p123_bypass_windows,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p123_present_count,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&gov_frame_last,__ATOMIC_RELAXED),
+        (unsigned long long)now);
+    return SYSCTL_OUT(req,buf,strlen(buf)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p123_floor_stats,
+    CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,
+    NULL,0,p123_floor_stats_sysctl,"A",
+    "P12.3 adaptive frame-floor evidence and monotonic display-present stamps");
 SYSCTL_UINT(_kern_hakios, OID_AUTO, mali_gov_frame, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gov_frame_mhz, 0,
     "the GPU's clock while frames come, MHz at least (mali_gov=1; 0: none)");
 
@@ -2431,10 +2498,19 @@ void hakios_mali_frame(void);
 void
 hakios_mali_frame(void)
 {
-	__atomic_store_n(&gov_frame_last, mach_absolute_time(), __ATOMIC_RELAXED);
+	uint64_t now=mach_absolute_time();
+	uint64_t previous=__atomic_exchange_n(&gov_frame_last,now,__ATOMIC_ACQ_REL);
+	if(__atomic_load_n(&p122_enabled,__ATOMIC_RELAXED)){
+		uint64_t gap=0;
+		if(previous && now>=previous)absolutetime_to_nanoseconds(now-previous,&gap);
+		gap/=NSEC_PER_MSEC;
+		__atomic_store_n(&p123_gap_ms,gap,__ATOMIC_RELAXED);
+		uint32_t old=__atomic_load_n(&p123_static_streak,__ATOMIC_RELAXED);
+		__atomic_store_n(&p123_static_streak,s9_p123_frame_streak(old,gap),__ATOMIC_RELEASE);
+		__atomic_fetch_add(&p123_present_count,1,__ATOMIC_RELAXED);
+	}
 	hakios_exynos_bus_busy();       /* bus_max=2: the memory bus at its top while frames come (hakios.exynos_acpm.c) */
 }
-static bool gov_on;
 static unsigned gov_level, gov_cap = G3D_RATES_MOST - 1, gov_down, gov_failed;
 static bool gov_dvs;                    /* mali_dvs=1 and every level's voltage known: BUCK6 follows the level */
 
@@ -2591,6 +2667,15 @@ gov_window(uint64_t now, uint64_t busy)
 	for (want = 0; want + 1 < GOV_LEVELS &&
 	    (uint64_t)load * g3d_rates[gov_level].mhz > (uint64_t)GOV_TARGET * g3d_rates[want].mhz; want++) {
 	}
+	/* Revoke a trial on real input, display loss or unavailable/hot TMU.
+	 * Do not wait for another host command or silently rearm on wake. */
+	if(p123_floor_active(now) &&
+	    (hakios_display_requested_on()!=1 || !hakios_p123_input_quiet(now) ||
+	    hakios_exynos_tmu_age_ms()>2000 || mc<0 || mc>=72000 ||
+	    mali_dvs || gov_frame_mhz!=450)){
+		__atomic_store_n(&p123_floor_until,0,__ATOMIC_RELEASE);
+		__atomic_fetch_add(&p123_bypass_windows,1,__ATOMIC_RELAXED);
+	}
 	/* (mali_gov_frame: frames coming, the floor) */
 	if (gov_frame_mhz != 0) {
 		uint64_t last = __atomic_load_n(&gov_frame_last, __ATOMIC_RELAXED), span;
@@ -2601,7 +2686,23 @@ gov_window(uint64_t now, uint64_t busy)
 
 			had_frame = true;
 
-			while (floor + 1 < GOV_LEVELS && g3d_rates[floor].mhz < gov_frame_mhz) {
+			uint32_t effective_floor=gov_frame_mhz;
+			if(p123_floor_active(now)){
+				uint64_t age=0;
+				absolutetime_to_nanoseconds(now-last,&age);
+				bool eligible=s9_p123_floor_eligible(1,hakios_display_requested_on(),
+				    hakios_p123_input_quiet(now),hakios_exynos_tmu_age_ms()<=2000,
+				    mc,__atomic_load_n(&p123_static_streak,__ATOMIC_ACQUIRE),
+				    __atomic_load_n(&p123_gap_ms,__ATOMIC_RELAXED),
+				    age/NSEC_PER_MSEC,load);
+				if(eligible){
+					/* Relax ONLY the presentation floor. Load target,
+					 * voltage policy, thermal cap and down hysteresis unchanged. */
+					effective_floor=0;
+					__atomic_fetch_add(&p123_eligible_windows,1,__ATOMIC_RELAXED);
+				}else __atomic_fetch_add(&p123_bypass_windows,1,__ATOMIC_RELAXED);
+			}
+			while (floor + 1 < GOV_LEVELS && g3d_rates[floor].mhz < effective_floor) {
 				floor++;
 			}
 			floor_forced = want < floor;

@@ -12,6 +12,11 @@ struct s9_p122_frame_window {
     uint32_t frames, cpu_samples;
     uint32_t bins[8]; /* <=5,8,12,16.667,20,33.333,50 ms, >50 */
 };
+/* Rotate the sampled residue instead of pinning every sample to the
+ * same phase of a periodic workload (e.g. 10Hz icon). Still a sample. */
+static inline int s9_p123_sample_frame(uint64_t frame) {
+    return frame%16u == (frame/16u)%16u;
+}
 static inline unsigned s9_p122_frame_bin(uint64_t us) {
     static const uint32_t bounds[7]={5000,8000,12000,16667,20000,33333,50000};
     for(unsigned i=0;i<7;++i) if(us<=bounds[i])return i;

@@ -40,6 +40,10 @@ $script:P12CpuDirty=$false
 $script:P12WfiDirty=$false
 $script:P12HiStopConfirmed=$false
 $script:P12HiDirty=$false
+# Only the P12.3 wrapper opts in; P12/P12.2 retain the old allowlist.
+$script:P123HostEnabled=$false
+$script:P123ClockAllowed=$false
+$script:P123Strict=$false
 $script:LifeHostOnly=$false
 $script:P12HiAbortSeen=$false
 $script:P12HiGateStopSeen=$false
@@ -88,14 +92,19 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
         'p12_gpu_boot_stats','p9_auto_gpu','p9_panel_stats','g3d_lab_stats',
         'p122_diag_mode','p122_gpu_stats',
         'p7_cpu_stats','p4_stats')
+    if($script:P123HostEnabled){$allowed+=@('p123_floor_mode','p123_floor_stats')}
     if($Name -notin $allowed){throw "P12 sysctl disallowed $Name"}
     if($Value -ne '' -and -not (
         (($Name -eq 'p12_cpu_mode' -or $Name -eq 'p12_wfi_probe') -and $Value -in @('0','1')) -or
         ($Name -eq 'hi_cmd' -and $Value -in @('0','201')) -or
-        ($Name -eq 'p122_diag_mode' -and $Value -in @('0','1','2')))){
+        ($Name -eq 'p122_diag_mode' -and $Value -in @('0','1','2')) -or
+        ($script:P123HostEnabled -and $Name -eq 'p123_floor_mode' -and $Value -in @('0','1')) -or
+        ($script:P123HostEnabled -and $script:P123ClockAllowed -and $Name -eq 'hi_cmd' -and $Value -eq '252'))){
         throw 'P12.2 only permits bounded CPU/WFI/HI2 and diagnostic mode=0/1/2; no GPU/panel/voltage writes'
     }
-    if($Cleanup -and ($Name -notin @('p12_cpu_mode','p12_wfi_probe','hi_cmd','p122_diag_mode') -or $Value -ne '0')){
+    $restore=@('p12_cpu_mode','p12_wfi_probe','hi_cmd','p122_diag_mode')
+    if($script:P123HostEnabled){$restore+='p123_floor_mode'}
+    if($Cleanup -and ($Name -notin $restore -or $Value -ne '0')){
         throw 'P12.1/P12.2 Cleanup bypass is reserved for bounded restore-to-zero writes only'
     }
     $cmd='sysctl kern.hakios.'+$Name
@@ -107,7 +116,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
     # a thermal abort cannot skip its bounded restore-to-zero attempt.
     if($Name -eq 'p12_cpu_mode' -and $Value -eq '1'){$script:P12CpuDirty=$true}
     if($Name -eq 'p12_wfi_probe' -and $Value -eq '1'){$script:P12WfiDirty=$true}
-    if($Name -eq 'hi_cmd' -and $Value -eq '201'){$script:P12HiDirty=$true}
+    if($Name -eq 'hi_cmd' -and $Value -in @('201','252')){$script:P12HiDirty=$true}
     $bytes=[Text.Encoding]::ASCII.GetBytes($cmd+[char]13)
     $script:LifeSerial.Write($bytes,0,$bytes.Length)
     Life-Say ('P12 '+$(if($Value -eq ''){'READ '}else{'WRITE '})+$cmd)
@@ -219,6 +228,7 @@ function P12-Observe([string]$Phase,[int]$Seconds,[string]$Instruction){
         Life-CheckStable $now
         Life-CheckSafety $now
         P12-EarlyThermalGuard
+        if($script:P123Strict){P123-Guard}
         if($script:P12HiUnexpectedPhase){
             throw 'P12.1 HI2_AUTO_REARMED during interactive A/B: abort invalid causal comparison'
         }

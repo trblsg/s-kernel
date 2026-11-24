@@ -2259,6 +2259,7 @@ display_link_rates(void)
 	if (link == NULL || sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) != 0) {
 		return;
 	}
+	hi_p123_enabled = boot_arg(arguments, "p122=1");
 	dl_say = boot_arg(arguments, "touch_lat=1");
 	dl_max = boot_arg(arguments, "dl_max=1");
 	/* hi=1: manual profiler; hi=2: autonomous A/B and extended attribution.

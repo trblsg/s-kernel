@@ -79,6 +79,8 @@ void hakios_exynos_cpufreq_fingers(uint32_t down);
 void hakios_exynos_cpufreq_fingers(uint32_t down __unused) {}
 void hakios_exynos_cpufreq_frame(void);
 void hakios_exynos_cpufreq_frame(void) {}
+bool hakios_p123_input_quiet(uint64_t now);
+bool hakios_p123_input_quiet(__unused uint64_t now) { return false; }
 #endif
 
 #ifndef HAKIOS_EXYNOS_TMU

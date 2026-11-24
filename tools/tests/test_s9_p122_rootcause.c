@@ -27,6 +27,32 @@ int main(void) {
     s9_p122_frame_reset(&w);
     assert(w.frames==0 && w.wall_us==0 && w.cpu_samples==0);
     assert(s9_p122_frame_percentile_bin(&w,95)==0);
-    puts("P12.2 ROOT CAUSE PASS: mode range, GPU q/run latency bins, frame p50/p95/p99 and thread CPU sample accounting");
+    /* P12.3: no fixed-phase CPU sampling; each residue represented
+     * exactly once over 256 frames. No claim of unbiased random sampling. */
+    unsigned residues[16]={0};
+    for(unsigned i=0;i<256;i++)if(s9_p123_sample_frame(i))residues[i%16]++;
+    for(unsigned i=0;i<16;i++)assert(residues[i]==1);
+    assert(!s9_p123_trial_active(100,0));
+    assert(s9_p123_trial_active(100,30100));
+    assert(s9_p123_trial_active(30099,30100));
+    assert(!s9_p123_trial_active(30100,30100));
+    assert(!s9_p123_trial_active(30101,30100));
+    assert(s9_p123_frame_streak(0,100)==1);
+    assert(s9_p123_frame_streak(6,16)==0);
+    assert(s9_p123_frame_streak(6,151)==0);
+    assert(s9_p123_frame_streak(32,100)==32);
+    assert(s9_p123_floor_eligible(1,1,1,1,68000,6,100,99,2));
+    assert(!s9_p123_floor_eligible(0,1,1,1,68000,6,100,99,2));
+    assert(!s9_p123_floor_eligible(1,0,1,1,68000,6,100,99,2));
+    assert(!s9_p123_floor_eligible(1,-1,1,1,68000,6,100,99,2));
+    assert(!s9_p123_floor_eligible(1,1,0,1,68000,6,100,99,2));
+    assert(!s9_p123_floor_eligible(1,1,1,0,68000,6,100,99,2));
+    assert(!s9_p123_floor_eligible(1,1,1,1,72000,6,100,99,2));
+    assert(!s9_p123_floor_eligible(1,1,1,1,-273000,6,100,99,2));
+    assert(!s9_p123_floor_eligible(1,1,1,1,68000,5,100,99,2));
+    assert(!s9_p123_floor_eligible(1,1,1,1,68000,6,16,99,2));
+    assert(!s9_p123_floor_eligible(1,1,1,1,68000,6,100,151,2));
+    assert(!s9_p123_floor_eligible(1,1,1,1,68000,6,100,99,9));
+    puts("P12.2/P12.3 ROOT CAUSE PASS: histograms, rotating CPU sample and fail-open adaptive floor gates");
     return 0;
 }

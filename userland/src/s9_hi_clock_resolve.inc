@@ -21,12 +21,43 @@ hi_view_state_name(enum hi_view_status state)
     }
 }
 
+/* P12.3: runtime identity is stronger than a matching class name.
+ * isKindOfClass: can be overridden; validate its real Objective-C ABI.
+ * A mismatch/unknown remains fail-open, not permission to cut callbacks. */
+static bool
+hi_view_chain(id candidate,Class expected,bool *named)
+{
+    if(named)*named=false;
+    if(!candidate || !expected)return false;
+    bool match=false;
+    unsigned depth=0;
+    for(Class c=object_getClass(candidate);c && depth<32;c=class_getSuperclass(c),depth++){
+        if(c==expected)match=true;
+        const char *name=class_getName(c);
+        if(named && name && strcmp(name,"UIView")==0)*named=true;
+    }
+    return match && depth<32;
+}
+static int
+hi_kind_checked(id candidate,Class expected)
+{
+    if(!candidate || !expected)return -1;
+    SEL sel=sel_registerName("isKindOfClass:");
+    Method m=class_getInstanceMethod(object_getClass(candidate),sel);
+    char ret[16]="",arg[16]="";
+    if(!m || method_getNumberOfArguments(m)!=3)return -1;
+    method_getReturnType(m,ret,sizeof(ret));
+    method_getArgumentType(m,2,arg,sizeof(arg));
+    if(arg[0]!='#' && arg[0]!='@')return -1;
+    if(ret[0]=='B')return ((bool(*)(id,SEL,Class))objc_msgSend)(candidate,sel,expected)?1:0;
+    if(ret[0]=='c')return ((signed char(*)(id,SEL,Class))objc_msgSend)(candidate,sel,expected)?1:0;
+    return -1;
+}
 static bool
 hi_is_ui_view(id candidate)
 {
     Class cls=objc_getClass("UIView");
-    return cls && candidate &&
-        SEND1(BOOL,candidate,"isKindOfClass:",Class,cls);
+    return hi_view_chain(candidate,cls,NULL) && hi_kind_checked(candidate,cls)==1;
 }
 
 static enum hi_view_status
@@ -86,6 +117,14 @@ hi_clock_resolve(id target,char *how,size_t how_size)
         enum hi_view_status s=hi_view_state(target,reason,sizeof(reason));
         snprintf(how,how_size,"self:%s",reason);
         return s;
+    }
+    bool named_view=false;
+    (void)hi_view_chain(target,objc_getClass("UIView"),&named_view);
+    if(named_view){
+        /* Apparent UIView with contradictory runtime proof: never try
+         * unrelated getters/ivars as a workaround. Preserve callbacks. */
+        snprintf(how,how_size,"UIView_runtime_identity_or_ABI_conflict");
+        return HI_VIEW_UNKNOWN;
     }
     const char *const props[]={"iconImageView","imageView","iconView","view","contentView"};
     enum hi_view_status chosen=HI_VIEW_UNKNOWN;
@@ -178,4 +217,27 @@ hi_clock_class_chain(id target)
         "owner_is_view=%u candidate_resolver=runtime_checked\n",
         chain,objc_getClass("UIView")?1u:0u,
         hi_is_ui_view(target)?1u:0u);
+    /* P12.3: distinguish a same-name class from identical runtime Class.
+     * No name-based override, guessed ivars or change to visibility proof. */
+    if(hi_p123_enabled && target){
+        Class actual=object_getClass(target), lookup=objc_getClass("UIView");
+        Class named=NULL;
+        unsigned matches=0, roots=0;
+        for(Class c=actual;c && roots<32;c=class_getSuperclass(c),roots++){
+            const char *n=class_getName(c);
+            if(n && strcmp(n,"UIView")==0){named=c;matches++;}
+        }
+        Method m=class_getInstanceMethod(actual,sel_registerName("isKindOfClass:"));
+        char rt[16]="";
+        if(m)method_getReturnType(m,rt,sizeof(rt));
+        say("p123-clock-class: target=%p actual=%p lookup=%p chain_view=%p "
+            "name_matches=%u pointer_equal=%u kind_raw=%d owner_verified=%u method_args=%u ret=%s depth=%u\n",
+            (void*)target,(void*)actual,(void*)lookup,(void*)named,matches,
+            named && lookup && named==lookup?1u:0u,hi_kind_checked(target,lookup),
+            hi_is_ui_view(target)?1u:0u,m?method_getNumberOfArguments(m):0u,rt,roots);
+        const char *image=named?class_getImageName(named):NULL;
+        const char *lookup_image=lookup?class_getImageName(lookup):NULL;
+        say("p123-clock-images: chain=%s lookup=%s policy=unchanged\n",
+            image?image:"unknown",lookup_image?lookup_image:"unknown");
+    }
 }

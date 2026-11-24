@@ -10,7 +10,8 @@ param(
  [ValidateRange(12,60)][int]$WindowSeconds=20,
  [ValidateRange(50,600)][int]$IdleWindowSeconds=120,
  [ValidateRange(10,100)][int]$OffStableSeconds=25,
- [switch]$MicroGesture,[switch]$IncludeIdle,[switch]$WfiProbe,
+ [switch]$MicroGesture,[switch]$IncludeIdle,[switch]$WfiProbe,[switch]$WakeCheck,
+ [switch]$P123,[switch]$AdaptiveFloor,[switch]$ClockCrossover,[switch]$IdleOnly,
  [switch]$Execute,[switch]$LibraryOnly
 )
 Set-StrictMode -Version 2
@@ -18,13 +19,34 @@ $ErrorActionPreference='Stop'
 $script:P122SavedExecute=$Execute
 $script:P122SavedLibrary=$LibraryOnly
 $script:P122SavedWfi=$WfiProbe
+$script:P123SavedWake=$WakeCheck
 $parent=Join-Path $PSScriptRoot 's9-p12-dual-serial.ps1'
 if(-not(Test-Path -LiteralPath $parent)){throw 'Missing matched s9-p12-dual-serial.ps1'}
 . $parent -LibraryOnly -Port $Port -ActiveWindowSeconds $WindowSeconds -IdleWindowSeconds $IdleWindowSeconds -OffStableSeconds $OffStableSeconds
 $Execute=$script:P122SavedExecute
 $LibraryOnly=$script:P122SavedLibrary
 $WfiProbe=$script:P122SavedWfi
+$WakeCheck=$script:P123SavedWake
 $script:P122ModeDirty=$false
+$script:P123HostEnabled=[bool]$P123
+$script:P123ClockAllowed=[bool]($P123 -and $ClockCrossover)
+$script:P123FloorDirty=$false
+$script:P123SourceLines=New-Object 'System.Collections.Generic.List[string]'
+$script:P123ClockInput=0L
+$script:P123ClockAt=[datetime]::MinValue
+$script:P123GlAt=[datetime]::MinValue
+$script:P123CaAt=[datetime]::MinValue
+$script:P123ExpectedInput=-1L
+$script:P123AutoPhase=''
+$script:P123AutoRearmed=$false
+$script:P123AutoAborted=$false
+$script:P123FloorRows=New-Object 'System.Collections.Generic.List[string]'
+$script:P123FloorBaseline=$null
+if(($AdaptiveFloor -or $ClockCrossover -or $IdleOnly) -and -not $P123){throw 'P12.3 options require -P123'}
+if(@(@($AdaptiveFloor,$ClockCrossover,$IdleOnly) | Where-Object {$_}).Count -gt 1){throw 'Choose ONE of -AdaptiveFloor, -ClockCrossover or -IdleOnly'}
+if(($AdaptiveFloor -or $ClockCrossover -or $IdleOnly) -and $MicroGesture){throw 'Keep gesture separate from floor, Clock and idle tests'}
+if($WakeCheck -and -not ($IncludeIdle -or $IdleOnly)){throw '-WakeCheck requires an idle scenario'}
+if(($AdaptiveFloor -or $ClockCrossover) -and ($IncludeIdle -or $WfiProbe)){throw 'Run floor/Clock A/B independently of WFI/idle measurements'}
 $script:P122CurrentMode=0
 $script:P122Await=-1
 $script:P122Ack=$false
@@ -36,6 +58,31 @@ $script:P122PreviousObserver=$script:LifeLineObserver
 $script:LifeLineObserver={
  param([string]$Line,[datetime]$At)
  if($script:P122PreviousObserver){& $script:P122PreviousObserver $Line $At}
+ if($script:P123HostEnabled -and $script:LifeSynced){
+    if($Line -match '^p123-(clock-class|clock-images|clock-window|ca-window|gl-window|gl):|^hakios-gl-(path|cost-top|g21):'){
+        $script:P123SourceLines.Add(('{0:HH:mm:ss.fff}Z {1} {2}' -f $At,$script:P12Phase,$Line))
+    }
+    if($Line -match '^p123-gl-window: .*native_skipped=0 '){$script:P123GlAt=$At}
+    if($Line -match '^p123-ca-window: '){$script:P123CaAt=$At}
+    if($Line -match '^p123-clock-window: .*input_ticks=(\d+) home=([01])'){
+        $script:P123ClockInput=[long]$Matches[1]
+        $script:P123ClockAt=$At
+    }
+    if($Line -match '^hi: auto=(REARM|baseline|cut1|recover1|cut2|recover2|FINISHED|ABORT)(?: |$)'){
+        $phase=$Matches[1]
+        if($phase -eq 'REARM'){$script:P123AutoRearmed=$true}
+        if($script:P123AutoRearmed){
+            if($phase -eq 'ABORT'){$script:P123AutoAborted=$true}
+            $script:P123AutoPhase=$phase
+            if($ClockCrossover){$script:P12Phase='CLOCK_'+$phase.ToUpperInvariant()}
+            $script:P123SourceLines.Add(('{0:HH:mm:ss.fff}Z CLOCK_CROSSOVER {1}' -f $At,$Line))
+        }
+    }
+    if($Line -match '^panic\(|^Debugger called:|^Kernel panic|Mali.*(?:GPU fault|MMU fault)|^GPU fault'){
+        $script:P123SourceLines.Add("FAULT $Line")
+        throw "P12.3 kernel/GPU fault: $Line"
+    }
+ }
  if($Line -match '^p122-gl: mode=([012]) ack=kernel_sysctl'){
     $mode=[int]$Matches[1]
     if($mode -eq $script:P122Await){$script:P122Ack=$true}
@@ -71,6 +118,7 @@ function P122-Switch([int]$Mode,[switch]$FirstMinimal){
     $now=Life-Now
     Life-CheckSafety $now
     P12-EarlyThermalGuard
+    if($script:P123Strict){P123-Guard}
  }
  if(-not $script:P122Ack){
     throw "P12.2 kernel mode $Mode acknowledged but backboardd has NO mode ACK within 15 seconds; wrong SYSTEM or missing p122=1, refuse comparison"
@@ -156,6 +204,119 @@ function P122-Report([string]$Stem,[string]$Stop){
  Life-Say ('P12.2 REPORT '+$path)
  foreach($v in $lines){Write-Host $v}
 }
+# P12.3 uses the same live serial fence and thermal limits as P12.2.
+# Do not compare modes when the scene changes or telemetry is stale.
+function P123-Guard {
+ $now=Life-Now
+ Life-CheckSafety $now
+ P12-EarlyThermalGuard
+ if($script:LifeState -ne 'ON' -or $script:LifeScene -ne 'HOME'){
+    throw 'P12.3 scene changed or is unverified; stop active Home experiment'
+ }
+ if(($now-$script:LifeLastCpuAt).TotalSeconds -gt 4 -or
+    ($now-$script:LifeLastGpuAt).TotalSeconds -gt 8){
+    throw 'P12.3 thermal telemetry stale; stop active experiment'
+ }
+ if($script:P123ExpectedInput -ge 0){
+    if(($now-$script:P123ClockAt).TotalSeconds -gt 12){throw 'P12.3 Clock/source window stale'}
+    if($script:P123ClockInput -ne $script:P123ExpectedInput){throw 'P12.3 user input during no-touch experiment'}
+ }
+}
+function P123-FloorSnapshot([string]$Label){
+ $s=P12-Query 'p123_floor_stats'
+ if($s -notmatch '^version=1 active=[01] configured_floor=450 quiet=[01] display=[01] '){
+    throw 'P12.3 paired kernel or baseline floor450 missing'
+ }
+ $script:P123FloorRows.Add("$Label $s")
+ return $s
+}
+function P123-FloorProfile([string]$Name,[int]$Mode){
+ $script:P12Phase=$Name
+ P123-Guard
+ $before=P123-FloorSnapshot ($Name+'_BEGIN')
+ if($before -notmatch 'active=0 ' -or $before -notmatch 'quiet=1 display=1 '){
+    throw 'P12.3 floor baseline or input/display proof missing (unlock, then no touch)'
+ }
+ try{
+    if($Mode -eq 1){
+        if((P122-CountField $before 'streak') -lt 6){throw 'P12.3 stable 80-150ms frame cadence not proven'}
+        $script:P123FloorDirty=$true
+        [void](P12-Query 'p123_floor_mode' '1')
+    }
+    $gpuA=P122-Snapshot ($Name+'_GPU_BEGIN')
+    $glStart=$script:P122GlWindows.Count
+    P12-Observe $Name ([Math]::Min($WindowSeconds,20)) 'NO TOUCH; adaptive GPU frame floor only'
+    P123-Guard
+    $after=P123-FloorSnapshot ($Name+'_END')
+    if($Mode -eq 0 -and $after -notmatch 'active=0 '){throw 'P12.3 unexpected adaptive policy during baseline'}
+    if($Mode -eq 1 -and ($after -notmatch 'active=1 ' -or
+       (P122-CountField $after 'eligible') -le (P122-CountField $before 'eligible'))){
+        throw 'P12.3 no actual eligible adaptive floor windows or trial expired; comparison invalid'
+    }
+    $gpuB=P122-Snapshot ($Name+'_GPU_END')
+    $g=P122-Deltas $gpuA $gpuB
+    $obs=$script:P12Phases[-1]
+    if($obs.Name -ne $Name -or $obs.Fps -lt 5 -or $obs.Refresh -le 0){
+        throw 'P12.3 floor comparison missing live presentation coverage'
+    }
+    $ratio=60.0*$obs.Presented/$obs.Refresh
+    $gl=@($script:P122GlWindows | Select-Object -Skip $glStart |
+        Where-Object {$_.Phase -eq $Name -and $_.Mode -eq 0})
+    if($gl.Count -lt 1 -or $ratio -lt 7 -or $ratio -gt 13){
+        throw 'P12.3 no stable Home 10fps baseline or GL windows; comparison invalid'
+    }
+    # First completed GL window may straddle a host phase boundary.
+    # Retain the raw data; only compare p95 if a subsequent full window exists.
+    $whole=@($gl | Select-Object -Skip 1)
+    $p95=-1
+    if($whole.Count){$p95=($whole | Measure-Object -Property P95Bin -Maximum).Maximum}
+    if($Name -eq 'FLOOR_A0'){
+        $script:P123FloorBaseline=[pscustomobject]@{Ratio=$ratio;Queue=$g.QueueAvgUs;P95=$p95}
+    }else{
+        $b=$script:P123FloorBaseline
+        if($null -eq $b -or [Math]::Abs($ratio-$b.Ratio) -gt 0.2*$b.Ratio -or
+           $g.QueueAvgUs -gt [Math]::Max(250,2*$b.Queue) -or
+           ($p95 -ge 0 -and $b.P95 -ge 0 -and $p95 -gt $b.P95+1)){
+            throw 'P12.3 floor A/B quality gate failed: cadence, GPU queue or GL p95 bucket changed'
+        }
+    }
+    $script:P123FloorRows.Add("QUALITY $Name normalized_60Hz_present_rate=$([Math]::Round($ratio,2)) full60_windows=$($gl.Count) p95bin_excluding_first=$p95 (minus1=insufficient)")
+    $script:P123FloorRows.Add("RESULT $Name mode=$Mode presents_delta=$((P122-CountField $after 'presents')-(P122-CountField $before 'presents')) eligible_delta=$((P122-CountField $after 'eligible')-(P122-CountField $before 'eligible')) bypass_delta=$((P122-CountField $after 'bypass')-(P122-CountField $before 'bypass')) busy_pct=$($g.BusyPct) residency455_pct=$($g.Residency455Pct) jobs=$($g.Jobs) queue_us=$($g.QueueAvgUs) run_us=$($g.RunAvgUs)")
+ }finally{
+    if($script:P123FloorDirty){
+        [void](P12-Query 'p123_floor_mode' '0' -Cleanup)
+        $script:P123FloorDirty=$false
+        Life-Say 'P12.3 adaptive floor RESTORE0 ACK'
+    }
+ }
+}
+function P123-ClockTrial {
+ $script:P123AutoRearmed=$false;$script:P123AutoAborted=$false;$script:P123AutoPhase=''
+ $script:P12HiStopConfirmed=$false
+ $script:P12Phase='CLOCK_CROSSOVER'
+ [void](P12-Query 'hi_cmd' '252')
+ $until=(Life-Now).AddSeconds(140)
+ while((Life-Now) -lt $until -and $script:P123AutoPhase -ne 'FINISHED'){
+    Life-Pump
+    P123-Guard
+    if($script:P123AutoAborted){throw 'P12.3 Clock crossover aborted; no retry'}
+ }
+ if(-not $script:P123AutoRearmed -or $script:P123AutoPhase -ne 'FINISHED'){
+    throw 'P12.3 Clock crossover incomplete; no causal conclusion'
+ }
+ P12-QuiesceHI2
+ Life-Say 'P12.3 Clock crossover FINISHED with original timer restored'
+}
+function P123-Report([string]$Stem,[string]$Stop){
+ $lines=New-Object 'System.Collections.Generic.List[string]'
+ $lines.Add("S9 P12.3 SOURCE AND ADAPTIVE FLOOR STOP=$Stop")
+ $lines.Add('Same mach ticks across processes; windows only, NOT matched frame IDs. Shadow bind candidates do not authorize skipping.')
+ $lines.Add('Adaptive trial is 30s max, lower-only frame floor; no GPU voltage, panel or CPU_OFF changes.')
+ foreach($r in $script:P123FloorRows){$lines.Add($r)}
+ foreach($r in $script:P123SourceLines){$lines.Add($r)}
+ [IO.File]::WriteAllLines($Stem+'.p123-report.txt',$lines.ToArray(),[Text.UTF8Encoding]::new($false))
+ Life-Say ('P12.3 REPORT '+$Stem+'.p123-report.txt')
+}
 function P122-Run {
  if(-not $Execute){
     Write-Host 'P12.2 PREVIEW: SAFE no-swipe Minimal -> Stage -> GL Detailed -> Minimal.'
@@ -165,11 +326,17 @@ function P122-Run {
     Write-Host 'Disable independent glcost/glstage/p0hash/p0verify glprof bootargs for causal comparison.'
     Write-Host 'Optional -MicroGesture: after fresh cool start ONE gentle swipe only for 4 seconds.'
     Write-Host 'Optional -IncludeIdle -WfiProbe: manual physical POWER OFF; CPU idle diagnostics.'
+    if($P123){
+        Write-Host 'P12.3 PREVIEW: matched BOOT+SYSTEM; source timestamps and shadow GL; no automatic suppression.'
+        Write-Host 'Choose separate -AdaptiveFloor (A/B/A, 30s kernel expiry), -ClockCrossover (legacy exact timer, bounded A/B), or -IdleOnly -WfiProbe.'
+        Write-Host 'Without those options, collect P12.3 profile data. -MicroGesture is a separate ONE-swipe scenario; optional -WakeCheck only with idle.'
+    }
     return
  }
  if($env:OS -ne 'Windows_NT'){throw 'Windows serial runner only'}
  if([IO.Ports.SerialPort]::GetPortNames() -notcontains $Port){throw "Serial port $Port unavailable"}
- $stem=Join-Path (Get-Location).Path ('putty-S9-p122-rootcause-'+(Get-Date -Format 'yyyyMMdd-HHmmss'))
+ $prefix=if($P123){'putty-S9-p123-source-'}else{'putty-S9-p122-rootcause-'}
+ $stem=Join-Path (Get-Location).Path ($prefix+(Get-Date -Format 'yyyyMMdd-HHmmss'))
  $raw=$stem+'.log'
  if(Test-Path -LiteralPath $raw){throw 'Refuse to overwrite existing raw log'}
  $errorText=$null
@@ -197,23 +364,66 @@ function P122-Run {
     [void](P122-Snapshot 'PREFLIGHT')
     P12-CoolStart 12
     P12-QuiesceHI2
-    P122-Profile 0 'ROOT_MIN_A'
-    P122-Profile 1 'ROOT_STAGE'
-    P122-Profile 2 'ROOT_DETAIL'
-    P122-Profile 0 'ROOT_MIN_B'
+    if($P123){
+        $floor=P123-FloorSnapshot 'PREFLIGHT'
+        if($floor -notmatch 'active=0 '){
+            $script:P123FloorDirty=$true
+            [void](P12-Query 'p123_floor_mode' '0' -Cleanup)
+            $script:P123FloorDirty=$false
+        }
+        if(-not $IdleOnly){
+            P123-Guard
+            if($script:P123ClockAt -eq [datetime]::MinValue){throw 'P12.3 SpringBoard source window missing; wrong SYSTEM'}
+            if(-not $MicroGesture){$script:P123ExpectedInput=$script:P123ClockInput}
+            $script:P123Strict=$true
+        }
+    }
+    if($AdaptiveFloor){
+        P123-FloorProfile 'FLOOR_A0' 0
+        P123-FloorProfile 'FLOOR_B' 1
+        P123-FloorProfile 'FLOOR_A1' 0
+    }elseif($ClockCrossover){
+        P123-ClockTrial
+    }elseif(-not $IdleOnly -and -not ($P123 -and $MicroGesture)){
+        P122-Profile 0 'ROOT_MIN_A'
+        P122-Profile 1 'ROOT_STAGE'
+        P122-Profile 2 'ROOT_DETAIL'
+        P122-Profile 0 'ROOT_MIN_B'
+    }
+    $script:P123ExpectedInput=-1L
     if($MicroGesture){
         P12-CoolStart 12
         P12-EarlyThermalGuard
         P122-Switch 2
         P12-Observe 'MICRO_TOUCH' 4 'ONE gentle swipe; no repeated gestures'
         [void](P122-Snapshot 'MICRO_TOUCH_END')
+        if($P123){P12-Observe 'MICRO_RECOVERY' 8 'STOP touching; observe recovery and possible fault'}
         P122-Switch 0
     }
-    if($IncludeIdle){
-        if($WfiProbe){[void](P12-Query 'p12_wfi_probe' '1')}
+    $script:P123Strict=$false
+    if($IncludeIdle -or $IdleOnly){
+        if($WfiProbe){
+            [void](P12-Query 'p12_wfi_probe' '1')
+            if($P123){
+                [void](P12-Query 'p12_wfi_stats')
+                [void](P12-Query 'p12_idle_diag')
+                P12-Observe 'WFI_ON' 12 'No touch; compare measured WFI before physical screen OFF'
+                [void](P12-Query 'p12_wfi_stats')
+                [void](P12-Query 'p12_idle_diag')
+            }
+        }
+        if($P123){
+            $baseline=P12-Query 'g3d_lab_stats'
+            $script:P12GpuOffBaseline=P122-CountField $baseline 'off_count'
+            $script:P12GpuWakeBaseline=P122-CountField $baseline 'wake_count'
+        }
         P12-ObserveIdle
         if($WfiProbe){[void](P12-Query 'p12_wfi_stats');[void](P12-Query 'p12_idle_diag')}
         [void](P12-Query 'g3d_lab_stats')
+    }
+    if($P123 -and -not $IdleOnly -and -not $MicroGesture -and
+        ($script:P123GlAt -eq [datetime]::MinValue -or $script:P123CaAt -eq [datetime]::MinValue)){
+        throw 'P12.3 paired backboardd CA/GL evidence missing or native-bind skip was active; comparison invalid'
     }
     Life-Say 'P12.2 acquisition complete; all diagnostics restored to minimal'
  }catch{
@@ -221,6 +431,10 @@ function P122-Run {
     Life-Say ('P12.2 STOPPED '+$errorText)
  }finally{
     if($script:P12PreflightVerified -and $null -ne $script:LifeSerial -and $script:LifeSerial.IsOpen){
+        if($script:P123FloorDirty){
+            try{[void](P12-Query 'p123_floor_mode' '0' -Cleanup);$script:P123FloorDirty=$false;Life-Say 'P12.3 floor RESTORE0 ACK'}
+            catch{Life-Say ('P12.3 floor restore UNSURE; kernel deadline <=30s '+$_.Exception.Message)}
+        }
         if($script:P122ModeDirty -or $script:P122CurrentMode -ne 0){
             try{[void](P12-Query 'p122_diag_mode' '0' -Cleanup);Life-Say 'P12.2 profiler mode0 RESTORE ACK'}
             catch{Life-Say ('P12.2 profiler RESTORE UNSURE '+$_.Exception.Message)}
@@ -239,6 +453,7 @@ function P122-Run {
     if($null -ne $script:LifeSerial){$script:LifeSerial.Dispose();$script:LifeSerial=$null}
     if(Test-Path -LiteralPath $raw){
         try{
+            if($P123){P123-Report $stem $(if($errorText){$errorText}else{'COMPLETE'})}
             P122-Report $stem $(if($errorText){$errorText}else{'COMPLETE'})
             P12-Report $stem $(if($errorText){$errorText}else{'COMPLETE'})
         }catch{Life-Say ('P12.2 report failed, raw retained: '+$_.Exception.Message)}

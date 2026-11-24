@@ -50,6 +50,7 @@
 
 #include "hakios.gl.h"
 #include "hakios.input.h"
+#include "metalvk/s9_bootarg_flag.h"
 
 extern const void *_dyld_get_shared_cache_range(size_t *length);
 
@@ -123,6 +124,10 @@ static uint64_t p10_ignore_true, p10_ignore_false;
  * Raw mach ticks converted only once per 256 forwarded calls. */
 static uint64_t p12_ca_ticks_sum, p12_ca_ticks_max;
 static uint64_t p12_ca_render_count;
+/* P12.3 same monotonic mach ticks as kernel and SpringBoard; aggregate
+ * observations, not a cross-process frame-ID or a causal association. */
+static int p123_ca_enabled;
+static __thread uint64_t p123_ca_first,p123_ca_last,p123_ca_count;
 static int last_ready = -1, last_ignore = -1;
 
 static int
@@ -214,6 +219,15 @@ my_render_update(void *server, void *update, unsigned *flags)
 	uintptr_t r = orig_render_update(server, update, flags);
     uint64_t ended=mach_absolute_time();
     uint64_t ticks=ended>=began?ended-began:0;
+    if(p123_ca_enabled){
+        if(!p123_ca_count)p123_ca_first=began;
+        p123_ca_last=ended;
+        if(++p123_ca_count==60){
+            say("p123-ca-window: first_ticks=%llu last_ticks=%llu renders=60 source=window_not_frame_id\n",
+                (unsigned long long)p123_ca_first,(unsigned long long)p123_ca_last);
+            p123_ca_count=0;
+        }
+    }
     p12_ca_ticks_sum+=ticks;
     if(ticks>p12_ca_ticks_max)p12_ca_ticks_max=ticks;
     p12_ca_render_count++;
@@ -1902,6 +1916,7 @@ opengl_es(void)
 		return;                                 /* (an image built without it) */
 	}
 	if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0) {
+		p123_ca_enabled=s9_has_boot_flag(arguments,"p122=1");
 		functions_said_yes(arguments);
 		compile_shaders_said = strstr(arguments, "glcompile=1") != NULL;
 		for (argument = arguments; (argument = strstr(argument, "gl=")) != NULL; argument += 3) {

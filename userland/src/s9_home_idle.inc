@@ -14,6 +14,8 @@
 #define HI_GROUPS 48
 #define HI_CONTEXTS 40
 static bool hi_enabled, hi_event_hook_ok, hi_auto_mode;
+static bool hi_p123_enabled;
+static uint64_t hi_p123_first,hi_p123_last,hi_p123_forwarded,hi_p123_input_ticks;
 static bool hi_verified_enabled; /* sysctl hi_policy=1; only after prior A/B FINISHED */
 static bool hi_p9_hidden_clock_enabled; /* hi_policy=2: hidden Home Clock target only */
 /* P10 source-specific lockscreen timers, independent of P9 GPU & panel.
@@ -73,6 +75,7 @@ static void
 hi_send_event(id self,SEL cmd,id event)
 {
     __atomic_store_n(&hi_last_input,hi_time_us(),__ATOMIC_RELEASE);
+    if(hi_p123_enabled)__atomic_store_n(&hi_p123_input_ticks,mach_absolute_time(),__ATOMIC_RELEASE);
     hi_original_send_event(self,cmd,event);
 }
 static unsigned
@@ -139,7 +142,8 @@ hi_proxy_tick(id self,SEL cmd,id link)
                     (unsigned long long)(p->verified_since && now>=p->verified_since?
                     (now-p->verified_since)/1000:0),hi_verified_enabled?1u:0u);
             }
-            if(g->last_view_us==0){
+            if(g->last_view_us==0 || (hi_p123_enabled && now>=g->last_view_us &&
+                now-g->last_view_us>=UINT64_C(20000000))){
                 hi_clock_class_chain(target);
                 g->last_view_us=now;
             }
@@ -197,6 +201,12 @@ hi_proxy_tick(id self,SEL cmd,id link)
         return;
     }
     p->last_forward=now;
+    if(hi_p123_enabled && exact_clock){
+        uint64_t stamp=mach_absolute_time(),zero=0;
+        __atomic_compare_exchange_n(&hi_p123_first,&zero,stamp,false,__ATOMIC_RELAXED,__ATOMIC_RELAXED);
+        __atomic_store_n(&hi_p123_last,stamp,__ATOMIC_RELAXED);
+        __atomic_fetch_add(&hi_p123_forwarded,1,__ATOMIC_RELAXED);
+    }
     if(group && group<=HI_GROUPS)
         __atomic_fetch_add(&hi_groups[group-1].forwarded,1,__ATOMIC_RELAXED);
     ((void (*)(id,SEL,id))objc_msgSend)(target,p->action,link);
@@ -395,6 +405,17 @@ hi_sample(void)
                 g->requested_fps,(unsigned long long)verified,(unsigned long long)p9,
                 (unsigned long long)p10clock,(unsigned long long)p10anim);
     }
+    if(hi_p123_enabled){
+        uint64_t first=__atomic_exchange_n(&hi_p123_first,0,__ATOMIC_ACQ_REL);
+        uint64_t last=__atomic_exchange_n(&hi_p123_last,0,__ATOMIC_ACQ_REL);
+        uint64_t forwards=__atomic_exchange_n(&hi_p123_forwarded,0,__ATOMIC_ACQ_REL);
+        say("p123-clock-window: ticks_now=%llu first_ticks=%llu last_ticks=%llu "
+            "forwarded=%llu commits=%llu input_ticks=%llu home=%u source=window_not_frame_id\n",
+            (unsigned long long)mach_absolute_time(),(unsigned long long)first,
+            (unsigned long long)last,(unsigned long long)forwards,
+            commits,(unsigned long long)__atomic_load_n(&hi_p123_input_ticks,__ATOMIC_RELAXED),
+            ready?1u:0u);
+    }
     hi_auto_sample(now);
 }
 static void hi_mark(unsigned stage);
@@ -531,6 +552,12 @@ hi_start(void)
         hi_event_hook_ok=hi_original_send_event!=NULL;
     }
     __atomic_store_n(&hi_last_input,hi_time_us(),__ATOMIC_RELEASE);
+    /* P12.3 baseline is passive; the exact Clock crossover is an explicit
+     * bounded host command 252 only. Retain observers and the old guards. */
+    if(hi_p123_enabled && hi_auto_mode){
+        hi_auto_state=HI_AUTO_ABORTED;
+        say("p123-clock: boot_passive=1 crossover_requires_explicit_252=1\n");
+    }
     /* Actual userland read/write/read self-check: independent of USB typing.
      * The kernel console route is separately protected by CTLFLAG_KERN and
      * validated by CI. Auto A/B continues even when either route fails. */

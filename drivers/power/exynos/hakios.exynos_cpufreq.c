@@ -294,6 +294,21 @@ static uint64_t ramp_began;                     /* a gesture's first event, unti
 static bool ramp_raised;
 static uint64_t finger_since;                   /* since when a finger is down (0: none), for the stat line */
 static uint64_t finger_time;
+
+/* P12.3 GPU floor trial: read-only input proof, no new input hook or
+ * boost policy. Missing governor/touch evidence means NOT quiet. */
+bool hakios_p123_input_quiet(uint64_t now);
+bool
+hakios_p123_input_quiet(uint64_t now)
+{
+    if (!__atomic_load_n(&gov_running, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&fingers, __ATOMIC_ACQUIRE) != 0)
+        return false;
+    uint64_t last=__atomic_load_n(&touch_last,__ATOMIC_ACQUIRE), span=0;
+    if (!last || now < last) return false;
+    nanoseconds_to_absolutetime(3000ull * NSEC_PER_MSEC,&span);
+    return now-last >= span;
+}
 static struct {
 	uint32_t raise_n, top_n, top_missed, acpm_n;
 	uint64_t raise_sum, raise_max, top_sum, top_max, acpm_sum, acpm_max;

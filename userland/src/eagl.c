@@ -351,6 +351,7 @@ struct eagl {
 	struct s9_gl_cost glcost;               /* grouped GL slot timings; reset every 60 frames */
 	struct s9_p122_frame_window p122_window;
 	uint64_t p122_cpu_began_us;
+	uint64_t p123_first_ticks;
 	bool p122_cpu_sample_valid;
 	unsigned p122_mode_seen;
 	struct s9_p66_bucket p66;            /* P6.6 60-frame target/damage evidence */
@@ -1640,11 +1641,14 @@ frame_begin(struct eagl *e)
 			s9_gl_stage_reset(&e->glstage);
 			s9_gl_cost_reset(&e->glcost);
 			s9_p122_frame_reset(&e->p122_window);
-			say("p122-gl: mode=%d ack=kernel_sysctl mode0=minimal mode1=stage mode2=GL_slots cpu_clock=thread_sampled_1in16 effects=none\n",value);
+			s9_gl_diag_reset_window(&e->diag);
+			s9_g2_reset_counters(&e->g2);
+			say("p122-gl: mode=%d ack=kernel_sysctl mode0=minimal mode1=stage mode2=GL_slots cpu_clock=thread_sampled_rotating_1in16 effects=none\n",value);
 		}
 	}
 	e->p122_cpu_sample_valid=false;
-	if(p122_enabled && e->p122_mode_seen>1 && (e->frames%16u)==0u){
+	if(p122_enabled && !e->p122_window.frames)e->p123_first_ticks=mach_absolute_time();
+	if(p122_enabled && e->p122_mode_seen>1 && s9_p123_sample_frame(e->frames)){
 		e->p122_cpu_sample_valid=p122_thread_cpu_us(&e->p122_cpu_began_us)!=0;
 	}
 	if (prof_us != 0 && prof_thread == MACH_PORT_NULL) {
@@ -2181,6 +2185,12 @@ frame_end(struct eagl *e, bool finished, enum s9_p4_end_reason end_reason)
 			    (unsigned long long)w->sampled_wall_us,
 			    (unsigned long long)w->draws,(unsigned long long)w->uploads,
 			    (unsigned long long)w->calls);
+			say("p123-gl-window: first_ticks=%llu last_ticks=%llu frames=60 mode=%u "
+			    "shadow_bind_attempts=%u cache_same=%u cache_invalid=%u raw_binds=%u "
+			    "native_skipped=%u source=window_not_frame_id\n",
+			    (unsigned long long)e->p123_first_ticks,(unsigned long long)mach_absolute_time(),
+			    e->p122_mode_seen?e->p122_mode_seen-1:0,e->g2.attempts,
+			    e->g2.cache_same,e->g2.cache_invalid,e->g2.raw_binds,e->g2.skipped);
 			s9_p122_frame_reset(w);
 		}
 	}
@@ -2261,7 +2271,7 @@ frame_end(struct eagl *e, bool finished, enum s9_p4_end_reason end_reason)
 		    e->g2.cache_invalid,e->g2.raw_binds,e->g2.forwarded_binds,e->g2.raw_deletes,
 		    e->g2.other_target_or_unit);
 	}
-	if (g2_track_on && e->frames % 60 == 0) s9_g2_reset_counters(&e->g2);
+	if (g2_track_on && (p122_enabled ? p122_completed_window : e->frames % 60 == 0)) s9_g2_reset_counters(&e->g2);
 	if (p0hash_on && e->frames % 60 == 0) {
 		say("hakios-gl-p0: up=%llu.%03llus frames=%u..%u fast=%u scalar=%u verified=%u mismatch=%u fallback=%d\n",
 		    after/1000000,(after/1000)%1000,e->frames-59,e->frames,
@@ -2269,8 +2279,9 @@ frame_end(struct eagl *e, bool finished, enum s9_p4_end_reason end_reason)
 		    __atomic_load_n(&p0hash_disabled,__ATOMIC_RELAXED));
 		e->p0_hashes=e->p0_scalar=e->p0_verified=e->p0_mismatch=0;
 	}
-	if (glpath_on || __atomic_load_n(&p67_mode_cached,__ATOMIC_RELAXED)) e->diag.flush_raw_us += e->flushing; /* already-timed real glFlush, no extra GPU calls */
-	if ((glpath_on || glhash_on || __atomic_load_n(&p67_mode_cached,__ATOMIC_RELAXED)) && e->frames % 60 == 0) {
+	if (glpath_on || e->p122_mode_seen==3 || __atomic_load_n(&p67_mode_cached,__ATOMIC_RELAXED)) e->diag.flush_raw_us += e->flushing; /* already-timed real glFlush, no extra GPU calls */
+	if ((e->p122_mode_seen==3 && p122_completed_window) ||
+	    ((glpath_on || glhash_on || __atomic_load_n(&p67_mode_cached,__ATOMIC_RELAXED)) && e->frames % 60 == 0)) {
 		const struct s9_gl_diag *d=&e->diag;
 		say("hakios-gl-path: up=%llu.%03llus frames=%u..%u bind_samples=%u bind_images=%u bind_checks=%u bind_dirty=%u native=%lluus lookup=%lluus check=%lluus upload=%lluus draw_samples=%u draw_native_calls=%u draw_native=%lluus draw_other=%lluus flush_raw=%lluus hash_samples=%u hash_bytes=%llu hash_us=%lluus hash_same=%u hash_changed=%u hash_skipped=%u\n",
 		    after/1000000,(after/1000)%1000,e->frames-59,e->frames,
@@ -2397,7 +2408,7 @@ my_glBindTexture(void *context, GLenum target, GLuint texture)
 	struct image *image;
 
 	EAGL_ENTER(e, 0x30);
-	bool path_sample = (glpath_on || __atomic_load_n(&p67_mode_cached,__ATOMIC_RELAXED)) && s9_gl_diag_sample16(&e->diag.bind_serial);
+	bool path_sample = (glpath_on || e->p122_mode_seen==3 || __atomic_load_n(&p67_mode_cached,__ATOMIC_RELAXED)) && s9_gl_diag_sample16(&e->diag.bind_serial);
 	if (path_sample) e->diag.bind_samples++;
 	if (eagl_tracing) {
 		eagl_trace("glBindTexture(%#x, %u)\n", target, texture);
@@ -4404,7 +4415,7 @@ my_glDrawElements(void *context, GLenum mode, GLsizei count, GLenum type, const 
 	bool plain;
 
 	EAGL_ENTER(e, 0x220);
-	bool draw_sample = (glpath_on || __atomic_load_n(&p67_mode_cached,__ATOMIC_RELAXED)) && s9_gl_diag_sample16(&e->diag.draw_serial);
+	bool draw_sample = (glpath_on || e->p122_mode_seen==3 || __atomic_load_n(&p67_mode_cached,__ATOMIC_RELAXED)) && s9_gl_diag_sample16(&e->diag.draw_serial);
 	uint64_t draw_began = draw_sample ? now_us() : 0, draw_native = 0;
 	drawing(e);
 	count_spans(e, mode, count);
@@ -5448,9 +5459,16 @@ install(void)
 			say("p122-gl: boot_enabled=1 initial_mode=0 glstage=0 glcost=0 policy_writes=0\n");
 		}
 		g2_bind_on = s9_has_boot_flag(arguments, "g2_bind=1");
+		if(p122_enabled && g2_bind_on){
+			g2_bind_on=0;
+			say("p123-gl: refused g2_bind=1 in diagnostic baseline; native calls retained\n");
+		}
 		g2_verify_on = s9_has_boot_flag(arguments, "g2_verify=1");
 		g21_diag_on = s9_has_boot_flag(arguments, "g21_diag=1");
-		g2_track_on = g2_bind_on || g21_diag_on;
+		/* P12.3 tracks redundant-bind candidates in ALL profiles, never
+		 * enables g2_bind_on. Keep observer overhead common to each A/B. */
+		g2_track_on = g2_bind_on || g21_diag_on || p122_enabled;
+		if(p122_enabled)say("p123-gl: shadow_bind=1 path_mode2=1 rotating_cpu_sample=1 native_skip=%d\n",g2_bind_on);
 		glpath_on = s9_has_boot_flag(arguments, "glpath=1");
 		glhash_on = s9_has_boot_flag(arguments, "glhash=1");
 		p0hash_on = s9_has_boot_flag(arguments, "p0hash=1");

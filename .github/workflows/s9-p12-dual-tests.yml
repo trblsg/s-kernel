@@ -1,7 +1,7 @@
 name: S9 P12 thermal efficiency and deep-idle observability
 on:
   push:
-    branches: [s9/p12-thermal-deep-idle]
+    branches: [s9/p12-thermal-deep-idle, s9/p12-3-source-attribution]
   workflow_dispatch:
 permissions:
   contents: read
@@ -55,6 +55,14 @@ jobs:
           assert 'p122-gl: mode=%d ack=kernel_sysctl' in eagl
           assert 'p122-gl-window:' in eagl and 'p122_thread_cpu_us' in eagl
           assert 'p122_completed_window' in eagl
+          assert 'p123_floor_mode_sysctl' in mali and 'p123_floor_stats_sysctl' in mali
+          assert 's9_p123_floor_eligible' in mali and '30ull*NSEC_PER_SEC' in mali
+          assert 'hakios_p123_input_quiet' in cpu and 'p123_floor_until,0' in mali
+          assert 'p123-clock-window:' in home and 'crossover_requires_explicit_252' in home
+          assert 'hi_kind_checked' in s('userland/src/s9_hi_clock_resolve.inc')
+          assert 'UIView_runtime_identity_or_ABI_conflict' in s('userland/src/s9_hi_clock_resolve.inc')
+          assert 'p123-ca-window:' in bb and 'p123-gl-window:' in eagl
+          assert 'g2_bind_on=0;' in eagl and 's9_p123_sample_frame' in eagl
           root=s('tools/s9-p122-rootcause-serial.ps1')
           assert all(word in root for word in ('P12-CoolStart 12','P12-QuiesceHI2',
             'P122-Profile 0', 'P122-Profile 1', 'P122-Profile 2',
@@ -92,6 +100,7 @@ jobs:
           foreach($test in @(
             'tools/tests/test-s9-p12-dual-serial.ps1',
             'tools/tests/test-s9-p122-rootcause-serial.ps1',
+            'tools/tests/test-s9-p123-source-serial.ps1',
             'tools/tests/test-s9-p11-lifecycle-serial.ps1',
             'tools/tests/test-s9-p10-lockscreen-source.ps1',
             'tools/tests/test-s9-p10-serial-harness.ps1',
@@ -120,4 +129,8 @@ jobs:
             -fsyntax-only userland/src/inject.c
           xcrun clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
             -std=gnu11 -fblocks -Wno-deprecated-declarations \
-            -fsyntax-only userland/src/eagl.c
+            -fsyntax-only userland/src/inject_sb.c
+          # eagl.c depends on the generated Mesa/EAGL slot table, built
+          # by userland/build.sh in the paired installer. Do not falsely
+          # report a standalone syntax pass with a missing/stub table.
+          echo 'EAGL compile verification belongs to the paired SYSTEM build (generated eagl_gen.h).'
