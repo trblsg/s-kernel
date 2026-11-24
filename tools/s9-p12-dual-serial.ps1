@@ -44,6 +44,8 @@ $script:LifeHostOnly=$false
 $script:P12HiAbortSeen=$false
 $script:P12HiGateStopSeen=$false
 $script:P12HiUnexpectedPhase=$false
+$script:P12GpuOffBaseline=0L
+$script:P12GpuWakeBaseline=0L
 # P12.1 conservative start gate, below immutable hard thermal abort thresholds.
 $script:P12StartBigC=70
 $script:P12StartLittleC=68
@@ -259,7 +261,10 @@ function P12-ObserveIdle{
             if(($now-$lastProbe).TotalSeconds -ge 20){
                 $lastProbe=$now
                 $offStats=P12-Query 'g3d_lab_stats'
-                if($offStats -match 'domain=0 pll=0' -and $offStats -match 'off_total_ms=([1-9][0-9]*)' -and $offStats -match 'fault=0'){
+                $newOff=0L
+                if($offStats -match '\boff_count=(\d+)'){$newOff=[long]$Matches[1]}
+                if($offStats -match 'domain=0 pll=0' -and $offStats -match 'off_total_ms=([1-9][0-9]*)' -and
+                   $newOff -gt $script:P12GpuOffBaseline -and $offStats -match '\bfault=0(?:\s|$)'){
                     $offGpuConfirmed=$true
                 }
                 [void](P12-Query 'p9_auto_gpu')
@@ -280,8 +285,10 @@ function P12-ObserveIdle{
             $afterWake=(Life-Now).AddSeconds(3)
             while((Life-Now) -lt $afterWake){Life-Pump;Life-CheckSafety (Life-Now)}
             $stats=P12-Query 'g3d_lab_stats'
-            if($stats -notmatch 'domain=1 pll=1' -or $stats -notmatch 'wake_count=([1-9][0-9]*)' -or $stats -notmatch 'wake_fail=0'){
-                throw "P12.1 GPU manual wake not verified; domain/pll or wake counters incorrect: $stats"
+            $wakes=0L
+            if($stats -match '\bwake_count=(\d+)'){$wakes=[long]$Matches[1]}
+            if($stats -notmatch 'domain=1 pll=1' -or $wakes -le $script:P12GpuWakeBaseline -or $stats -notmatch '\bwake_fail=0(?:\s|$)'){
+                throw "P12.1 GPU manual wake not verified; PMU/PLL or new wake counter not advanced (baseline=$($script:P12GpuWakeBaseline)): $stats"
             }
             $wakeChecked=$true
             Life-Say 'P12.1 MANUAL_WAKE VERIFIED: GPU PMU+PLL ON, wake_count increased, wake_fail=0'
@@ -297,6 +304,7 @@ function P12-Report([string]$Stem,[string]$Reason){
     $out.Add('P12.1 SAFE dual source capture: PASSIVE by default; interactive only by explicit opt-in after cool-start.')
     $out.Add('HI2 manual stop mailbox=201 is used ONLY for -InteractiveAB; default passive capture leaves HI2 unchanged. A stopped HI2 crossover remains aborted until explicit rearm/reboot.')
     $out.Add('HI2 quiesce confirmed='+$script:P12HiStopConfirmed+'; unexpected_auto_phase='+$script:P12HiUnexpectedPhase+'; interactive_requested='+[bool]$InteractiveAB+'; wake_requested='+[bool]$WakeCheck+'; legacy_firmware='+[bool]$LegacyFirmware)
+    $out.Add('G3D baseline off_count='+$script:P12GpuOffBaseline+' wake_count='+$script:P12GpuWakeBaseline+'; -WakeCheck requires fresh increments, PMU/PLL OFF then ON')
     $out.Add('P12 integrated thermal/idle hardware A/B - DO NOT CLAIM POWER OR FPS IMPROVEMENT WITHOUT SAME-GESTURE COMPARISON')
     $out.Add('A0/B/A1 apply only CPU no-touch stable-frame adaptive mode. Manual swipe input always uses stock target.')
     $out.Add('P12.1 WFI observation also records per-core idle entry/denied/timer/WFE/no-WFI/exit; NOT actual C2/CPD/SICD or system suspend.')
@@ -360,7 +368,9 @@ function P12-Run {
         }
         [void](P12-Query 'p12_gpu_boot_stats')
         [void](P12-Query 'p9_auto_gpu')
-        [void](P12-Query 'g3d_lab_stats')
+        $gpuStart=P12-Query 'g3d_lab_stats'
+        if($gpuStart -match '\boff_count=(\d+)'){$script:P12GpuOffBaseline=[long]$Matches[1]}
+        if($gpuStart -match '\bwake_count=(\d+)'){$script:P12GpuWakeBaseline=[long]$Matches[1]}
         [void](P12-Query 'p9_panel_stats')
         $priorWfi=P12-Query 'p12_wfi_stats'
         if($priorWfi -match '^enabled=1 '){

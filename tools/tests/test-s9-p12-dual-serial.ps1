@@ -30,6 +30,9 @@ if($body -notmatch 'P12-ObserveIdle' -or $body -notmatch 'P12-Observe .A0.' -or
    $body -notmatch 'if\(\$InteractiveAB\)' -or
    $body -notmatch 'P12-Observe .PASSIVE_ON.' -or
    $body -notmatch 'P12HiGateStopSeen' -or
+   $body -notmatch 'P12GpuOffBaseline' -or
+   $body -notmatch 'P12GpuWakeBaseline' -or
+   $body -notmatch '\$wakes -le \$script:P12GpuWakeBaseline' -or
    $body -notmatch 'P12HiDirty' -or
    $body -notmatch 'P12CpuDirty' -or
    $body -notmatch 'P12WfiDirty' -or
@@ -120,6 +123,12 @@ $script:LifeLastLittle=81
 $script:LifeLastGpuC=80
 try{Life-CheckSafety (Life-Now);throw 'Thermal guard did not trip at 84/81/80C'}
 catch{if($_.Exception.Message -notmatch 'temperature'){throw}}
+try{P12-CoolStart 1;throw 'P12.1 cool-start did not stop on pre-existing thermal danger'}
+catch{if($_.Exception.Message -notmatch 'temperature'){throw}}
+$script:LifeLastBig=65;$script:LifeLastLittle=62;$script:LifeLastGpuC=72
+try{P12-EarlyThermalGuard;throw 'P12.1 early 72C GPU stop failed'}
+catch{if($_.Exception.Message -notmatch 'EARLY_THERMAL_STOP'){throw}}
+$script:LifeLastBig=84;$script:LifeLastLittle=81;$script:LifeLastGpuC=80
 $script:P12CpuDirty=$true;$script:P12WfiDirty=$true;$script:P12HiDirty=$true
 [void](P12-Query 'p12_cpu_mode' '0' -Cleanup)
 [void](P12-Query 'p12_wfi_probe' '0' -Cleanup)

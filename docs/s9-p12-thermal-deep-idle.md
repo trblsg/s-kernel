@@ -80,7 +80,10 @@ New P12.1 host behavior:
    button events are generated. No OFF_STABLE -> failed run.
    Optional -WakeCheck requires the user to wake the device
    physically after >=60 s OFF and checks G3D domain=1, pll=1,
-   wake_count>0 and wake_fail=0. Do not wake while device is hot.
+   new wake_count > its preflight value and wake_fail=0; requires
+   domain=0, pll=0 and new off_count before that wake. Never equate
+   a stale wake counter from a previous test to a current wake pass.
+   Do not wake while device is hot.
 5. Cleanup sends mode0/wfi_probe0/hi_cmd0 only if that mode
    was changed or was attempted. It bypasses the repeated
    thermal-stop exception only during bounded restore-to-zero
