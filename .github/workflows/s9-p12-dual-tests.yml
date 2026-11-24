@@ -31,6 +31,9 @@ jobs:
           xnu=s('xnu/files/cpu.c')
           bb=s('userland/src/inject.c')
           pe=s('xnu/files/GenericARMPE.cpp')
+          host=s('tools/s9-p12-dual-serial.ps1')
+          life=s('tools/s9-screen-lifecycle-serial.ps1')
+          home=s('userland/src/s9_home_idle.inc')
           assert 's9_p12_cpu_eligible' in cpu and 'p12_cpu_mode_sysctl' in cpu
           assert 'p12_late_until' in cpu and 'p12_frame_streak' in cpu
           assert 'big_millidegrees < 83000' in thermal
@@ -41,13 +44,24 @@ jobs:
           assert 'hakios_p12_wfi_entries' in xnu and 'hakios_p12_wfi_ticks' in xnu
           assert '__builtin_arm_wfi();' in xnu
           assert 'p12_wfi_probe_sysctl' in cpu and 'p12_wfi_stats_sysctl' in cpu
+          assert 'p12_idle_diag_sysctl' in cpu
+          assert all(word in xnu for word in ('hakios_p12_idle_enter', 'hakios_p12_idle_denied',
+            'hakios_p12_idle_timer', 'hakios_p12_idle_wfe', 'hakios_p12_idle_wfi_path',
+            'hakios_p12_idle_exit_count', 'hakios_p12_idle_unmapped'))
+          assert all(word in host for word in ('P12-CoolStart 12', 'P12-QuiesceHI2',
+            'P12-EarlyThermalGuard', 'if($InteractiveAB)', 'P12-Observe \'PASSIVE_ON\'',
+            'P12-Query \'hi_cmd\' \'201\'', 'P12HiGateStopSeen',
+            'if(-not $Cleanup){Life-CheckSafety', '-LegacyFirmware', '-WakeCheck'))
+          assert 'if(command==0 || command==201)' in home
+          assert 'hi_auto_cancel("manual_usb_control",true)' in home
+          assert 'S9 P12.1 NATURAL SCREEN LIFECYCLE' in life
           assert 'orig_render_update(server, update, flags)' in bb
           assert 'p12-ca: forwarded=' in bb and 'skipped=0 GL_present_unchanged=1' in bb
           assert 'p8-safety: BIG CPU_OFF REFUSED' in pe
           assert 'if(value==1)return EPERM;' in s('drivers/power/exynos/hakios.p7_cpu_lab.h')
           assert 'int hakios_p9_panel_auto_on(void) { return 0; }' in s('drivers/core/hakios.stubs.c')
           assert 'panel_sleep=1' not in s('tools/s9-p12-dual-serial.ps1')
-          print('P12 two tracks and all historical P9/P7 rollback safety paths PASS')
+          print('P12.1 cool-start, hot cleanup, HI2 ACK, CPU idle diagnostics + P9/P7 interlocks PASS')
           PY
           git diff --check
   windows-host:

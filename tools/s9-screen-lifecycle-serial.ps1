@@ -429,8 +429,13 @@ function Life-Report([string]$Stem,[datetime]$EndAt,[string]$StopReason) {
     $report=$Stem+'.lifecycle-report.txt'
     $csv=$Stem+'.samples.csv'
     $lines=New-Object 'System.Collections.Generic.List[string]'
-    [void]$lines.Add('S9 P11 NATURAL SCREEN LIFECYCLE: PASSIVE HOST OBSERVATIONS')
-    [void]$lines.Add('NO sysctl writes/buttons/GPU or CPU power changes. P9.1 and P10 policies left unchanged.')
+    if($script:LifeHostOnly){
+        [void]$lines.Add('S9 P11 NATURAL SCREEN LIFECYCLE: PASSIVE HOST OBSERVATIONS')
+        [void]$lines.Add('NO sysctl writes/buttons/GPU or CPU power changes. P9.1 and P10 policies left unchanged.')
+    }else{
+        [void]$lines.Add('S9 P12.1 NATURAL SCREEN LIFECYCLE: GUARDED SYSCTL CONTROL AND PASSIVE PMU OBSERVATION')
+        [void]$lines.Add('P12.1 may write hi_cmd=201/0 (stop HI2 crossover), p12_cpu_mode=0/1 only with -InteractiveAB, and optional p12_wfi_probe=1/0. NO CPU_OFF, PMIC/GPU/Panel writes or synthetic wake.')
+    }
     [void]$lines.Add('LIVE fence via read-only hi_display_requested: '+$script:LifeSynced)
     [void]$lines.Add('Source: serial receive times (approximate), device diagnostic 1s/5s/10s sampling.')
     [void]$lines.Add('OFF_STABLE starts after '+$OffStableSeconds+' s without a display-ON event.')

@@ -88,6 +88,17 @@ extern uint64_t         wake_abstime;
 volatile uint32_t hakios_p12_wfi_probe_enable;
 volatile uint64_t hakios_p12_wfi_entries[8];
 volatile uint64_t hakios_p12_wfi_ticks[8];
+/* P12.1: count WHERE the scheduler idle path goes, not just WFI.
+ * All counters are passive and disabled unless p12_wfi_probe=1. */
+volatile uint64_t hakios_p12_idle_enter[8];
+volatile uint64_t hakios_p12_idle_denied[8];
+volatile uint64_t hakios_p12_idle_timer[8];
+volatile uint64_t hakios_p12_idle_wfe[8];
+volatile uint64_t hakios_p12_idle_wfi_path[8];
+volatile uint64_t hakios_p12_idle_no_wfi[8];
+volatile uint64_t hakios_p12_idle_exit_count[8];
+volatile uint64_t hakios_p12_idle_unmapped;
+volatile uint32_t hakios_p12_idle_last_unknown;
 
 #if WITH_CLASSIC_S2R
 void sleep_token_buffer_init(void);
@@ -503,6 +514,16 @@ cpu_idle(void)
 	cpu_data_t     *cpu_data_ptr = getCpuDatap();
 	uint64_t        new_idle_timeout_ticks = 0x0ULL, lastPop;
 	bool idle_disallowed = false;
+	const bool p12_probe = __atomic_load_n(&hakios_p12_wfi_probe_enable, __ATOMIC_RELAXED) != 0;
+	const unsigned p12_id = (unsigned)cpu_data_ptr->cpu_id;
+	if (p12_probe) {
+		if (p12_id < 8)
+			__atomic_fetch_add(&hakios_p12_idle_enter[p12_id], 1, __ATOMIC_RELAXED);
+		else {
+			__atomic_fetch_add(&hakios_p12_idle_unmapped, 1, __ATOMIC_RELAXED);
+			__atomic_store_n(&hakios_p12_idle_last_unknown, p12_id, __ATOMIC_RELAXED);
+		}
+	}
 
 	if (__improbable((!idle_enable))) {
 		idle_disallowed = true;
@@ -511,6 +532,8 @@ cpu_idle(void)
 	}
 
 	if (__improbable(idle_disallowed)) {
+		if (p12_probe && p12_id < 8)
+			__atomic_fetch_add(&hakios_p12_idle_denied[p12_id], 1, __ATOMIC_RELAXED);
 		Idle_load_context();
 	}
 
@@ -535,7 +558,9 @@ cpu_idle(void)
 			ipending = wfe_to_deadline_or_interrupt(cid, wfe_deadline, cpu_data_ptr, false);
 			KDBG(CPUPM_IDLE_WFE | DBG_FUNC_END, ipending, cpu_data_ptr->wfe_count, wfe_deadline);
 			if (ipending == true) {
-				/* Back to machine_idle() */
+				/* Back to machine_idle() without reaching architectural WFI. */
+				if (p12_probe && p12_id < 8)
+					__atomic_fetch_add(&hakios_p12_idle_wfe[p12_id], 1, __ATOMIC_RELAXED);
 				Idle_load_context();
 			}
 		}
@@ -551,6 +576,8 @@ cpu_idle(void)
 			KDBG(CPUPM_IDLE_TIMER_WFE | DBG_FUNC_END, ipending, cpu_data_ptr->wfe_count, ~0ULL);
 			assert(ipending == true);
 		}
+		if (p12_probe && p12_id < 8)
+			__atomic_fetch_add(&hakios_p12_idle_timer[p12_id], 1, __ATOMIC_RELAXED);
 		Idle_load_context();
 	}
 
@@ -584,6 +611,8 @@ cpu_idle(void)
 #endif /* MONOTONIC */
 
 	if (wfi) {
+		if (p12_probe && p12_id < 8)
+			__atomic_fetch_add(&hakios_p12_idle_wfi_path[p12_id], 1, __ATOMIC_RELAXED);
 #if !defined(APPLE_ARM64_ARCH_FAMILY) && !defined(GENERIC_PSCI_SMP)
 		/*
 		 * (Not on the generic boards either. There a core keeps its cache while it waits,
@@ -609,19 +638,18 @@ cpu_idle(void)
 		/* P12: wrap only the already existing architectural idle opcode.
 		 * Sampling is opt-in because even two timestamps cost energy. */
 		uint64_t p12_began = 0;
-		unsigned p12_cpu = (unsigned)cpu_data_ptr->cpu_id;
-		if (p12_cpu < 8 && __atomic_load_n(&hakios_p12_wfi_probe_enable, __ATOMIC_RELAXED))
+		if (p12_probe && p12_id < 8)
 			p12_began = mach_absolute_time();
 #if HAS_RETENTION_STATE
 		arm64_retention_wfi();
 #else
 		__builtin_arm_wfi();
 #endif
-		if (p12_began && p12_cpu < 8) {
+		if (p12_began && p12_id < 8) {
 			uint64_t p12_ended = mach_absolute_time();
 			if (p12_ended >= p12_began) {
-				__atomic_fetch_add(&hakios_p12_wfi_entries[p12_cpu], 1, __ATOMIC_RELAXED);
-				__atomic_fetch_add(&hakios_p12_wfi_ticks[p12_cpu], p12_ended-p12_began, __ATOMIC_RELAXED);
+				__atomic_fetch_add(&hakios_p12_wfi_entries[p12_id], 1, __ATOMIC_RELAXED);
+				__atomic_fetch_add(&hakios_p12_wfi_ticks[p12_id], p12_ended-p12_began, __ATOMIC_RELAXED);
 			}
 		}
 
@@ -653,6 +681,8 @@ cpu_idle(void)
 			clock_delay_until(deadline);
 		}
 #endif /* DEVELOPMENT || DEBUG */
+	} else if (p12_probe && p12_id < 8) {
+		__atomic_fetch_add(&hakios_p12_idle_no_wfi[p12_id], 1, __ATOMIC_RELAXED);
 	}
 
 	ClearIdlePop(TRUE);
@@ -669,6 +699,9 @@ cpu_idle_exit(boolean_t from_reset)
 {
 	uint64_t        new_idle_timeout_ticks = 0x0ULL;
 	cpu_data_t     *cpu_data_ptr = getCpuDatap();
+	unsigned p12_id = (unsigned)cpu_data_ptr->cpu_id;
+	if (p12_id < 8 && __atomic_load_n(&hakios_p12_wfi_probe_enable, __ATOMIC_RELAXED))
+		__atomic_fetch_add(&hakios_p12_idle_exit_count[p12_id], 1, __ATOMIC_RELAXED);
 
 	assert(exception_stack_pointer() != 0);
 

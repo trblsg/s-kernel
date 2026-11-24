@@ -569,6 +569,50 @@ SYSCTL_PROC(_kern_hakios,OID_AUTO,p12_wfi_stats,
     CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,
     p12_wfi_stats_sysctl,"A","P12 cumulative per-core WFI counts and time, not domain OFF");
 
+
+/* P12.1 differentiates no idle entry, rejected idle, timer/WFE escape,
+ * WFI opcode reached, and architectural idle return. Read-only and
+ * strictly opt-in via existing p12_wfi_probe=1. Neither PSCI nor PMU
+ * writes are issued by this diagnostic. */
+extern volatile uint64_t hakios_p12_idle_enter[8];
+extern volatile uint64_t hakios_p12_idle_denied[8];
+extern volatile uint64_t hakios_p12_idle_timer[8];
+extern volatile uint64_t hakios_p12_idle_wfe[8];
+extern volatile uint64_t hakios_p12_idle_wfi_path[8];
+extern volatile uint64_t hakios_p12_idle_no_wfi[8];
+extern volatile uint64_t hakios_p12_idle_exit_count[8];
+extern volatile uint64_t hakios_p12_idle_unmapped;
+extern volatile uint32_t hakios_p12_idle_last_unknown;
+
+static int
+p12_idle_diag_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
+    __unused int arg2, struct sysctl_req *req)
+{
+    char buf[1024];
+    int n = snprintf(buf, sizeof(buf),
+        "enabled=%u observational=1 wfi_only_not_power_off=1 no_cpu_suspend=1 "
+        "unmapped=%llu last_unmapped_id=%u per_cpu=e/denied/timer/wfe/wfi_path/no_wfi/exit",
+        __atomic_load_n(&hakios_p12_wfi_probe_enable, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&hakios_p12_idle_unmapped, __ATOMIC_RELAXED),
+        __atomic_load_n(&hakios_p12_idle_last_unknown, __ATOMIC_RELAXED));
+    for (unsigned i = 0; i < 8 && n > 0 && n < (int)sizeof(buf) - 95; ++i) {
+        n += snprintf(buf + n, sizeof(buf) - (size_t)n,
+            " c%u:%llu/%llu/%llu/%llu/%llu/%llu/%llu", i,
+            (unsigned long long)__atomic_load_n(&hakios_p12_idle_enter[i], __ATOMIC_RELAXED),
+            (unsigned long long)__atomic_load_n(&hakios_p12_idle_denied[i], __ATOMIC_RELAXED),
+            (unsigned long long)__atomic_load_n(&hakios_p12_idle_timer[i], __ATOMIC_RELAXED),
+            (unsigned long long)__atomic_load_n(&hakios_p12_idle_wfe[i], __ATOMIC_RELAXED),
+            (unsigned long long)__atomic_load_n(&hakios_p12_idle_wfi_path[i], __ATOMIC_RELAXED),
+            (unsigned long long)__atomic_load_n(&hakios_p12_idle_no_wfi[i], __ATOMIC_RELAXED),
+            (unsigned long long)__atomic_load_n(&hakios_p12_idle_exit_count[i], __ATOMIC_RELAXED));
+    }
+    return SYSCTL_OUT(req, buf, strlen(buf) + 1);
+}
+SYSCTL_PROC(_kern_hakios, OID_AUTO, p12_idle_diag,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN,
+    NULL, 0, p12_idle_diag_sysctl, "A",
+    "P12.1 CPU idle entry and early escape reason counters; read-only");
+
 /* kern.hakios.gov_policy: gov_policy=, changed while the system runs (the USB console's "sysctl kern.hakios.gov_policy=N") */
 static int
 policy_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)

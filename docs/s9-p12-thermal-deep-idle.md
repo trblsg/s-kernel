@@ -47,3 +47,66 @@ Host stop temperatures: BIG82°C, LITTLE75°C, G3D77°C, battery47°C. DO NOT ra
 - GPU OFF: PMU/PLL actually domain0/pll0 for a long, stable OFF and returns domain1/pll1 without GPU faults or blurred/torn screen.
 - Deep CPU: WFI per-core counters prove clock-idle only. Full PSCI CPU_SUSPEND/C2, CPD, SICD and system suspend are NOT functional here. Their safe wake implementation is a separate engineering gate. All critical always-on/RTC/PMIC/wake-controller domains cannot be OFF if wake is required.
 - Build: kernel and userland must come from same P12 commit. No full firmware artifact or physical performance result is claimed from source/host tests alone.
+
+## P12.1 safety after real thermal abort (2026-11-24)
+
+During the second manual swipe run, the P12 host saw BIG84 C,
+LITTLE80.9 C, G3D80 C and correctly stopped at the 77 C G3D
+hard limit. CPU mode1 had NOT been enabled. The old host cleanup
+rechecked already-hot samples while restoring mode0, causing a
+misleading "restore not confirmed" error.
+
+New P12.1 host behavior:
+
+1. PASSIVE BY DEFAULT: No swipes, no touching, no automatic wake.
+   Preflight requires >=3 live CPU and >=2 live GPU thermal samples
+   over 12 s. Start gate BIG<=70 C, LITTLE<=68 C, G3D<=68 C;
+   any missing sensor or hotter sample aborts before interactive
+   phases. Immutable hard abort limits BIG82/LITTLE75/G3D77/BAT47.
+   The observation window also uses early abort BIG76/LITTLE70/G3D72.
+   Temperature telemetry delay can still allow overshoot.
+2. ONLY in -InteractiveAB, the existing SpringBoard hi_cmd=201
+   stops the independent hi=2 autonomous A/B, and a real
+   SpringBoard "hi: gate=usb-stop" line is required. Without
+   that ACK the interactive test fails rather than misattributing
+   cut/recover windows. Cleanup clears hi_cmd=0; automatic
+   crossover remains canceled until explicit rearm or reboot.
+   Default PASSIVE mode never changes the HI2 policy.
+3. Interactive A0/B/A1 requires an explicit -InteractiveAB switch
+   AND passing the cool-start gate. DO NOT repeat the previous
+   swipe-heavy workload on a hot device.
+4. With iOS auto-lock disabled, physically press POWER once to
+   switch screen OFF during the NATURAL_OFF window. No fake
+   button events are generated. No OFF_STABLE -> failed run.
+   Optional -WakeCheck requires the user to wake the device
+   physically after >=60 s OFF and checks G3D domain=1, pll=1,
+   wake_count>0 and wake_fail=0. Do not wake while device is hot.
+5. Cleanup sends mode0/wfi_probe0/hi_cmd0 only if that mode
+   was changed or was attempted. It bypasses the repeated
+   thermal-stop exception only during bounded restore-to-zero
+   USB echo/readback; UART failure remains UNSURE, never PASS.
+6. A matching new kernel exposes read-only p12_idle_diag:
+   per-core idle entry, denied, timer/WFE escape, WFI reached,
+   WFI disabled, and idle exit, plus unknown core IDs. This
+   distinguishes no scheduler idle from no WFI; NONE of these
+   counters proves CPU_SUSPEND, C2, CPD, SICD or cluster power OFF.
+7. When used on the already flashed P12 197d148 firmware,
+   -LegacyFirmware skips the new diagnostic query and retains
+   the host safety improvements. No new kernel flash needed
+   just to use the safer host capture.
+
+After the phone has cooled and PuTTY is closed, a SAFE PASSIVE test
+on the EXISTING P12 kernel (with both P12.1 and P11 scripts in the
+same Windows folder) is:
+
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\s9-p12-dual-serial.ps1 -Port COM125 -Execute -LegacyFirmware -ActiveWindowSeconds 25 -IdleWindowSeconds 120 -OffStableSeconds 25
+
+On a matched new P12.1 kernel omit -LegacyFirmware and optionally
+enable -WfiProbe. The P11 lifecycle report header now distinguishes
+P11 read-only control from bounded P12.1 kernel mailbox/CPU/WFI
+writes; do NOT infer power-domain OFF from a zero WFI count.
+
+Important: This improves diagnosis and protection, not the underlying
+touch/scroll thermal cause. No source here forces a GPU/CPU clock
+cap, PMIC undervolt, frameskip, PSCI CPU_OFF, panel DCS sleep,
+CPD, SICD or system suspend.
