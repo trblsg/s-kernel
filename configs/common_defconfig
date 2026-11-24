@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 766 symbols in 20 groups; 54 are set, 45 of them drivers built in.
+# 767 symbols in 20 groups; 54 are set, 45 of them drivers built in.
 #
 
 #
@@ -512,7 +512,7 @@ CONFIG_TOUCHSCREEN=y
 # CONFIG_VIRTIO_INPUT is not set
 
 #
-# GPU and display (123)
+# GPU and display (124)
 #
 
 # rendering on Adreno (an image built with GL=1; the GPU's firmware from your phone) [needs fw-gpu/ from the phone]
@@ -820,6 +820,9 @@ CONFIG_GPU=y
 
 # say where Metal's device is (docs/metal-plan.md, step 1)
 # CONFIG_METAL is not set
+
+# P12.2 causal diagnostics: constant low-overhead GPU clock-floor/queue/run histograms in all profiles
+# CONFIG_P122 is not set
 
 # Arm the existing guarded P9 automatic G3D screen-OFF gate after GPU initialization
 # CONFIG_P12_GPU_BOOT_AUTO is not set
