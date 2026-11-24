@@ -442,8 +442,11 @@ hakios_exynos_cpufreq_frame(void)
 			if (streak < 1000) __atomic_store_n(&p12_frame_streak, streak + 1, __ATOMIC_RELEASE);
 		} else {
 			__atomic_store_n(&p12_frame_streak, 0, __ATOMIC_RELEASE);
-			if (gap_ns > 22ull * NSEC_PER_MSEC && gap_ns <= 50ull * NSEC_PER_MSEC)
-				clock_interval_to_deadline(3000, NSEC_PER_MSEC, &p12_late_until);
+			if (gap_ns > 22ull * NSEC_PER_MSEC && gap_ns <= 50ull * NSEC_PER_MSEC) {
+				uint64_t until;
+				clock_interval_to_deadline(3000, NSEC_PER_MSEC, &until);
+				__atomic_store_n(&p12_late_until, until, __ATOMIC_RELEASE);
+			}
 		}
 	}
 	if (now - before <= moving_span) {
