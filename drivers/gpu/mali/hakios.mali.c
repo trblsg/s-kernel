@@ -62,6 +62,7 @@
 #include <sys/hakios.exynos_soc.h>
 #include "hakios.mali_va.h"
 #include "hakios.mali_lab_policy.h" /* opt-in runtime power/rail lab with portable policy tests */
+#include "hakios.p122_diag.h" /* pure read-only latency histogram and mode guards */
 #include <sys/hakios.log.h>
 #include <sys/hakios.xnu.h>
 
@@ -2311,6 +2312,96 @@ static uint32_t mali_gov;
  * Frame-floor tuning uses the EXISTING mali_gov_frame boot arg/sysctl.
  * Does not change PLL, BUCK6 voltage or thermal caps on its own. */
 static uint32_t mali_probe;
+/* P12.2: an opt-in, read-only GPU governor/job observer. All counters
+ * are cumulative and nonresetting; host uses deltas across its phases.
+ * 0=minimal, 1=stage counters, 2=detailed userland GL cost. The mode
+ * MUST NEVER modify clock, voltage, PMU, thermal limits or frame policy. */
+static uint32_t p122_diag_mode;
+static uint32_t p122_enabled; /* bootarg p122=1: same bounded GPU observer overhead in ALL 0/1/2 profiles */
+static volatile uint64_t p122_gov_windows, p122_gov_elapsed_ns, p122_gov_busy_ns;
+static volatile uint64_t p122_gov_frame_windows, p122_gov_forced;
+static volatile uint64_t p122_gov_level_ns[3], p122_gov_level_other_ns;
+static volatile uint64_t p122_job_count, p122_job_queued_us, p122_job_exec_us;
+static volatile uint64_t p122_job_q_max_us, p122_job_e_max_us;
+static volatile uint64_t p122_job_q_hist[8], p122_job_e_hist[8];
+
+static int
+p122_diag_mode_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
+    __unused int arg2, struct sysctl_req *req)
+{
+    int value=(int)__atomic_load_n(&p122_diag_mode,__ATOMIC_RELAXED);
+    int error=sysctl_io_number(req,value,sizeof(value),&value,NULL);
+    if(error || req->newptr==NULL) return error;
+    if(!s9_p122_mode_valid(value)) return EINVAL;
+    if(value != 0 && __atomic_load_n(&p122_enabled,__ATOMIC_RELAXED)!=1) return EPERM;
+    __atomic_store_n(&p122_diag_mode,(uint32_t)value,__ATOMIC_RELEASE);
+    return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p122_diag_mode,
+    CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,
+    NULL,0,p122_diag_mode_sysctl,"I",
+    "P12.2 profiler only: 0 minimal,1 stage,2 GL-call detailed; no policy writes");
+
+static int
+p122_gpu_stats_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
+    __unused int arg2,struct sysctl_req *req)
+{
+    char buf[1024];
+    int n=snprintf(buf,sizeof(buf),
+        "version=2 mode=%u enabled=%u source=GPU_governor_job_cumulative "
+        "windows=%llu busy_ns=%llu elapsed_ns=%llu frames=%llu forced=%llu "
+        "level260_ns=%llu level455_ns=%llu level598_ns=%llu other_ns=%llu "
+        "jobs=%llu queue_us=%llu run_us=%llu queue_max_us=%llu run_max_us=%llu "
+        "q_bins_le250_500_1000_2000_4000_8000_16000_gt16000=",
+        __atomic_load_n(&p122_diag_mode,__ATOMIC_ACQUIRE),
+        __atomic_load_n(&p122_enabled,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p122_gov_windows,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p122_gov_busy_ns,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p122_gov_elapsed_ns,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p122_gov_frame_windows,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p122_gov_forced,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p122_gov_level_ns[0],__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p122_gov_level_ns[1],__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p122_gov_level_ns[2],__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p122_gov_level_other_ns,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p122_job_count,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p122_job_queued_us,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p122_job_exec_us,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p122_job_q_max_us,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p122_job_e_max_us,__ATOMIC_RELAXED));
+    if(n<0 || n>=(int)sizeof(buf)-290) return EINVAL;
+    for(unsigned i=0;i<8;i++) {
+        n+=snprintf(buf+n,sizeof(buf)-(size_t)n,"%s%llu",i?",":"",
+            (unsigned long long)__atomic_load_n(&p122_job_q_hist[i],__ATOMIC_RELAXED));
+    }
+    n+=snprintf(buf+n,sizeof(buf)-(size_t)n," e_bins=");
+    for(unsigned i=0;i<8;i++) {
+        n+=snprintf(buf+n,sizeof(buf)-(size_t)n,"%s%llu",i?",":"",
+            (unsigned long long)__atomic_load_n(&p122_job_e_hist[i],__ATOMIC_RELAXED));
+    }
+    return SYSCTL_OUT(req,buf,strlen(buf)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p122_gpu_stats,
+    CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,
+    NULL,0,p122_gpu_stats_sysctl,"A",
+    "P12.2 read-only cumulative GPU DVFS, frame floor and queue/execute histogram");
+
+static void
+p122_job_latency(uint64_t queued_us,uint64_t run_us)
+{
+    __atomic_fetch_add(&p122_job_count,1,__ATOMIC_RELAXED);
+    __atomic_fetch_add(&p122_job_queued_us,queued_us,__ATOMIC_RELAXED);
+    __atomic_fetch_add(&p122_job_exec_us,run_us,__ATOMIC_RELAXED);
+    __atomic_fetch_add(&p122_job_q_hist[s9_p122_bucket_us(queued_us)],1,__ATOMIC_RELAXED);
+    __atomic_fetch_add(&p122_job_e_hist[s9_p122_bucket_us(run_us)],1,__ATOMIC_RELAXED);
+    uint64_t prev=__atomic_load_n(&p122_job_q_max_us,__ATOMIC_RELAXED);
+    while(queued_us>prev && !__atomic_compare_exchange_n(&p122_job_q_max_us,&prev,queued_us,
+        false,__ATOMIC_RELAXED,__ATOMIC_RELAXED)){}
+    prev=__atomic_load_n(&p122_job_e_max_us,__ATOMIC_RELAXED);
+    while(run_us>prev && !__atomic_compare_exchange_n(&p122_job_e_max_us,&prev,run_us,
+        false,__ATOMIC_RELAXED,__ATOMIC_RELAXED)){}
+}
+
 /* P3 is read-only: PMU/CMU registers are outside the GPU power domain.
  * Optional p3rail=1 reads BUCK6 with ACPM only once per 30s; default
  * does not touch the PMIC at all. No power sequencing, clock, voltage
@@ -2514,6 +2605,20 @@ gov_window(uint64_t now, uint64_t busy)
 			floor_forced = want < floor;
 			want = want < floor ? floor : want;
 		}
+	}
+	/* P12.2 diagnostic-only counters: sampled at existing governor cadence,
+	 * no policy changes, extra clocks, or per-frame console prints. */
+	if (__atomic_load_n(&p122_enabled,__ATOMIC_RELAXED) == 1) {
+		uint64_t elapsed_ns=0,busy_ns=0;
+		absolutetime_to_nanoseconds(elapsed,&elapsed_ns);
+		absolutetime_to_nanoseconds(window_busy,&busy_ns);
+		__atomic_fetch_add(&p122_gov_windows,1,__ATOMIC_RELAXED);
+		__atomic_fetch_add(&p122_gov_elapsed_ns,elapsed_ns,__ATOMIC_RELAXED);
+		__atomic_fetch_add(&p122_gov_busy_ns,busy_ns,__ATOMIC_RELAXED);
+		if(had_frame)__atomic_fetch_add(&p122_gov_frame_windows,1,__ATOMIC_RELAXED);
+		if(floor_forced)__atomic_fetch_add(&p122_gov_forced,1,__ATOMIC_RELAXED);
+		if(gov_level<3)__atomic_fetch_add(&p122_gov_level_ns[gov_level],elapsed_ns,__ATOMIC_RELAXED);
+		else __atomic_fetch_add(&p122_gov_level_other_ns,elapsed_ns,__ATOMIC_RELAXED);
 	}
 	want = want > cap ? cap : want;
 	if (want > gov_level || gov_level > cap) {
@@ -3007,6 +3112,13 @@ mali_worker(__unused void *parameter, __unused wait_result_t result)
 		}
 
 		uint64_t ended = mach_absolute_time();
+		if(!dropped && __atomic_load_n(&p122_enabled,__ATOMIC_RELAXED)==1 &&
+		    job_began>=queued && ended>=job_began) {
+			uint64_t q_ns=0,e_ns=0;
+			absolutetime_to_nanoseconds(job_began-queued,&q_ns);
+			absolutetime_to_nanoseconds(ended-job_began,&e_ns);
+			p122_job_latency(q_ns/1000,e_ns/1000);
+		}
 
 		lck_mtx_lock(&mali_queue_lock);
 		mali_queue_head = (mali_queue_head + 1) % MALI_QUEUE;
@@ -3206,6 +3318,8 @@ hakios_mali_init(void)
 	(void)PE_parse_boot_argn("mali_mhz", &mali_mhz, sizeof(mali_mhz));
 	(void)PE_parse_boot_argn("mali_acpm", &mali_acpm, sizeof(mali_acpm));
 	(void)PE_parse_boot_argn("mali_gov", &mali_gov, sizeof(mali_gov));
+	(void)PE_parse_boot_argn("p122", &p122_enabled, sizeof(p122_enabled));
+	if(p122_enabled!=1)p122_enabled=0;
 	/* p12_gpu_boot_auto=1: Arm the existing guarded P9 automatic G3D screen-OFF gate after GPU initialization. */
 	(void)PE_parse_boot_argn("p12_gpu_boot_auto", &p12_gpu_boot_auto, sizeof(p12_gpu_boot_auto));
 	p12_gpu_boot_auto = p12_gpu_boot_auto == 1 ? 1u : 0u;

@@ -77,6 +77,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
 
@@ -88,6 +89,7 @@
 #include "s9_p611_hash_diag.h"   /* P6.11 existing surface_changed() path attribution */
 #include "s9_p612_output_diag.h" /* P6.12 EAGL vs display fps telemetry */
 #include "s9_gl_cost.h"       /* opt-in glcost=1: time/count EAGL slot calls, no GL changes */
+#include "s9_p122_frame_diag.h" /* P12.2 runtime profile histograms, 60-frame bounded */
 #include "s9_g2_bind.h"       /* opt-in g2_bind=1: skip proven redundant native texture binds */
 #include "s9_gl_diag.h"       /* opt-in glpath=1/glhash=1: sampled CPU path timings */
 #include "s9_ioshash4.h"      /* P0: four independent hash lanes, exact scalar reference */
@@ -347,6 +349,10 @@ struct eagl {
 	uint32_t p4_window_phase, p4_window_mode;
 	uint64_t p4_last_frame_end_us;
 	struct s9_gl_cost glcost;               /* grouped GL slot timings; reset every 60 frames */
+	struct s9_p122_frame_window p122_window;
+	uint64_t p122_cpu_began_us;
+	bool p122_cpu_sample_valid;
+	unsigned p122_mode_seen;
 	struct s9_p66_bucket p66;            /* P6.6 60-frame target/damage evidence */
 	uint32_t p66_group_phase,p66_last_mode;
 	uint64_t p66_last_frame_end_us;
@@ -371,6 +377,7 @@ static uint32_t p6_ca_cached,p6_phase_cached; /* P6.5 independent observer; 60-f
 static uint32_t p66_mode_cached,p67_mode_cached,p611_mode_cached,p612_mode_cached; /* runtime read-only; 60-frame refresh */
 static int glstage_on;                       /* boot-arg glstage=1: 60-frame timing aggregates */
 static int glcost_on;                        /* boot-arg glcost=1: per-slot CPU wall timing */
+static int p122_enabled;                      /* boot-arg p122=1; runtime mode controls ONLY diagnostics */
 static int g2_bind_on;                        /* boot-arg g2_bind=1, otherwise legacy code path */
 static int g2_verify_on;                      /* boot-arg g2_verify=1: sample actual GL binding */
 static int g21_diag_on;                       /* boot-arg g21_diag=1: G2 reasons, even with skipping OFF */
@@ -404,6 +411,21 @@ static __thread struct eagl *current;
 /* The GLES shim has internal raw glBindTexture calls for blur, mirror and
  * inspection. Their binding changes MUST invalidate our fast-path snapshot,
  * including the calls from frame_end, or it could skip a required bind. */
+/* At most one thread CPU clock sample per 16 frames. If iOS does not
+ * expose CLOCK_THREAD_CPUTIME_ID, report zero samples, never guess. */
+static int
+p122_thread_cpu_us(uint64_t *value)
+{
+#if defined(CLOCK_THREAD_CPUTIME_ID)
+    struct timespec ts;
+    if(clock_gettime(CLOCK_THREAD_CPUTIME_ID,&ts)!=0)return 0;
+    *value=(uint64_t)ts.tv_sec*1000000ull+(uint64_t)ts.tv_nsec/1000ull;
+    return 1;
+#else
+    (void)value;
+    return 0;
+#endif
+}
 static void s9_g2_internal_bind(GLenum target, GLuint name) {
 	if (g2_track_on && current) {
 		s9_g2_invalidate(&current->g2);
@@ -1606,6 +1628,25 @@ frame_begin(struct eagl *e)
 	}
 	e->in_frame = true;
 	e->began = now_us();
+	if(p122_enabled && (e->frames%16u)==0u){
+		int value=-1;
+		size_t size=sizeof(value);
+		if(sysctlbyname("kern.hakios.p122_diag_mode",&value,&size,NULL,0)==0 &&
+		   size==sizeof(value) && value>=0 && value<=2 &&
+		   e->p122_mode_seen!=(unsigned)(value+1)){
+			e->p122_mode_seen=(unsigned)(value+1);
+			glstage_on=value>=1;
+			glcost_on=value>=2;
+			s9_gl_stage_reset(&e->glstage);
+			s9_gl_cost_reset(&e->glcost);
+			s9_p122_frame_reset(&e->p122_window);
+			say("p122-gl: mode=%d ack=kernel_sysctl mode0=minimal mode1=stage mode2=GL_slots cpu_clock=thread_sampled_1in16 effects=none\n",value);
+		}
+	}
+	e->p122_cpu_sample_valid=false;
+	if(p122_enabled && e->p122_mode_seen>1 && (e->frames%16u)==0u){
+		e->p122_cpu_sample_valid=p122_thread_cpu_us(&e->p122_cpu_began_us)!=0;
+	}
 	if (prof_us != 0 && prof_thread == MACH_PORT_NULL) {
 		pthread_t sampler;
 
@@ -2115,6 +2156,34 @@ frame_end(struct eagl *e, bool finished, enum s9_p4_end_reason end_reason)
 		say("hakios-gl: frame %u: %u draws, and none into an IOSurface that is known here (framebuffer %u, texture %u)\n",
 		    e->frames, e->draws, e->framebuffer, e->colour);
 	}
+	bool p122_completed_window=false;
+	if(p122_enabled){
+		uint64_t cpu_now=0;
+		int cpu_valid=e->p122_cpu_sample_valid && p122_thread_cpu_us(&cpu_now) &&
+		    cpu_now>=e->p122_cpu_began_us;
+		uint64_t wall=after>=e->began?after-e->began:0;
+		s9_p122_frame_add(&e->p122_window,wall,e->draws,e->uploads,e->calls,
+		    cpu_valid,cpu_valid?cpu_now-e->p122_cpu_began_us:0);
+		if(e->p122_window.frames==60){
+			p122_completed_window=true;
+			struct s9_p122_frame_window *w=&e->p122_window;
+			say("p122-gl-window: mode=%u frames=%u wall_mean_us=%llu wall_max_us=%llu "
+			    "p50bin=%u p95bin=%u p99bin=%u cpu_samples=%u cpu_sample_us=%llu "
+			    "wall_sample_us=%llu draws=%llu uploads=%llu calls=%llu "
+			    "wall_not_GPU_time=1 thread_cpu_best_effort=1\n",
+			    e->p122_mode_seen?e->p122_mode_seen-1:0,w->frames,
+			    (unsigned long long)(w->wall_us/w->frames),
+			    (unsigned long long)w->max_us,
+			    s9_p122_frame_percentile_bin(w,50),
+			    s9_p122_frame_percentile_bin(w,95),
+			    s9_p122_frame_percentile_bin(w,99),w->cpu_samples,
+			    (unsigned long long)w->sampled_cpu_us,
+			    (unsigned long long)w->sampled_wall_us,
+			    (unsigned long long)w->draws,(unsigned long long)w->uploads,
+			    (unsigned long long)w->calls);
+			s9_p122_frame_reset(w);
+		}
+	}
 	e->all_calls += e->calls;
 	e->all_draws += e->draws;
 	e->all_triangles += e->triangles;
@@ -2142,7 +2211,8 @@ frame_end(struct eagl *e, bool finished, enum s9_p4_end_reason end_reason)
 			s9_gl_stage_reset(s);
 		}
 	}
-	if ((glcost_on || __atomic_load_n(&p67_mode_cached,__ATOMIC_RELAXED)) && e->frames % 60 == 0) {
+	if ((glcost_on || __atomic_load_n(&p67_mode_cached,__ATOMIC_RELAXED)) &&
+	    (p122_enabled ? p122_completed_window : e->frames % 60 == 0)) {
 		uint64_t us[S9_GL_GROUPS];uint32_t count[S9_GL_GROUPS];unsigned top[3];
 		s9_gl_cost_summary(&e->glcost, us, count, top);
 		uint64_t sum=0;uint32_t calls=0;
@@ -5369,6 +5439,14 @@ install(void)
 		frame_lines = strstr(arguments, "glframes=1") != NULL;
 		glstage_on = strstr(arguments, "glstage=1") != NULL;
 		glcost_on = s9_has_boot_flag(arguments, "glcost=1");
+		p122_enabled = s9_has_boot_flag(arguments, "p122=1");
+		if(p122_enabled){
+			/* Diagnostic mode0 is light regardless of old glstage/glcost.
+			 * Keep p0hash/p0verify disabled in paired build: they are
+			 * independent functional paths, never toggled by profiler. */
+			glstage_on=glcost_on=0;
+			say("p122-gl: boot_enabled=1 initial_mode=0 glstage=0 glcost=0 policy_writes=0\n");
+		}
 		g2_bind_on = s9_has_boot_flag(arguments, "g2_bind=1");
 		g2_verify_on = s9_has_boot_flag(arguments, "g2_verify=1");
 		g21_diag_on = s9_has_boot_flag(arguments, "g21_diag=1");

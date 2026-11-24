@@ -86,15 +86,17 @@ $script:LifeLineObserver={
 function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
     $allowed=@('hi_cmd','p12_cpu_mode','p12_cpu_stats','p12_wfi_probe','p12_wfi_stats','p12_idle_diag',
         'p12_gpu_boot_stats','p9_auto_gpu','p9_panel_stats','g3d_lab_stats',
+        'p122_diag_mode','p122_gpu_stats',
         'p7_cpu_stats','p4_stats')
     if($Name -notin $allowed){throw "P12 sysctl disallowed $Name"}
     if($Value -ne '' -and -not (
         (($Name -eq 'p12_cpu_mode' -or $Name -eq 'p12_wfi_probe') -and $Value -in @('0','1')) -or
-        ($Name -eq 'hi_cmd' -and $Value -in @('0','201')))){
-        throw 'P12.1 only permits 0/1 CPU/WFI and 0/201 HI2 stop mailbox; no GPU/panel/voltage writes'
+        ($Name -eq 'hi_cmd' -and $Value -in @('0','201')) -or
+        ($Name -eq 'p122_diag_mode' -and $Value -in @('0','1','2')))){
+        throw 'P12.2 only permits bounded CPU/WFI/HI2 and diagnostic mode=0/1/2; no GPU/panel/voltage writes'
     }
-    if($Cleanup -and ($Name -notin @('p12_cpu_mode','p12_wfi_probe','hi_cmd') -or $Value -ne '0')){
-        throw 'P12.1 Cleanup bypass is reserved for bounded restore-to-zero writes only'
+    if($Cleanup -and ($Name -notin @('p12_cpu_mode','p12_wfi_probe','hi_cmd','p122_diag_mode') -or $Value -ne '0')){
+        throw 'P12.1/P12.2 Cleanup bypass is reserved for bounded restore-to-zero writes only'
     }
     $cmd='sysctl kern.hakios.'+$Name
     if($Value -ne ''){$cmd+='='+$Value}
