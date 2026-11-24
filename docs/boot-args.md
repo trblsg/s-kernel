@@ -8,7 +8,7 @@ This is a catalogue of what exists and who reads it, not a manual. What an argum
 
 Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl kern.bootargs`).
 
-## GPU and display (123)
+## GPU and display (124)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
