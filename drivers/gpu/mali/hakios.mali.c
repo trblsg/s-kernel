@@ -2322,7 +2322,7 @@ static uint32_t p122_diag_mode;
 static uint32_t p122_enabled; /* bootarg p122=1: same bounded GPU observer overhead in ALL 0/1/2 profiles */
 static volatile uint64_t p122_gov_windows, p122_gov_elapsed_ns, p122_gov_busy_ns;
 static volatile uint64_t p122_gov_frame_windows, p122_gov_forced;
-static volatile uint64_t p122_gov_level_ns[3], p122_gov_level_other_ns;
+static volatile uint64_t p122_gov_level_ns[4], p122_gov_level_other_ns;
 static volatile uint64_t p122_job_count, p122_job_queued_us, p122_job_exec_us;
 static volatile uint64_t p122_job_q_max_us, p122_job_e_max_us;
 static volatile uint64_t p122_job_q_hist[8], p122_job_e_hist[8];
@@ -2348,11 +2348,11 @@ static int
 p122_gpu_stats_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
     __unused int arg2,struct sysctl_req *req)
 {
-    char buf[1024];
+    char buf[1536];
     int n=snprintf(buf,sizeof(buf),
-        "version=2 mode=%u enabled=%u source=GPU_governor_job_cumulative "
+        "version=3 mode=%u enabled=%u source=GPU_governor_job_cumulative "
         "windows=%llu busy_ns=%llu elapsed_ns=%llu frames=%llu forced=%llu "
-        "level260_ns=%llu level455_ns=%llu level598_ns=%llu other_ns=%llu "
+        "level260_ns=%llu level455_ns=%llu level572_ns=%llu level598_ns=%llu other_ns=%llu "
         "jobs=%llu queue_us=%llu run_us=%llu queue_max_us=%llu run_max_us=%llu "
         "q_bins_le250_500_1000_2000_4000_8000_16000_gt16000=",
         __atomic_load_n(&p122_diag_mode,__ATOMIC_ACQUIRE),
@@ -2365,6 +2365,7 @@ p122_gpu_stats_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
         (unsigned long long)__atomic_load_n(&p122_gov_level_ns[0],__ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&p122_gov_level_ns[1],__ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&p122_gov_level_ns[2],__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p122_gov_level_ns[3],__ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&p122_gov_level_other_ns,__ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&p122_job_count,__ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&p122_job_queued_us,__ATOMIC_RELAXED),
@@ -2429,6 +2430,7 @@ static uint64_t gov_frame_last;
  * Deadline is absolute, max 30s; never changes configured gov_frame_mhz.
  * Frame cadence evidence is collected from actual display presents. */
 static uint64_t p123_floor_until, p123_gap_ms, p123_present_count;
+static uint64_t p1231_hash_until;
 static uint32_t p123_static_streak;
 static uint64_t p123_eligible_windows, p123_bypass_windows;
 extern bool hakios_p123_input_quiet(uint64_t now);
@@ -2439,6 +2441,25 @@ p123_floor_active(uint64_t now)
 {
     uint64_t until=__atomic_load_n(&p123_floor_until,__ATOMIC_ACQUIRE);
     return s9_p123_trial_active(now,until);
+}
+static unsigned
+p1231_floor_refusal(uint64_t now)
+{
+    unsigned mask=0;
+    if(!__atomic_load_n(&p122_enabled,__ATOMIC_ACQUIRE))mask|=1;
+    if(!mali_gov || !gov_on)mask|=2;
+    if(mali_dvs)mask|=4;
+    if(!s9_p1231_rates_valid(g3d_nrates,
+        g3d_nrates>0?g3d_rates[0].mhz:0,
+        g3d_nrates>1?g3d_rates[1].mhz:0,
+        g3d_nrates>2?g3d_rates[2].mhz:0,
+        g3d_nrates>3?g3d_rates[3].mhz:0))mask|=8;
+    if(gov_frame_mhz!=450)mask|=16;
+    if(hakios_display_requested_on()!=1)mask|=32;
+    if(!hakios_p123_input_quiet(now))mask|=64;
+    int32_t temp=hakios_exynos_tmu_zone_mc(2);
+    if(hakios_exynos_tmu_age_ms()>2000 || temp<0 || temp>=72000)mask|=128;
+    return mask;
 }
 static int
 p123_floor_mode_sysctl(__unused struct sysctl_oid *oidp,
@@ -2453,12 +2474,14 @@ p123_floor_mode_sysctl(__unused struct sysctl_oid *oidp,
         return 0;
     }
     uint64_t now=mach_absolute_time(),span=0;
-    if(!__atomic_load_n(&p122_enabled,__ATOMIC_ACQUIRE) ||
-        !mali_gov || !gov_on || mali_dvs || g3d_nrates!=3 ||
-        gov_frame_mhz!=450 || hakios_display_requested_on()!=1 ||
-        !hakios_p123_input_quiet(now))return EPERM;
+    unsigned refusal=p1231_floor_refusal(now);
+    if(refusal){
+        say("p1231-floor: arm_refused mask=0x%x rates=%u floor=%u\n",
+            refusal,g3d_nrates,gov_frame_mhz);
+        return EPERM;
+    }
     /* No extension of an already armed trial; restore0 before rearm. */
-    if(p123_floor_active(now))return EBUSY;
+    if(p123_floor_active(now) || s9_p123_trial_active(now,__atomic_load_n(&p1231_hash_until,__ATOMIC_ACQUIRE)))return EBUSY;
     nanoseconds_to_absolutetime(30ull*NSEC_PER_SEC,&span);
     __atomic_store_n(&p123_floor_until,now+span,__ATOMIC_RELEASE);
     return 0;
@@ -2475,7 +2498,7 @@ p123_floor_stats_sysctl(__unused struct sysctl_oid *oidp,
     char buf[512];
     snprintf(buf,sizeof(buf),
         "version=1 active=%u configured_floor=%u quiet=%u display=%d "
-        "streak=%u gap_ms=%llu eligible=%llu bypass=%llu presents=%llu last_present_ticks=%llu now_ticks=%llu",
+        "streak=%u gap_ms=%llu eligible=%llu bypass=%llu presents=%llu last_present_ticks=%llu now_ticks=%llu rates=%u refusal_mask=%u",
         p123_floor_active(now)?1u:0u,gov_frame_mhz,
         hakios_p123_input_quiet(now)?1u:0u,hakios_display_requested_on(),
         __atomic_load_n(&p123_static_streak,__ATOMIC_RELAXED),
@@ -2484,13 +2507,47 @@ p123_floor_stats_sysctl(__unused struct sysctl_oid *oidp,
         (unsigned long long)__atomic_load_n(&p123_bypass_windows,__ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&p123_present_count,__ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&gov_frame_last,__ATOMIC_RELAXED),
-        (unsigned long long)now);
+        (unsigned long long)now,g3d_nrates,p1231_floor_refusal(now));
     return SYSCTL_OUT(req,buf,strlen(buf)+1);
 }
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p123_floor_stats,
     CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,
     NULL,0,p123_floor_stats_sysctl,"A",
     "P12.3 adaptive frame-floor evidence and monotonic display-present stamps");
+/* P12.3.1: separate checksum experiment, readback expires even with no frames.
+ * 0 legacy, 1 full-range scalar 4-lane, 2 equivalent fast 4-lane.
+ * No clock/rail/panel changes. Both nonzero modes expire in 30 seconds. */
+static uint32_t p1231_hash_value;
+static int
+p1231_hash_mode_sysctl(__unused struct sysctl_oid *oidp,
+    __unused void *arg1,__unused int arg2,struct sysctl_req *req)
+{
+    uint64_t now=mach_absolute_time();
+    uint64_t until=__atomic_load_n(&p1231_hash_until,__ATOMIC_ACQUIRE);
+    if(until && (!s9_p123_trial_active(now,until) || p1231_floor_refusal(now))){
+        __atomic_store_n(&p1231_hash_until,0,__ATOMIC_RELEASE);
+        until=0;
+    }
+    int v=until?(int)__atomic_load_n(&p1231_hash_value,__ATOMIC_RELAXED):0;
+    int error=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(error || req->newptr==NULL)return error;
+    if(v<0 || v>2)return EINVAL;
+    if(v==0){
+        __atomic_store_n(&p1231_hash_until,0,__ATOMIC_RELEASE);
+        return 0;
+    }
+    if(p1231_floor_refusal(now) || p123_floor_active(now))return EPERM;
+    if(s9_p123_trial_active(now,until))return EBUSY;
+    uint64_t span=0;
+    nanoseconds_to_absolutetime(30ull*NSEC_PER_SEC,&span);
+    __atomic_store_n(&p1231_hash_value,(uint32_t)v,__ATOMIC_RELAXED);
+    __atomic_store_n(&p1231_hash_until,now+span,__ATOMIC_RELEASE);
+    return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1231_hash_mode,
+    CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,
+    NULL,0,p1231_hash_mode_sysctl,"I",
+    "P12.3.1 bounded IOSurface checksum A/B, 0 legacy 1 reference 2 fast");
 SYSCTL_UINT(_kern_hakios, OID_AUTO, mali_gov_frame, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gov_frame_mhz, 0,
     "the GPU's clock while frames come, MHz at least (mali_gov=1; 0: none)");
 
@@ -2720,7 +2777,8 @@ gov_window(uint64_t now, uint64_t busy)
 		__atomic_fetch_add(&p122_gov_busy_ns,busy_ns,__ATOMIC_RELAXED);
 		if(had_frame)__atomic_fetch_add(&p122_gov_frame_windows,1,__ATOMIC_RELAXED);
 		if(floor_forced)__atomic_fetch_add(&p122_gov_forced,1,__ATOMIC_RELAXED);
-		if(gov_level<3)__atomic_fetch_add(&p122_gov_level_ns[gov_level],elapsed_ns,__ATOMIC_RELAXED);
+		unsigned bucket=gov_level<GOV_LEVELS?s9_p1231_rate_bucket(g3d_rates[gov_level].mhz):4;
+		if(bucket<4)__atomic_fetch_add(&p122_gov_level_ns[bucket],elapsed_ns,__ATOMIC_RELAXED);
 		else __atomic_fetch_add(&p122_gov_level_other_ns,elapsed_ns,__ATOMIC_RELAXED);
 	}
 	want = want > cap ? cap : want;

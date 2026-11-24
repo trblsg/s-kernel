@@ -35,6 +35,7 @@ $LibraryOnly=$script:P12LibraryRequested
 $script:P12Command=''
 $script:P12Echo=$false
 $script:P12Reply=$null
+$script:P12Refusal=$null
 $script:P12PreflightVerified=$false
 $script:P12CpuDirty=$false
 $script:P12WfiDirty=$false
@@ -62,6 +63,9 @@ $script:LifeLineObserver={
     param([string]$Line,[datetime]$At)
     if($script:P12Command -and $Line.Contains('usb> '+$script:P12Command)){
         $script:P12Echo=$true
+    }
+    if($script:P12Command -and $script:P12Echo -and $Line.StartsWith('usb: '+$script:P12Command+':') -and $Line -notmatch ': set \(0\)$'){
+        $script:P12Refusal=$Line
     }
     if($script:P12Command -and $script:P12Echo -and $Line -match '^usb: kern\.hakios\.([a-zA-Z_0-9]+) = (.*)$'){
         $name=$Matches[1];$value=$Matches[2].Trim()
@@ -92,25 +96,28 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
         'p12_gpu_boot_stats','p9_auto_gpu','p9_panel_stats','g3d_lab_stats',
         'p122_diag_mode','p122_gpu_stats',
         'p7_cpu_stats','p4_stats')
-    if($script:P123HostEnabled){$allowed+=@('p123_floor_mode','p123_floor_stats')}
+    if($script:P123HostEnabled){$allowed+=@('p123_floor_mode','p123_floor_stats','p1231_hash_mode','p1231_ufs_stats')}
     if($Name -notin $allowed){throw "P12 sysctl disallowed $Name"}
     if($Value -ne '' -and -not (
         (($Name -eq 'p12_cpu_mode' -or $Name -eq 'p12_wfi_probe') -and $Value -in @('0','1')) -or
         ($Name -eq 'hi_cmd' -and $Value -in @('0','201')) -or
         ($Name -eq 'p122_diag_mode' -and $Value -in @('0','1','2')) -or
         ($script:P123HostEnabled -and $Name -eq 'p123_floor_mode' -and $Value -in @('0','1')) -or
+        ($script:P123HostEnabled -and $Name -eq 'p1231_hash_mode' -and $Value -in @('0','1','2')) -or
         ($script:P123HostEnabled -and $script:P123ClockAllowed -and $Name -eq 'hi_cmd' -and $Value -eq '252'))){
         throw 'P12.2 only permits bounded CPU/WFI/HI2 and diagnostic mode=0/1/2; no GPU/panel/voltage writes'
     }
     $restore=@('p12_cpu_mode','p12_wfi_probe','hi_cmd','p122_diag_mode')
-    if($script:P123HostEnabled){$restore+='p123_floor_mode'}
-    if($Cleanup -and ($Name -notin $restore -or $Value -ne '0')){
+    if($script:P123HostEnabled){$restore+=@('p123_floor_mode','p1231_hash_mode')}
+    $clockStop=($script:P123HostEnabled -and $script:P123ClockAllowed -and $Name -eq 'hi_cmd' -and $Value -eq '201')
+    if($Cleanup -and -not $clockStop -and ($Name -notin $restore -or $Value -ne '0')){
         throw 'P12.1/P12.2 Cleanup bypass is reserved for bounded restore-to-zero writes only'
     }
     $cmd='sysctl kern.hakios.'+$Name
     if($Value -ne ''){$cmd+='='+$Value}
     $script:P12Command=$cmd
     $script:P12Reply=$null
+    $script:P12Refusal=$null
     $script:P12Echo=$false
     # Mark a failed/uncertain ENABLE write dirty before sending it, so
     # a thermal abort cannot skip its bounded restore-to-zero attempt.
@@ -121,13 +128,14 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
     $script:LifeSerial.Write($bytes,0,$bytes.Length)
     Life-Say ('P12 '+$(if($Value -eq ''){'READ '}else{'WRITE '})+$cmd)
     $deadline=(Life-Now).AddSeconds(12)
-    while((Life-Now) -lt $deadline -and $null -eq $script:P12Reply){
+    while((Life-Now) -lt $deadline -and $null -eq $script:P12Reply -and $null -eq $script:P12Refusal){
         Life-Pump
         # During thermal abort cleanup, STOP checking the existing hot
         # sample; doing so would mask a successful CPU/WFI restore ACK.
         if(-not $Cleanup){Life-CheckSafety (Life-Now)}
     }
-    if($null -eq $script:P12Reply){throw "Missing echo and sysctl readback $cmd"}
+    if($null -ne $script:P12Refusal){$reason=$script:P12Refusal;$script:P12Command='';throw "P12 sysctl rejected: $reason"}
+    if($null -eq $script:P12Reply){$script:P12Command='';throw "Missing echo and sysctl readback $cmd"}
     $reply=$script:P12Reply
     $script:P12Results.Add(('{0:HH:mm:ss.fff}Z {1} {2}={3}' -f (Life-Now),$script:P12Phase,$Name,$reply))
     $script:P12Command=''

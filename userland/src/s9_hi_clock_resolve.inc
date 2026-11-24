@@ -28,7 +28,7 @@ static bool
 hi_view_chain(id candidate,Class expected,bool *named)
 {
     if(named)*named=false;
-    if(!candidate || !expected)return false;
+    if(!candidate || !expected || class_isMetaClass(object_getClass(candidate)))return false;
     bool match=false;
     unsigned depth=0;
     for(Class c=object_getClass(candidate);c && depth<32;c=class_getSuperclass(c),depth++){
@@ -110,6 +110,10 @@ hi_clock_resolve(id target,char *how,size_t how_size)
 {
     if(!target){
         snprintf(how,how_size,"nil_target");
+        return HI_VIEW_UNKNOWN;
+    }
+    if(class_isMetaClass(object_getClass(target))){
+        snprintf(how,how_size,"class_target_not_UIView_instance");
         return HI_VIEW_UNKNOWN;
     }
     if(hi_is_ui_view(target)){
@@ -199,6 +203,61 @@ hi_clock_resolve(id target,char *how,size_t how_size)
     return chosen;
 }
 
+/* P12.3.1 observation only: find live instances in Home's UIKit tree on
+ * the existing main-queue sampler. Bounded traversal, no retaining or
+ * applying policy, no inference from absent/incomplete scan. */
+struct hi_clock_view_scan {
+    unsigned budget, found, visible, hidden, outside, detached, unknown;
+    bool truncated;
+};
+static void
+hi_clock_scan_view(id view,Class exact,unsigned depth,struct hi_clock_view_scan *s)
+{
+    if(!view || !exact)return;
+    if(!s->budget || depth>=18){s->truncated=true;return;}
+    --s->budget;
+    if(!hi_is_ui_view(view))return;
+    bool clock=false;
+    unsigned d=0;
+    for(Class c=object_getClass(view);c && d<32;c=class_getSuperclass(c),d++)
+        if(c==exact){clock=true;break;}
+    if(clock){
+        ++s->found;
+        char why[70];
+        switch(hi_view_state(view,why,sizeof(why))){
+        case HI_VIEW_VISIBLE:++s->visible;break;
+        case HI_VIEW_HIDDEN:++s->hidden;break;
+        case HI_VIEW_OUTSIDE:++s->outside;break;
+        case HI_VIEW_DETACHED:++s->detached;break;
+        default:++s->unknown;break;
+        }
+    }
+    id children=SEND(id,view,"subviews");
+    unsigned long n=children?SEND(unsigned long,children,"count"):0;
+    for(unsigned long i=0;i<n;i++){
+        if(!s->budget){s->truncated=true;break;}
+        hi_clock_scan_view(SEND1(id,children,"objectAtIndex:",unsigned long,i),exact,depth+1,s);
+    }
+}
+static void
+hi_clock_view_observe(id windows,unsigned long count,bool home)
+{
+    if(!home)return;
+    Class exact=objc_getClass("SBHClockApplicationIconImageView");
+    uint64_t began=mach_absolute_time();
+    struct hi_clock_view_scan s={.budget=512};
+    unsigned roots=0;
+    if(exact)for(unsigned long i=0;i<count && i<64;i++){
+        id window=SEND1(id,windows,"objectAtIndex:",unsigned long,i);
+        if(window && !strcmp(object_getClassName(window),"SBHomeScreenWindow")){
+            ++roots;
+            hi_clock_scan_view(window,exact,0,&s);
+        }
+    }
+    say("p1231-clock-view: class_available=%u home_roots=%u found=%u visible=%u hidden=%u outside=%u detached=%u unknown=%u truncated=%u nodes=%u scan_ticks=%llu geometry_only=1 policy=unchanged\n",
+        exact?1u:0u,roots,s.found,s.visible,s.hidden,s.outside,s.detached,s.unknown,
+        s.truncated || count>64?1u:0u,512-s.budget,(unsigned long long)(mach_absolute_time()-began));
+}
 static void
 hi_clock_class_chain(id target)
 {
@@ -235,6 +294,13 @@ hi_clock_class_chain(id target)
             (void*)target,(void*)actual,(void*)lookup,(void*)named,matches,
             named && lookup && named==lookup?1u:0u,hi_kind_checked(target,lookup),
             hi_is_ui_view(target)?1u:0u,m?method_getNumberOfArguments(m):0u,rt,roots);
+        Class meta=objc_getMetaClass("UIView");
+        const char *target_name=class_getName(actual);
+        Class target_class=target_name?objc_getClass(target_name):NULL;
+        say("p1231-clock-meta: target_is_class=%u actual_meta=%u target_equals_class=%u UIView_meta=%p chain_equals_meta=%u policy=unchanged\n",
+            class_isMetaClass(actual)?1u:0u,class_isMetaClass(actual)?1u:0u,
+            target_class && target==(id)target_class?1u:0u,(void*)meta,
+            named && named==meta?1u:0u);
         const char *image=named?class_getImageName(named):NULL;
         const char *lookup_image=lookup?class_getImageName(lookup):NULL;
         say("p123-clock-images: chain=%s lookup=%s policy=unchanged\n",

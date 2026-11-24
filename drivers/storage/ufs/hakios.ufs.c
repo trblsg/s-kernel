@@ -299,6 +299,29 @@ static bool ufs_data_used;                      /* opened for writing this run: 
 static LCK_MTX_DECLARE(ufs_data_mtx, &ufs_lck_grp);     /* one write of the data volume at a time */
 
 SYSCTL_DECL(_kern_hakios);
+/* P12.3.1: only observe ownership and I/O counters. Native switch alone
+ * does not prove loader core handoff or authorize a LITTLE floor change. */
+static int
+p1231_ufs_stats_sysctl(__unused struct sysctl_oid *oidp,
+    __unused void *arg1,__unused int arg2,struct sysctl_req *req)
+{
+    char buf[512];
+    snprintf(buf,sizeof(buf),
+        "version=1 nufs=%u switched=%u step=%u selftest=%d fences=%d dead=%u loader_core_taken=%u "
+        "native_reads=%llu loader_reads=%llu read_errors=%llu writes=%llu write_errors=%llu refused=%llu write_busy=%u",
+        ufs_nufs?1u:0u,ufs_nufs_on?1u:0u,nufs_sum.step,nufs_sum.selftest,nufs_sum.fences,
+        ufs_dead?1u:0u,hakios_loader_core_taken()?1u:0u,
+        (unsigned long long)__atomic_load_n(&nufs_sum.reads_native,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&nufs_sum.reads_loader,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&nufs_sum.read_errors,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&ufs_writes,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&ufs_write_errors,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&nufs_sum.refused,__ATOMIC_RELAXED),ufs_write_busy?1u:0u);
+    return SYSCTL_OUT(req,buf,strlen(buf)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1231_ufs_stats,
+    CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,
+    NULL,0,p1231_ufs_stats_sysctl,"A","P12.3.1 read-only native UFS and loader core ownership evidence");
 SYSCTL_QUAD(_kern_hakios, OID_AUTO, ufs_requests, CTLFLAG_RD | CTLFLAG_LOCKED, &ufs_requests,
     "requests the phone's storage has answered through the loader");
 SYSCTL_QUAD(_kern_hakios, OID_AUTO, ufs_errors, CTLFLAG_RD | CTLFLAG_LOCKED, &ufs_errors,

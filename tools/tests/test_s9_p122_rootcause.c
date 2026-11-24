@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include "../../drivers/gpu/mali/hakios.p122_diag.h"
 #include "../../userland/src/s9_p122_frame_diag.h"
+#include "../../userland/src/s9_ioshash4.h"
+#include "../../userland/src/s9_gl_diag.h"
 int main(void) {
     assert(s9_p122_mode_valid(0) && s9_p122_mode_valid(1) && s9_p122_mode_valid(2));
     assert(!s9_p122_mode_valid(-1) && !s9_p122_mode_valid(3));
@@ -32,6 +34,30 @@ int main(void) {
     unsigned residues[16]={0};
     for(unsigned i=0;i<256;i++)if(s9_p123_sample_frame(i))residues[i%16]++;
     for(unsigned i=0;i<16;i++)assert(residues[i]==1);
+    uint64_t serial=0;
+    unsigned call_residue[16]={0};
+    for(unsigned i=0;i<256;i++)if(s9_gl_diag_sample16_rotating(&serial))call_residue[i%16]++;
+    for(unsigned i=0;i<16;i++)assert(call_residue[i]==1);
+    uint8_t bytes[1025];
+    for(unsigned i=0;i<sizeof(bytes);i++)bytes[i]=(uint8_t)(i*31u+i/7u);
+    for(unsigned offset=0;offset<8;offset++)
+        for(unsigned n=0;n<=1024-offset;n++)
+            assert(s9_ioshash4_fast(bytes+offset,n)==s9_ioshash4_reference(bytes+offset,n));
+    for(unsigned n=1;n<100;n++){
+        uint64_t before=s9_ioshash4_fast(bytes,n);
+        bytes[n-1]^=0x5a;
+        assert(before!=s9_ioshash4_fast(bytes,n));
+        bytes[n-1]^=0x5a;
+    }
+    assert(s9_p1231_rates_valid(3,260,455,572,0));
+    assert(s9_p1231_rates_valid(4,260,455,572,598));
+    assert(!s9_p1231_rates_valid(4,260,455,572,650));
+    assert(!s9_p1231_rates_valid(3,260,455,598,0));
+    assert(!s9_p1231_rates_valid(2,260,455,572,0));
+    assert(!s9_p1231_rates_valid(5,260,455,572,598));
+    assert(s9_p1231_rate_bucket(260)==0 && s9_p1231_rate_bucket(455)==1);
+    assert(s9_p1231_rate_bucket(572)==2 && s9_p1231_rate_bucket(598)==3);
+    assert(s9_p1231_rate_bucket(650)==4);
     assert(!s9_p123_trial_active(100,0));
     assert(s9_p123_trial_active(100,30100));
     assert(s9_p123_trial_active(30099,30100));

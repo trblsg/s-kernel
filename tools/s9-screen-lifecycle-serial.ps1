@@ -79,7 +79,7 @@ function Life-New-Bucket {
         CpuCount=0;BigSum=0.0;LittleSum=0.0;BigPeak=$null;LittlePeak=$null
         CpuBigLoadSum=0.0;CpuLittleLoadSum=0.0
         CpuBigMHzSum=0.0;CpuLittleMHzSum=0.0;CpuBigOnlineMin=$null;CpuLittleOnlineMin=$null
-        GpuCount=0;GpuOff=0;PllOff=0;GpuClkSum=0.0;GpuBusyCount=0;GpuBusySum=0.0
+        GpuCount=0;GpuOff=0;PllOff=0;GpuLabOffCount=0;GpuClkSum=0.0;GpuBusyCount=0;GpuBusySum=0.0
         GpuFrameAgeSum=0.0;GpuJobAgeSum=0.0;GpuAgesCount=0
         GpuThermalCount=0;GpuTempSum=0.0;GpuTempPeak=$null
         FuelCount=0;FuelSignedSum=0.0;DischargeCount=0;DischargeSum=0.0
@@ -225,6 +225,14 @@ function Life-ParseLine([string]$Line,[datetime]$At) {
             $data.big_mhz=$bigMHz;$data.big_online=$bigOnline
         }
         Life-AddSample 'CPU' $At $data
+        return
+    }
+    # The periodic mali-power observer stops when G3D is gated.
+    # Keep independent g3d-lab OFF evidence separate, not double-counted as
+    # governor samples or a synthetic zero busy/temperature.
+    if($Line -match '^g3d-lab: up=\d+ms .*?domain=0 .*?pll=0 mux=0 clk=0MHz .*?\bfault=0(?:\s|$)'){
+        $v.GpuLabOffCount++
+        Life-AddSample 'GPU_LAB_OFF' $At @{gpu_domain=0;gpu_pll=0;gpu_clock_mhz=0}
         return
     }
     if($Line -match '^mali-power: up=\d+ms domain=([01]) .*?pll_en=([01]) .*?clock=(\d+)MHz'){
@@ -483,6 +491,7 @@ function Life-Report([string]$Stem,[datetime]$EndAt,[string]$StopReason) {
             ' LITTLE_online_min='+$(if($null -eq $v.CpuLittleOnlineMin){'n/a'}else{$v.CpuLittleOnlineMin})))
         [void]$lines.Add(('  gpu_pmu_n='+$v.GpuCount+
             ' GPU_domain_OFF_samples='+$v.GpuOff+' GPU_PLL_OFF_samples='+$v.PllOff+
+            ' GPU_lab_domain_PLL_OFF_samples='+$v.GpuLabOffCount+
             ' GPU_clock_mean_MHz='+(Life-Average $v.GpuClkSum $v.GpuCount)+
             ' gpu_busy_n='+$v.GpuBusyCount+
             ' gpu_busy_mean_pct='+(Life-Average $v.GpuBusySum $v.GpuBusyCount)+
@@ -525,7 +534,7 @@ function Life-Report([string]$Stem,[datetime]$EndAt,[string]$StopReason) {
     if($script:LifeCompleteCycles -eq 0){
         [void]$lines.Add('NO FULL OFF-STABLE->ON CYCLE: insufficient to assess full real-world wake sequence.')
     }
-    if($script:LifeBuckets['OFF_STABLE'].GpuCount -lt 2){
+    if($script:LifeBuckets['OFF_STABLE'].GpuOff -lt 2 -and $script:LifeBuckets['OFF_STABLE'].GpuLabOffCount -lt 2){
         [void]$lines.Add('OFF-STABLE PMU SAMPLES <2: cannot establish sustained GPU domain/PLL OFF.')
     }
     if($script:LifeBuckets['OFF_STABLE'].FuelCount -lt 3){

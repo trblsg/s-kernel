@@ -603,10 +603,10 @@ static int
 p12_idle_diag_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
     __unused int arg2, struct sysctl_req *req)
 {
-    char buf[1024];
+    char buf[1536];
     int n = snprintf(buf, sizeof(buf),
         "enabled=%u observational=1 wfi_only_not_power_off=1 no_cpu_suspend=1 "
-        "unmapped=%llu last_unmapped_id=%u per_cpu=e/denied/timer/wfe/wfi_path/no_wfi/exit",
+        "unmapped=%llu last_unmapped_id=%u index=logical_cpu_number per_cpu=e/denied/timer/wfe/wfi_path/no_wfi/exit",
         __atomic_load_n(&hakios_p12_wfi_probe_enable, __ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&hakios_p12_idle_unmapped, __ATOMIC_RELAXED),
         __atomic_load_n(&hakios_p12_idle_last_unknown, __ATOMIC_RELAXED));

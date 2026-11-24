@@ -11,7 +11,7 @@ param(
  [ValidateRange(50,600)][int]$IdleWindowSeconds=120,
  [ValidateRange(10,100)][int]$OffStableSeconds=25,
  [switch]$MicroGesture,[switch]$IncludeIdle,[switch]$WfiProbe,[switch]$WakeCheck,
- [switch]$P123,[switch]$AdaptiveFloor,[switch]$ClockCrossover,[switch]$IdleOnly,
+ [switch]$P123,[switch]$AdaptiveFloor,[switch]$ClockCrossover,[switch]$IdleOnly,[switch]$HashCrossover,
  [switch]$Execute,[switch]$LibraryOnly
 )
 Set-StrictMode -Version 2
@@ -40,16 +40,27 @@ $script:P123ExpectedInput=-1L
 $script:P123AutoPhase=''
 $script:P123AutoRearmed=$false
 $script:P123AutoAborted=$false
+$script:P123RearmUp=-1
+$script:P123StartAt=[datetime]::MinValue
+$script:P123HashDirty=$false
+$script:P123HashApplied=-1
+$script:P123HashFallback=$false
+$script:P123HashWindows=0
+$script:P123TouchDown=[datetime]::MinValue
+$script:P123TouchUp=[datetime]::MinValue
+$script:P123TouchCount=0
 $script:P123FloorRows=New-Object 'System.Collections.Generic.List[string]'
 $script:P123FloorBaseline=$null
-if(($AdaptiveFloor -or $ClockCrossover -or $IdleOnly) -and -not $P123){throw 'P12.3 options require -P123'}
-if(@(@($AdaptiveFloor,$ClockCrossover,$IdleOnly) | Where-Object {$_}).Count -gt 1){throw 'Choose ONE of -AdaptiveFloor, -ClockCrossover or -IdleOnly'}
-if(($AdaptiveFloor -or $ClockCrossover -or $IdleOnly) -and $MicroGesture){throw 'Keep gesture separate from floor, Clock and idle tests'}
+if(($AdaptiveFloor -or $ClockCrossover -or $IdleOnly -or $HashCrossover) -and -not $P123){throw 'P12.3 options require -P123'}
+if(@(@($AdaptiveFloor,$ClockCrossover,$IdleOnly,$HashCrossover) | Where-Object {$_}).Count -gt 1){throw 'Choose ONE of -AdaptiveFloor, -ClockCrossover, -HashCrossover or -IdleOnly'}
+if(($AdaptiveFloor -or $ClockCrossover -or $IdleOnly -or $HashCrossover) -and $MicroGesture){throw 'Keep gesture separate from floor, Clock and idle tests'}
 if($WakeCheck -and -not ($IncludeIdle -or $IdleOnly)){throw '-WakeCheck requires an idle scenario'}
-if(($AdaptiveFloor -or $ClockCrossover) -and ($IncludeIdle -or $WfiProbe)){throw 'Run floor/Clock A/B independently of WFI/idle measurements'}
+if(($AdaptiveFloor -or $ClockCrossover -or $HashCrossover) -and ($IncludeIdle -or $WfiProbe)){throw 'Run floor/Clock A/B independently of WFI/idle measurements'}
 $script:P122CurrentMode=0
 $script:P122Await=-1
 $script:P122Ack=$false
+$script:P123Control0=$false
+$script:P123DeferredMode0=$false
 $script:P122HiOverlap=$false
 $script:P122GlWindows=New-Object 'System.Collections.Generic.List[object]'
 $script:P122Phases=New-Object 'System.Collections.Generic.List[object]'
@@ -59,7 +70,7 @@ $script:LifeLineObserver={
  param([string]$Line,[datetime]$At)
  if($script:P122PreviousObserver){& $script:P122PreviousObserver $Line $At}
  if($script:P123HostEnabled -and $script:LifeSynced){
-    if($Line -match '^p123-(clock-class|clock-images|clock-window|ca-window|gl-window|gl):|^hakios-gl-(path|cost-top|g21):'){
+    if($Line -match '^p123-(clock-class|clock-images|clock-window|ca-window|gl-window|gl):|^p1231-(clock-meta|clock-view|hash|floor|control):|^hakios-gl-(path|cost-top|g21|p0):|^ufs: (nufs: summary|native: speed)|^cpufreq_gov: (stat|state ms)'){
         $script:P123SourceLines.Add(('{0:HH:mm:ss.fff}Z {1} {2}' -f $At,$script:P12Phase,$Line))
     }
     if($Line -match '^p123-gl-window: .*native_skipped=0 '){$script:P123GlAt=$At}
@@ -68,9 +79,21 @@ $script:LifeLineObserver={
         $script:P123ClockInput=[long]$Matches[1]
         $script:P123ClockAt=$At
     }
+    if($Line -match '^p1231-control: requested=0 observed=1 ' -and $script:P122Await -eq 0){$script:P123Control0=$true}
+    if($Line -match '^p1231-hash: applied=([012]) '){$script:P123HashApplied=[int]$Matches[1]}
+    if($Line -match '^p1231-hash: window mode=([12]) fallback=([01])'){
+        if([int]$Matches[1] -eq $script:P123HashApplied){$script:P123HashWindows++}
+        if($Matches[2] -eq '1'){$script:P123HashFallback=$true}
+    }
+    if($Line -match '\[TouchEvents\] contact \d+ presence: (touching|none)'){
+        if($Matches[1] -eq 'touching'){$script:P123TouchDown=$At;$script:P123TouchCount++}
+        else{$script:P123TouchUp=$At}
+        $script:P123SourceLines.Add(('{0:HH:mm:ss.fff}Z TOUCH {1}' -f $At,$Line))
+    }
     if($Line -match '^hi: auto=(REARM|baseline|cut1|recover1|cut2|recover2|FINISHED|ABORT)(?: |$)'){
         $phase=$Matches[1]
-        if($phase -eq 'REARM'){$script:P123AutoRearmed=$true}
+        if($phase -eq 'REARM'){$script:P123AutoRearmed=$true;if($Line -match 'up=(\d+)s'){$script:P123RearmUp=[int]$Matches[1]}}
+        if($phase -eq 'baseline' -and $script:P123AutoRearmed){$script:P123StartAt=$At}
         if($script:P123AutoRearmed){
             if($phase -eq 'ABORT'){$script:P123AutoAborted=$true}
             $script:P123AutoPhase=$phase
@@ -108,7 +131,10 @@ function P122-Switch([int]$Mode,[switch]$FirstMinimal){
  $script:P12Phase="SWITCH_$Mode"
  $script:P122Await=$Mode
  $script:P122Ack=$false
+ $script:P123Control0=$false
  if($Mode -ne 0){$script:P122ModeDirty=$true}
+ $idleBefore=$null
+ if($Mode -eq 0 -and $P123 -and $MicroGesture){$idleBefore=P123-FloorSnapshot 'MODE0_REQUEST'}
  [void](P12-Query 'p122_diag_mode' "$Mode")
  $script:P122CurrentMode=$Mode
  if($FirstMinimal -and $Mode -eq 0){return}
@@ -121,13 +147,22 @@ function P122-Switch([int]$Mode,[switch]$FirstMinimal){
     if($script:P123Strict){P123-Guard}
  }
  if(-not $script:P122Ack){
-    throw "P12.2 kernel mode $Mode acknowledged but backboardd has NO mode ACK within 15 seconds; wrong SYSTEM or missing p122=1, refuse comparison"
+    if($null -ne $idleBefore -and $script:P123Control0){
+        $idleAfter=P123-FloorSnapshot 'MODE0_DEFERRED_CHECK'
+        if((P122-CountField $idleBefore 'presents') -eq (P122-CountField $idleAfter 'presents')){
+            $script:P123DeferredMode0=$true
+            Life-Say 'P12.3.1 MODE0_REQUESTED_RENDER_IDLE: kernel0 ACK, userland request observed, no new presents. Apply pending next frame, NOT applied ACK.'
+            $script:P123SourceLines.Add('MODE0_REQUESTED_RENDER_IDLE: control ACK + no new presents, not applied ACK')
+            return
+        }
+    }
+    throw "P12.2 kernel mode $Mode accepted; no fresh userland applied ACK in 15s; comparison invalid (render idle/stall or mismatched SYSTEM)"
  }
  if($Mode -eq 0){$script:P122ModeDirty=$false}
 }
 function P122-Snapshot([string]$Label){
  $s=P12-Query 'p122_gpu_stats'
- if($s -notmatch '^version=2 mode=[012] '){throw 'Wrong P12.2 kernel, missing GPU histogram'}
+ if($s -notmatch '^version=[23] mode=[012] '){throw 'Wrong P12.2 kernel, missing GPU histogram'}
  $script:P122GpuSnapshots.Add("$Label $s")
  return $s
 }
@@ -139,9 +174,10 @@ function P122-CountField([string]$Text,[string]$Name){
 }
 function P122-Deltas([string]$Before,[string]$After){
  $result=@{}
- foreach($key in @('windows','busy_ns','elapsed_ns','frames','forced',
-   'level260_ns','level455_ns','level598_ns','other_ns',
-   'jobs','queue_us','run_us')){
+ $fields=@('windows','busy_ns','elapsed_ns','frames','forced','level260_ns','level455_ns','level598_ns','other_ns','jobs','queue_us','run_us')
+ if($Before -match '^version=3 ' -and $After -match '^version=3 '){$fields+='level572_ns'}
+ elseif(($Before -match '^version=3 ') -ne ($After -match '^version=3 ')){throw 'GPU schema changed mid-phase'}
+ foreach($key in $fields){
     $a=P122-CountField $Before $key
     $b=P122-CountField $After $key
     if($b -lt $a){throw "P12.2 GPU counter $key went backwards across one phase; reset/overflow invalid"}
@@ -196,7 +232,7 @@ function P122-Report([string]$Stem,[string]$Stop){
  foreach($w in $script:P122GlWindows){
     $lines.Add("GL phase=$($w.Phase) mode=$($w.Mode) n=$($w.Frames) mean_us=$($w.MeanUs) max_us=$($w.MaxUs) p50bin=$($w.P50Bin) p95bin=$($w.P95Bin) p99bin=$($w.P99Bin) cpu_n=$($w.CpuSamples) cpu_us=$($w.CpuUs) matched_wall_us=$($w.SampleWallUs) draws=$($w.Draws) uploads=$($w.Uploads) calls=$($w.Calls)")
  }
- $lines.Add('GPU CUMULATIVE SNAPSHOTS (compute deltas; do not misread totals as per-window)')
+ $lines.Add('GPU CUMULATIVE SNAPSHOTS (compute deltas; schema2 mislabeled index2=572 as 598; schema3 uses exact MHz)')
  foreach($v in $script:P122GpuSnapshots){$lines.Add($v)}
  $lines.Add('No physical root cause declared without same workload/thermal and instrument overhead controls.')
  $path=$Stem+'.p122-report.txt'
@@ -291,25 +327,97 @@ function P123-FloorProfile([string]$Name,[int]$Mode){
  }
 }
 function P123-ClockTrial {
- $script:P123AutoRearmed=$false;$script:P123AutoAborted=$false;$script:P123AutoPhase=''
+ $script:P123AutoRearmed=$false;$script:P123AutoAborted=$false;$script:P123AutoPhase='';$script:P123StartAt=[datetime]::MinValue;$script:P123RearmUp=-1
  $script:P12HiStopConfirmed=$false
  $script:P12Phase='CLOCK_CROSSOVER'
- [void](P12-Query 'hi_cmd' '252')
- $until=(Life-Now).AddSeconds(140)
- while((Life-Now) -lt $until -and $script:P123AutoPhase -ne 'FINISHED'){
-    Life-Pump
-    P123-Guard
-    if($script:P123AutoAborted){throw 'P12.3 Clock crossover aborted; no retry'}
+ $commandAt=Life-Now
+ $readyUntil=$commandAt.AddSeconds(200)
+ try{
+    [void](P12-Query 'hi_cmd' '252')
+    while($script:P123AutoPhase -ne 'FINISHED'){
+        Life-Pump
+        P123-Guard
+        if($script:P123AutoAborted){throw 'P12.3 Clock crossover aborted; no retry'}
+        $now=Life-Now
+        if($script:P123StartAt -ne [datetime]::MinValue){
+            if($now -ge $script:P123StartAt.AddSeconds(115)){throw 'Clock active phase timeout; incomplete protocol'}
+        }else{
+            if($script:P123RearmUp -ge 0){$readyUntil=$commandAt.AddSeconds([Math]::Min(200,[Math]::Max(20,180-$script:P123RearmUp+25)))}
+            if($now -ge $readyUntil){throw 'Clock readiness timeout; no START'}
+        }
+        if($now -ge $commandAt.AddSeconds(315)){throw 'Clock overall deadline'}
+    }
+    if(-not $script:P123AutoRearmed -or $script:P123StartAt -eq [datetime]::MinValue){throw 'Clock completion without START'}
+ }finally{
+    $script:P12HiGateStopSeen=$false
+    [void](P12-Query 'hi_cmd' '201' -Cleanup)
+    $stopUntil=(Life-Now).AddSeconds(7)
+    while((Life-Now) -lt $stopUntil -and -not $script:P12HiGateStopSeen){Life-Pump}
+    if(-not $script:P12HiGateStopSeen){throw 'Clock STOP userland ACK missing'}
+    $script:P12HiStopConfirmed=$true
  }
- if(-not $script:P123AutoRearmed -or $script:P123AutoPhase -ne 'FINISHED'){
-    throw 'P12.3 Clock crossover incomplete; no causal conclusion'
- }
- P12-QuiesceHI2
  Life-Say 'P12.3 Clock crossover FINISHED with original timer restored'
+}
+function P1231-ValidateIdle([string]$Before,[string]$After){
+    $a=P122-CountField $Before 'unmapped';$b=P122-CountField $After 'unmapped'
+    $rx=' c([0-7]):(\d+)/'
+    $old=@([regex]::Matches($Before,$rx));$new=@([regex]::Matches($After,$rx))
+    if($old.Count -ne 8 -or $new.Count -ne 8 -or $a -ne $b){throw "P12.3.1 WFI mapping invalid: unmapped $a -> $b"}
+    $sum=0L
+    for($i=0;$i -lt 8;$i++){
+        if([int]$old[$i].Groups[1].Value -ne $i -or [int]$new[$i].Groups[1].Value -ne $i){throw 'WFI logical index order invalid'}
+        $delta=[long]$new[$i].Groups[2].Value-[long]$old[$i].Groups[2].Value
+        if($delta -lt 0){throw 'WFI idle counter went backwards'}
+        $sum+=$delta
+    }
+    if($sum -le 0){throw 'WFI probe has no mapped idle entries; invalid measurement'}
+    Life-Say "P12.3.1 WFI_MAPPING_VALID mapped_entry_delta=$sum unmapped_delta=0 (not physical residency)"
+}
+function P1231-MicroTrial {
+    $script:P123TouchCount=0;$script:P123TouchDown=[datetime]::MinValue;$script:P123TouchUp=[datetime]::MinValue
+    $script:P12Phase='MICRO_WAIT_TOUCH'
+    [void](P122-Snapshot 'MICRO_BEFORE_WAIT')
+    Life-Say 'ONE gentle swipe now; waiting for actual touch event (12s maximum)'
+    $until=(Life-Now).AddSeconds(12)
+    while($script:P123TouchCount -eq 0 -and (Life-Now) -lt $until){Life-Pump;P123-Guard}
+    if($script:P123TouchCount -ne 1){throw 'MicroGesture: expected one actual contact'}
+    $script:P12Phase='MICRO_TOUCH'
+    $until=$script:P123TouchDown.AddSeconds(3)
+    while($script:P123TouchUp -lt $script:P123TouchDown -and (Life-Now) -lt $until){Life-Pump;P123-Guard}
+    if($script:P123TouchUp -lt $script:P123TouchDown -or $script:P123TouchCount -ne 1){throw 'MicroGesture: contact release not proven'}
+    Life-Say "MicroGesture actual contact host_ms=$(($script:P123TouchUp-$script:P123TouchDown).TotalMilliseconds); snapshots include serial latency"
+    [void](P122-Snapshot 'MICRO_RELEASE')
+    P12-Observe 'MICRO_RECOVERY' 8 'STOP touching; recovery measured after actual contact release'
+    if($script:P123TouchCount -ne 1){throw 'MicroGesture repeated contact; invalid comparison'}
+    [void](P122-Snapshot 'MICRO_RECOVERY_END')
+}
+function P1231-HashTrial {
+    P122-Switch 2
+    foreach($item in @(@{Name='HASH_A0';Mode=1},@{Name='HASH_B';Mode=2},@{Name='HASH_A1';Mode=1})){
+        $script:P12Phase=$item.Name
+        P123-Guard
+        $script:P123HashApplied=-1;$script:P123HashWindows=0;$script:P123HashFallback=$false
+        $script:P123HashDirty=$true
+        try{
+            [void](P12-Query 'p1231_hash_mode' "$($item.Mode)")
+            $until=(Life-Now).AddSeconds(5)
+            while($script:P123HashApplied -ne $item.Mode -and (Life-Now) -lt $until){Life-Pump;P123-Guard}
+            if($script:P123HashApplied -ne $item.Mode){throw 'Hash trial: no applied ACK'}
+            [void](P122-Snapshot ($item.Name+'_BEGIN'))
+            P12-Observe $item.Name ([Math]::Min($WindowSeconds,20)) 'No touch; reference vs fast same digest, first window may include migration'
+            [void](P122-Snapshot ($item.Name+'_END'))
+            if((P12-Query 'p1231_hash_mode') -ne "$($item.Mode)" -or $script:P123HashApplied -ne $item.Mode -or $script:P123HashWindows -lt 2 -or $script:P123HashFallback){throw 'Hash trial invalid: expired, fallback or insufficient complete windows'}
+            Life-Say "Hash trial $($item.Name) complete windows=$script:P123HashWindows; compare hash bytes/time excluding initial migration"
+        }finally{
+            [void](P12-Query 'p1231_hash_mode' '0' -Cleanup)
+            $script:P123HashDirty=$false
+        }
+    }
+    P122-Switch 0
 }
 function P123-Report([string]$Stem,[string]$Stop){
  $lines=New-Object 'System.Collections.Generic.List[string]'
- $lines.Add("S9 P12.3 SOURCE AND ADAPTIVE FLOOR STOP=$Stop")
+ $lines.Add("S9 P12.3.1 SOURCE AND ADAPTIVE FLOOR STOP=$Stop mode0_deferred=$($script:P123DeferredMode0)")
  $lines.Add('Same mach ticks across processes; windows only, NOT matched frame IDs. Shadow bind candidates do not authorize skipping.')
  $lines.Add('Adaptive trial is 30s max, lower-only frame floor; no GPU voltage, panel or CPU_OFF changes.')
  foreach($r in $script:P123FloorRows){$lines.Add($r)}
@@ -328,7 +436,7 @@ function P122-Run {
     Write-Host 'Optional -IncludeIdle -WfiProbe: manual physical POWER OFF; CPU idle diagnostics.'
     if($P123){
         Write-Host 'P12.3 PREVIEW: matched BOOT+SYSTEM; source timestamps and shadow GL; no automatic suppression.'
-        Write-Host 'Choose separate -AdaptiveFloor (A/B/A, 30s kernel expiry), -ClockCrossover (legacy exact timer, bounded A/B), or -IdleOnly -WfiProbe.'
+        Write-Host 'Choose separate -AdaptiveFloor (A/B/A, 30s kernel expiry), -ClockCrossover, -HashCrossover (reference/fast/reference), or -IdleOnly -WfiProbe.'
         Write-Host 'Without those options, collect P12.3 profile data. -MicroGesture is a separate ONE-swipe scenario; optional -WakeCheck only with idle.'
     }
     return
@@ -361,7 +469,13 @@ function P122-Run {
     if($old -notin @('0','1','2')){throw 'P12.2 mode value invalid'}
     $script:P122ModeDirty=$true
     [void](P12-Query 'p122_diag_mode' '0' -Cleanup)
-    [void](P122-Snapshot 'PREFLIGHT')
+    $schema=P122-Snapshot 'PREFLIGHT'
+    if($P123){
+        if($schema -notmatch '^version=3 '){throw 'P12.3.1 matched kernel required: GPU schema3 missing'}
+        $hash=P12-Query 'p1231_hash_mode'
+        if($hash -ne '0'){$script:P123HashDirty=$true;[void](P12-Query 'p1231_hash_mode' '0' -Cleanup);$script:P123HashDirty=$false}
+        [void](P12-Query 'p1231_ufs_stats')
+    }
     P12-CoolStart 12
     P12-QuiesceHI2
     if($P123){
@@ -384,6 +498,8 @@ function P122-Run {
         P123-FloorProfile 'FLOOR_A1' 0
     }elseif($ClockCrossover){
         P123-ClockTrial
+    }elseif($HashCrossover){
+        P1231-HashTrial
     }elseif(-not $IdleOnly -and -not ($P123 -and $MicroGesture)){
         P122-Profile 0 'ROOT_MIN_A'
         P122-Profile 1 'ROOT_STAGE'
@@ -395,9 +511,10 @@ function P122-Run {
         P12-CoolStart 12
         P12-EarlyThermalGuard
         P122-Switch 2
-        P12-Observe 'MICRO_TOUCH' 4 'ONE gentle swipe; no repeated gestures'
-        [void](P122-Snapshot 'MICRO_TOUCH_END')
-        if($P123){P12-Observe 'MICRO_RECOVERY' 8 'STOP touching; observe recovery and possible fault'}
+        if($P123){P1231-MicroTrial}else{
+            P12-Observe 'MICRO_TOUCH' 4 'ONE gentle swipe; no repeated gestures'
+            [void](P122-Snapshot 'MICRO_TOUCH_END')
+        }
         P122-Switch 0
     }
     $script:P123Strict=$false
@@ -406,10 +523,11 @@ function P122-Run {
             [void](P12-Query 'p12_wfi_probe' '1')
             if($P123){
                 [void](P12-Query 'p12_wfi_stats')
-                [void](P12-Query 'p12_idle_diag')
+                $idleBefore=P12-Query 'p12_idle_diag'
                 P12-Observe 'WFI_ON' 12 'No touch; compare measured WFI before physical screen OFF'
                 [void](P12-Query 'p12_wfi_stats')
-                [void](P12-Query 'p12_idle_diag')
+                $idleOn=P12-Query 'p12_idle_diag'
+                P1231-ValidateIdle $idleBefore $idleOn
             }
         }
         if($P123){
@@ -418,19 +536,23 @@ function P122-Run {
             $script:P12GpuWakeBaseline=P122-CountField $baseline 'wake_count'
         }
         P12-ObserveIdle
-        if($WfiProbe){[void](P12-Query 'p12_wfi_stats');[void](P12-Query 'p12_idle_diag')}
+        if($WfiProbe){[void](P12-Query 'p12_wfi_stats');$idleEnd=P12-Query 'p12_idle_diag';if($P123){P1231-ValidateIdle $idleOn $idleEnd}}
         [void](P12-Query 'g3d_lab_stats')
     }
+    if($P123){[void](P12-Query 'p1231_ufs_stats')}
     if($P123 -and -not $IdleOnly -and -not $MicroGesture -and
         ($script:P123GlAt -eq [datetime]::MinValue -or $script:P123CaAt -eq [datetime]::MinValue)){
         throw 'P12.3 paired backboardd CA/GL evidence missing or native-bind skip was active; comparison invalid'
     }
-    Life-Say 'P12.2 acquisition complete; all diagnostics restored to minimal'
+    Life-Say 'P12.3.1 acquisition complete; kernel restore requested; any deferred render ACK explicitly reported'
  }catch{
     $errorText=$_.Exception.Message
     Life-Say ('P12.2 STOPPED '+$errorText)
  }finally{
     if($script:P12PreflightVerified -and $null -ne $script:LifeSerial -and $script:LifeSerial.IsOpen){
+        if($script:P123HashDirty){
+            try{[void](P12-Query 'p1231_hash_mode' '0' -Cleanup);$script:P123HashDirty=$false}catch{Life-Say ('Hash restore UNSURE; 30s deadline '+$_.Exception.Message)}
+        }
         if($script:P123FloorDirty){
             try{[void](P12-Query 'p123_floor_mode' '0' -Cleanup);$script:P123FloorDirty=$false;Life-Say 'P12.3 floor RESTORE0 ACK'}
             catch{Life-Say ('P12.3 floor restore UNSURE; kernel deadline <=30s '+$_.Exception.Message)}
@@ -445,7 +567,7 @@ function P122-Run {
         if($script:P12WfiDirty){
             try{[void](P12-Query 'p12_wfi_probe' '0' -Cleanup)}catch{Life-Say ('WFI restore UNSURE '+$_.Exception.Message)}
         }
-        if($script:P12HiDirty){
+        if($script:P12HiDirty -and (-not $ClockCrossover -or $script:P12HiStopConfirmed)){
             try{[void](P12-Query 'hi_cmd' '0' -Cleanup)}catch{Life-Say ('HI2 mailbox restore UNSURE '+$_.Exception.Message)}
         }
     }

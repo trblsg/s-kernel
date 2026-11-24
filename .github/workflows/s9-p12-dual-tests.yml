@@ -1,7 +1,7 @@
 name: S9 P12 thermal efficiency and deep-idle observability
 on:
   push:
-    branches: [s9/p12-thermal-deep-idle, s9/p12-3-source-attribution]
+    branches: [s9/p12-thermal-deep-idle, s9/p12-3-source-attribution, s9/p12-3-1-thermal-attribution]
   workflow_dispatch:
 permissions:
   contents: read
@@ -55,6 +55,14 @@ jobs:
           assert 'p122-gl: mode=%d ack=kernel_sysctl' in eagl
           assert 'p122-gl-window:' in eagl and 'p122_thread_cpu_us' in eagl
           assert 'p122_completed_window' in eagl
+          assert xnu.count('(unsigned)cpu_data_ptr->cpu_number; /* cpu_id is an opaque PE object') == 2
+          assert 's9_p1231_rates_valid' in mali and 'level572_ns=' in mali
+          assert 'p1231_hash_mode_sysctl' in mali and 'p1231_hash4_sum' in eagl
+          assert 'p1231_control_worker' in eagl and 'applied_unknown=1' in eagl
+          assert 'p1231-clock-meta:' in s('userland/src/s9_hi_clock_resolve.inc')
+          assert 'p1231-clock-view:' in s('userland/src/s9_hi_clock_resolve.inc')
+          assert 'p1231_ufs_stats_sysctl' in s('drivers/storage/ufs/hakios.ufs.c')
+          assert 'GpuLabOffCount' in life
           assert 'p123_floor_mode_sysctl' in mali and 'p123_floor_stats_sysctl' in mali
           assert 's9_p123_floor_eligible' in mali and '30ull*NSEC_PER_SEC' in mali
           assert 'hakios_p123_input_quiet' in cpu and 'p123_floor_until,0' in mali
@@ -101,6 +109,7 @@ jobs:
             'tools/tests/test-s9-p12-dual-serial.ps1',
             'tools/tests/test-s9-p122-rootcause-serial.ps1',
             'tools/tests/test-s9-p123-source-serial.ps1',
+            'tools/tests/test-s9-p1231-thermal-serial.ps1',
             'tools/tests/test-s9-p11-lifecycle-serial.ps1',
             'tools/tests/test-s9-p10-lockscreen-source.ps1',
             'tools/tests/test-s9-p10-serial-harness.ps1',

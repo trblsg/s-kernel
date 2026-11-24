@@ -254,6 +254,7 @@ struct image {
 	bool painted;                   /* something has been drawn into it (it is a target in fact, not only in name) */
 	unsigned looked;                /* ... the frame in which that memory was last looked at, */
 	uint64_t sum;                   /* ... and what it added up to */
+	bool p1231_hash4_sum;           /* digest scheme; change forces conservative refresh */
 	unsigned unchanged;             /* ... and how many looks in a row found it the same (surface_changed()) */
 	GLenum to, internal, format, type;
 	uint32_t plane, seed;
@@ -354,6 +355,8 @@ struct eagl {
 	uint64_t p123_first_ticks;
 	bool p122_cpu_sample_valid;
 	unsigned p122_mode_seen;
+	unsigned p1231_hash_mode;
+	uint64_t p1231_poll_us;
 	struct s9_p66_bucket p66;            /* P6.6 60-frame target/damage evidence */
 	uint32_t p66_group_phase,p66_last_mode;
 	uint64_t p66_last_frame_end_us;
@@ -1077,7 +1080,8 @@ surface_changed(struct eagl *e, struct image *image)
 	    (size_t)image->width * bytes_a_pixel(image->format, image->type);
 	const uint8_t *base = IOSurfaceGetBaseAddress(surface);
 	uint64_t sum = size, word;
-	bool p0_force_dirty = false;
+	bool hash4=p0hash_on || e->p1231_hash_mode!=0;
+	bool p0_force_dirty = image->p1231_hash4_sum!=hash4;
 
 	if (image->looked == e->frames + 1 || base == NULL || IOSurfaceGetPlaneCount(surface) > 0) {
 		if (__atomic_load_n(&p611_mode_cached,__ATOMIC_RELAXED))
@@ -1085,34 +1089,35 @@ surface_changed(struct eagl *e, struct image *image)
 		if (__atomic_load_n(&p4_mode_cached, __ATOMIC_RELAXED) ||
 		    __atomic_load_n(&p5_mode_cached,__ATOMIC_RELAXED) ||
 		    __atomic_load_n(&p66_mode_cached,__ATOMIC_RELAXED)) e->p4_skipped++; /* not proof of unchanged content */
-		if (glhash_on) e->diag.hash_not_checked++;
+		if (glhash_on || e->p122_mode_seen==3) e->diag.hash_not_checked++;
 		return false;
 	}
-	if (still_seldom && image->unchanged >= STILL_LOOKS && (e->frames + IOSurfaceGetID(surface)) % STILL_EVERY != 0) {
+	if (!p0_force_dirty && still_seldom && image->unchanged >= STILL_LOOKS && (e->frames + IOSurfaceGetID(surface)) % STILL_EVERY != 0) {
 		if (__atomic_load_n(&p611_mode_cached,__ATOMIC_RELAXED))
 			s9_p611_skip(&e->p611,4);
 		if (__atomic_load_n(&p4_mode_cached, __ATOMIC_RELAXED) ||
 		    __atomic_load_n(&p5_mode_cached,__ATOMIC_RELAXED) ||
 		    __atomic_load_n(&p66_mode_cached,__ATOMIC_RELAXED)) e->p4_skipped++; /* sampling alias explicitly recorded */
-		if (glhash_on) e->diag.hash_not_checked++;
+		if (glhash_on || e->p122_mode_seen==3) e->diag.hash_not_checked++;
 		return false;
 	}
 	image->looked = e->frames + 1;
-	bool hash_sample = glhash_on && s9_gl_diag_sample16(&e->diag.hash_serial);
+	bool hash_sample = (glhash_on || e->p122_mode_seen==3) &&
+	    (e->p122_mode_seen==3?s9_gl_diag_sample16_rotating(&e->diag.hash_serial):s9_gl_diag_sample16(&e->diag.hash_serial));
 	bool p611_sample = __atomic_load_n(&p611_mode_cached,__ATOMIC_RELAXED) &&
 	    s9_gl_diag_sample16(&e->p611_hash_serial);
 	uint64_t hash_began = (hash_sample || p611_sample) ? now_us() : 0;
-	if (p0hash_on) {
+	if (hash4) {
 		/* Both fast and fallback reference use the same digest for the full
 		 * byte range. Switching after a CPU verification failure does not
 		 * invalidate image->sum or hide subsequent dirty IOSurfaces. */
-		if (__atomic_load_n(&p0hash_disabled, __ATOMIC_RELAXED)) {
+		if (e->p1231_hash_mode==1 || __atomic_load_n(&p0hash_disabled, __ATOMIC_RELAXED)) {
 			sum=s9_ioshash4_reference(base,size);
 			e->p0_scalar++;
 		} else {
 			sum=s9_ioshash4_fast(base,size);
 			e->p0_hashes++;
-			if (p0verify_on && (++e->p0_serial % 128u)==1u) {
+			if ((p0verify_on || e->p1231_hash_mode==2) && (++e->p0_serial % 128u)==1u) {
 				const uint64_t scalar=s9_ioshash4_reference(base,size);
 				e->p0_verified++;
 				if (sum != scalar) {
@@ -1145,7 +1150,7 @@ surface_changed(struct eagl *e, struct image *image)
 		e->diag.hash_samples++;
 		e->diag.hash_us += elapsed_hash_us;
 		e->diag.hash_bytes += size;
-		if (sum == image->sum) e->diag.hash_same++;
+		if (sum == image->sum && !p0_force_dirty) e->diag.hash_same++;
 		else e->diag.hash_changed++;
 	}
 	if (__atomic_load_n(&p4_mode_cached, __ATOMIC_RELAXED) ||
@@ -1161,6 +1166,7 @@ surface_changed(struct eagl *e, struct image *image)
 		return false;
 	}
 	image->sum = sum;
+	image->p1231_hash4_sum=hash4;
 	image->unchanged = 0;
 	return true;
 }
@@ -1617,6 +1623,45 @@ prof_main(__unused void *argument)
 	return NULL;
 }
 
+/* P12.3.1 control-plane observer only while a diagnostic profile has
+ * actually been applied. Never touch a GL context from this worker.
+ * Stop on requested mode0, failed read or 180s cap; default mode0
+ * has no persistent timer/wakeups. Rendering applies the mode itself. */
+static unsigned p1231_control_running;
+static void *
+p1231_control_worker(void *unused)
+{
+    (void)unused;
+    int previous=-1;
+    for(unsigned i=0;i<360;i++){
+        int mode=-1;
+        size_t size=sizeof(mode);
+        if(sysctlbyname("kern.hakios.p122_diag_mode",&mode,&size,NULL,0)!=0 ||
+            size!=sizeof(mode) || mode<0 || mode>2)break;
+        if(mode!=previous){
+            say("p1231-control: requested=%d observed=1 applied_unknown=1\n",mode);
+            previous=mode;
+        }
+        if(mode==0)break;
+        usleep(500000);
+    }
+    __atomic_store_n(&p1231_control_running,0,__ATOMIC_RELEASE);
+    return NULL;
+}
+static void
+p1231_control_start(void)
+{
+    const char *name=getprogname();
+    if(!name || strcmp(name,"backboardd"))return;
+    unsigned expected=0;
+    if(!__atomic_compare_exchange_n(&p1231_control_running,&expected,1,false,
+        __ATOMIC_ACQ_REL,__ATOMIC_RELAXED))return;
+    pthread_t worker;
+    if(pthread_create(&worker,NULL,p1231_control_worker,NULL)==0)
+        pthread_detach(worker);
+    else
+        __atomic_store_n(&p1231_control_running,0,__ATOMIC_RELEASE);
+}
 /* Before the first drawing of a frame: the textures whose IOSurfaces somebody has written to since. */
 static void
 frame_begin(struct eagl *e)
@@ -1629,12 +1674,32 @@ frame_begin(struct eagl *e)
 	}
 	e->in_frame = true;
 	e->began = now_us();
-	if(p122_enabled && (e->frames%16u)==0u){
-		int value=-1;
+	/* A render-idle process need not manufacture frames to ACK a request.
+	 * Poll immediately on the first resumed frame and at most 250ms apart
+	 * while active; only the render thread mutates its own context. */
+	if(p122_enabled && (!e->p1231_poll_us || e->began-e->p1231_poll_us>=250000 ||
+	    (e->frames%16u)==0u)){
+		e->p1231_poll_us=e->began;
+		int hashmode=0;
+		size_t hsize=sizeof(hashmode);
+		if(sysctlbyname("kern.hakios.p1231_hash_mode",&hashmode,&hsize,NULL,0)!=0 ||
+		    hsize!=sizeof(hashmode) || hashmode<0 || hashmode>2)hashmode=0;
+		if(e->p1231_hash_mode!=(unsigned)hashmode){
+			e->p1231_hash_mode=(unsigned)hashmode;
+			s9_p122_frame_reset(&e->p122_window);
+			s9_gl_diag_reset_window(&e->diag);
+			s9_gl_stage_reset(&e->glstage);
+			s9_gl_cost_reset(&e->glcost);
+			s9_g2_reset_counters(&e->g2);
+			e->p0_hashes=e->p0_scalar=e->p0_verified=e->p0_mismatch=0;
+			say("p1231-hash: applied=%d context=%p\n",hashmode,(void*)e);
+		}
+		int value=0;
 		size_t size=sizeof(value);
-		if(sysctlbyname("kern.hakios.p122_diag_mode",&value,&size,NULL,0)==0 &&
-		   size==sizeof(value) && value>=0 && value<=2 &&
-		   e->p122_mode_seen!=(unsigned)(value+1)){
+		bool mode_ok=sysctlbyname("kern.hakios.p122_diag_mode",&value,&size,NULL,0)==0 &&
+		    size==sizeof(value) && value>=0 && value<=2;
+		if(!mode_ok)value=0; /* fail minimal; never claim an ACK on a read error */
+		if(e->p122_mode_seen!=(unsigned)(value+1)){
 			e->p122_mode_seen=(unsigned)(value+1);
 			glstage_on=value>=1;
 			glcost_on=value>=2;
@@ -1643,7 +1708,9 @@ frame_begin(struct eagl *e)
 			s9_p122_frame_reset(&e->p122_window);
 			s9_gl_diag_reset_window(&e->diag);
 			s9_g2_reset_counters(&e->g2);
-			say("p122-gl: mode=%d ack=kernel_sysctl mode0=minimal mode1=stage mode2=GL_slots cpu_clock=thread_sampled_rotating_1in16 effects=none\n",value);
+			if(mode_ok)say("p122-gl: mode=%d ack=kernel_sysctl mode0=minimal mode1=stage mode2=GL_slots cpu_clock=thread_sampled_rotating_1in16 effects=none\n",value);
+			if(!mode_ok){say("p1231-control: read_failed fallback_minimal=1\n");e->p122_mode_seen=0;}
+			if(value>0)p1231_control_start();
 		}
 	}
 	e->p122_cpu_sample_valid=false;
@@ -2272,11 +2339,12 @@ frame_end(struct eagl *e, bool finished, enum s9_p4_end_reason end_reason)
 		    e->g2.other_target_or_unit);
 	}
 	if (g2_track_on && (p122_enabled ? p122_completed_window : e->frames % 60 == 0)) s9_g2_reset_counters(&e->g2);
-	if (p0hash_on && e->frames % 60 == 0) {
+	if ((p0hash_on && e->frames % 60 == 0) || (e->p1231_hash_mode && p122_completed_window)) {
 		say("hakios-gl-p0: up=%llu.%03llus frames=%u..%u fast=%u scalar=%u verified=%u mismatch=%u fallback=%d\n",
 		    after/1000000,(after/1000)%1000,e->frames-59,e->frames,
 		    e->p0_hashes,e->p0_scalar,e->p0_verified,e->p0_mismatch,
 		    __atomic_load_n(&p0hash_disabled,__ATOMIC_RELAXED));
+		if(e->p1231_hash_mode)say("p1231-hash: window mode=%u fallback=%d context=%p frames_end=%u\n",e->p1231_hash_mode,__atomic_load_n(&p0hash_disabled,__ATOMIC_RELAXED),(void*)e,e->frames);
 		e->p0_hashes=e->p0_scalar=e->p0_verified=e->p0_mismatch=0;
 	}
 	if (glpath_on || e->p122_mode_seen==3 || __atomic_load_n(&p67_mode_cached,__ATOMIC_RELAXED)) e->diag.flush_raw_us += e->flushing; /* already-timed real glFlush, no extra GPU calls */
@@ -2408,7 +2476,8 @@ my_glBindTexture(void *context, GLenum target, GLuint texture)
 	struct image *image;
 
 	EAGL_ENTER(e, 0x30);
-	bool path_sample = (glpath_on || e->p122_mode_seen==3 || __atomic_load_n(&p67_mode_cached,__ATOMIC_RELAXED)) && s9_gl_diag_sample16(&e->diag.bind_serial);
+	bool path_sample = (glpath_on || e->p122_mode_seen==3 || __atomic_load_n(&p67_mode_cached,__ATOMIC_RELAXED)) &&
+	    (e->p122_mode_seen==3?s9_gl_diag_sample16_rotating(&e->diag.bind_serial):s9_gl_diag_sample16(&e->diag.bind_serial));
 	if (path_sample) e->diag.bind_samples++;
 	if (eagl_tracing) {
 		eagl_trace("glBindTexture(%#x, %u)\n", target, texture);
@@ -4415,7 +4484,8 @@ my_glDrawElements(void *context, GLenum mode, GLsizei count, GLenum type, const 
 	bool plain;
 
 	EAGL_ENTER(e, 0x220);
-	bool draw_sample = (glpath_on || e->p122_mode_seen==3 || __atomic_load_n(&p67_mode_cached,__ATOMIC_RELAXED)) && s9_gl_diag_sample16(&e->diag.draw_serial);
+	bool draw_sample = (glpath_on || e->p122_mode_seen==3 || __atomic_load_n(&p67_mode_cached,__ATOMIC_RELAXED)) &&
+	    (e->p122_mode_seen==3?s9_gl_diag_sample16_rotating(&e->diag.draw_serial):s9_gl_diag_sample16(&e->diag.draw_serial));
 	uint64_t draw_began = draw_sample ? now_us() : 0, draw_native = 0;
 	drawing(e);
 	count_spans(e, mode, count);

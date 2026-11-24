@@ -11,8 +11,9 @@
  * collision-free change detection. The old hash was probabilistic too
  * and skipped a trailing 1..7 bytes; P0 covers those trailing bytes.
  *
- * The hash selection must be fixed at process startup: both the
- * stored per-surface sum and subsequent reads use the same algorithm.
+ * The digest scheme must match the stored per-surface sum. P12.3.1
+ * explicitly tags the scheme and forces refresh on migration; the scalar
+ * and fast 4-lane implementations remain byte-for-byte equivalent.
  */
 #ifndef S9_IOSHASH4_H
 #define S9_IOSHASH4_H

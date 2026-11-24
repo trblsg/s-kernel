@@ -19,6 +19,18 @@ static inline unsigned s9_p122_bucket_us(uint64_t us) {
 /* P12.3: pure lower-only frame-floor experiment, fail open.
  * Times are monotonic milliseconds; all validity proofs must be current.
  * Never lower the load governor's own requested frequency or thermal cap. */
+/* Exact hardware rate layouts, not a count-only guess. */
+static inline int s9_p1231_rates_valid(unsigned n, unsigned a, unsigned b,
+    unsigned c, unsigned d)
+{
+    return (n==3 || n==4) && a==260 && b==455 && c==572 &&
+        (n==3 || d==598);
+}
+static inline unsigned s9_p1231_rate_bucket(unsigned mhz)
+{
+    switch(mhz) { case 260:return 0; case 455:return 1;
+        case 572:return 2; case 598:return 3; default:return 4; }
+}
 static inline int s9_p123_trial_active(uint64_t now,uint64_t until) {
     return until != 0 && now < until;
 }

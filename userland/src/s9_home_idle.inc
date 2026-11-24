@@ -336,6 +336,7 @@ hi_sample(void)
     __atomic_store_n(&hi_animations_absent,animations==0 && budget!=0,__ATOMIC_RELEASE);
     static unsigned tick;
     if(++tick%5!=0)return;
+    if(hi_p123_enabled && tick%20==0)hi_clock_view_observe(windows,count,home);
     uint64_t now=hi_time_us(),deadline=__atomic_load_n(&hi_gate_deadline,__ATOMIC_ACQUIRE);
     unsigned gate=__atomic_load_n(&hi_gate_group,__ATOMIC_ACQUIRE);
     if(gate && now>=deadline){

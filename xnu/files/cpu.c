@@ -515,7 +515,7 @@ cpu_idle(void)
 	uint64_t        new_idle_timeout_ticks = 0x0ULL, lastPop;
 	bool idle_disallowed = false;
 	const bool p12_probe = __atomic_load_n(&hakios_p12_wfi_probe_enable, __ATOMIC_RELAXED) != 0;
-	const unsigned p12_id = (unsigned)cpu_data_ptr->cpu_id;
+	const unsigned p12_id = (unsigned)cpu_data_ptr->cpu_number; /* cpu_id is an opaque PE object, not an index */
 	if (p12_probe) {
 		if (p12_id < 8)
 			__atomic_fetch_add(&hakios_p12_idle_enter[p12_id], 1, __ATOMIC_RELAXED);
@@ -699,7 +699,7 @@ cpu_idle_exit(boolean_t from_reset)
 {
 	uint64_t        new_idle_timeout_ticks = 0x0ULL;
 	cpu_data_t     *cpu_data_ptr = getCpuDatap();
-	unsigned p12_id = (unsigned)cpu_data_ptr->cpu_id;
+	unsigned p12_id = (unsigned)cpu_data_ptr->cpu_number; /* cpu_id is an opaque PE object, not an index */
 	if (p12_id < 8 && __atomic_load_n(&hakios_p12_wfi_probe_enable, __ATOMIC_RELAXED))
 		__atomic_fetch_add(&hakios_p12_idle_exit_count[p12_id], 1, __ATOMIC_RELAXED);
 

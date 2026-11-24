@@ -19,6 +19,12 @@ static inline int s9_gl_diag_sample16(uint64_t *serial) {
     if(!serial) return 0;
     return (++*serial & 15u)==0;
 }
+/* One sample per block of 16, rotating residue over 256 calls. */
+static inline int s9_gl_diag_sample16_rotating(uint64_t *serial) {
+    if(!serial)return 0;
+    uint64_t n=(*serial)++;
+    return (n&15u)==((n>>4)&15u);
+}
 static inline void s9_gl_diag_reset_window(struct s9_gl_diag *s) {
     if(!s)return;
     const uint64_t b=s->bind_serial,h=s->hash_serial,d=s->draw_serial;
