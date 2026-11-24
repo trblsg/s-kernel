@@ -821,6 +821,9 @@ CONFIG_GPU=y
 # say where Metal's device is (docs/metal-plan.md, step 1)
 # CONFIG_METAL is not set
 
+# Arm the existing guarded P9 automatic G3D screen-OFF gate after GPU initialization
+# CONFIG_P12_GPU_BOOT_AUTO is not set
+
 # sample read-only G3D PMU and PLL state every five seconds
 # CONFIG_P3POWER is not set
 
