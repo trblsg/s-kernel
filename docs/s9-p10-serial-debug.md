@@ -1,5 +1,14 @@
 # S9 P10 Lock Screen: Windows COM serial A/B debugger
 
+> **Superseded for natural idle (2026-11-24):** This old tool assumes
+> Lock Screen remains illuminated for fixed 16–18-second windows. Real iOS
+> blanks it automatically, and the 03:29 host capture lost an OFF event
+> between preflight and A0. Do **not** use the older A/B report for power
+> attribution or ask the user to repeatedly keep the screen awake. Use
+> [P11 natural screen lifecycle](s9-p11-natural-screen-lifecycle.md) instead.
+> P10 source code remains available for later targeted profiling with
+> valid lock proof; this supersession is host-only and needs no reflash.
+
 This is **not** the original P9 `-P9Fix` physical screen-OFF GPU scenario.
 It is a new P10-only source timer A/B/C analysis, reusing the same tested
 Windows serial transport and its COM echo/ACK/exact-readback checks.

@@ -1,0 +1,50 @@
+name: S9 P11 passive natural screen lifecycle host regression
+on:
+  push:
+    branches: [s9/p11-natural-screen-lifecycle]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  lifecycle-windows:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise P11 natural OFF race and existing P10 P9 P8 power guards
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach($test in @(
+            'tools/tests/test-s9-p11-lifecycle-serial.ps1',
+            'tools/tests/test-s9-p10-serial-harness.ps1',
+            'tools/tests/test-s9-p10-lockscreen-source.ps1',
+            'tools/tests/test-s9-p9-power-fix.ps1',
+            'tools/tests/test-s9-p8-unified.ps1')){
+            $out=Join-Path $env:RUNNER_TEMP ([IO.Path]::GetFileName($test)+'.stdout')
+            $err=Join-Path $env:RUNNER_TEMP ([IO.Path]::GetFileName($test)+'.stderr')
+            $p=Start-Process -FilePath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" `
+              -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$test) `
+              -PassThru -Wait -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
+            $stdout=[IO.File]::ReadAllText($out)
+            $stderr=[IO.File]::ReadAllText($err)
+            Write-Output $stdout
+            if($stderr){Write-Output $stderr}
+            if($p.ExitCode -ne 0){throw "P11 regression failed $test exit=$($p.ExitCode)"}
+          }
+      - name: P11 is source-only passive host diagnostics
+        shell: powershell
+        run: |
+          $p11=Get-Content tools/s9-screen-lifecycle-serial.ps1 -Raw
+          if($p11 -notmatch 'READ-ONLY sysctl kern.hakios.hi_display_requested'){
+            throw 'Missing live read-only fence'
+          }
+          if($p11 -notmatch 'GenericARMPE: the display' -or
+             $p11 -notmatch 'OFF_STABLE' -or
+             $p11 -notmatch 'No synchronized samples'){
+            throw 'Missing lifecycle parser or diagnostic guard'
+          }
+          if($p11 -match 'Send-Checked|button lock|p7_cpu_park=1|p9_panel_mode=1|p9_auto_gpu=0|hi_lock_policy=1|hi_cmd=252'){
+            throw 'P11 must not use active scene/power manipulation'
+          }
+          Write-Output 'P11 passive source safety PASS'
