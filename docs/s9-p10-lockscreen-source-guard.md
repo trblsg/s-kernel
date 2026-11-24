@@ -79,6 +79,16 @@ timer guard. More aggressive poster/frame changes need verified
 damage/animation ownership and a safe first-frame restore, not
 surface identity or GPU texture upload counts alone.
 
+## Automatic Windows COM A/B capture for P10
+
+The old `-P9Fix` script is **not** the P10 Lock Screen callback debugger.
+For the new P10-specific `-P10Lock`, optional `-P10Mode2`, source-level
+A/B counters and the generated `.p10-report.txt`, see
+[`s9-p10-serial-debug.md`](s9-p10-serial-debug.md). This P10
+companion is host-only and can run against the already pinned P10
+BOOT+SYSTEM image with **no rebuild or reflash**. It restores
+`hi_lock_policy=0` and leaves the verified P9.1 power policy unchanged.
+
 ## One paired firmware and runtime A/B, no repeated flash
 
 Build **one matched P10 kernel+SIOS installer**; keep the P9.1

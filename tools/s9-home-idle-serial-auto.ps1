@@ -52,6 +52,10 @@ param(
     [switch]$P8Unified,
     [switch]$P9Fix,
     [switch]$P9Restore,
+    [switch]$P10Lock,
+    [switch]$P10Restore,
+    [switch]$P10Mode2,
+    [ValidateRange(10,90)][int]$P10WindowSeconds=16,
     [switch]$P8LeaveAuditRunning,
     [switch]$DumpP8History,
     [ValidateRange(20,180)][int]$P8WindowSeconds=60,
@@ -115,12 +119,19 @@ $script:Allowed='^(?:sysctl kern\.hakios\.(?:hi_cmd(?:=(?:1|2|3|201|250|252|300|
 $script:Allowed=$script:Allowed.Substring(0,$script:Allowed.Length-2)+
     '|sysctl kern\.hakios\.(?:p8_(?:mode=[012]|flags=\d{1,4}|phase=\d{1,2}|interval_ms=\d{4,5}|slot=\d{1,3}|psci_cpu=[3-6]|big_cap_khz=(?:0|1469000|1586000|1690000)|stats|record|psci_stats|pmu_stats|rail_stats)|p4_(?:mode=[012]|threads=[012]|phase=\d{1,2})|p6_(?:mode=[012]|flags=\d{1,2}|phase=\d{1,2})|p610_mode=[01]|p69_mode=[01]))$'
 $script:P9Allowed='^sysctl kern\.hakios\.(?:p9_auto_gpu=[01]|p9_panel_mode=[01]|p9_panel_stats|p9_touch_off_ms=(?:0|16|32|64)|p9_usb_off_ms=(?:0|4|8)|p9_wake_guard=[01]|hi_policy=2)$'
+# P10 only sets the source-level lockscreen timer knob; NEVER panel/GPU.
+$script:P10Allowed='^sysctl kern\.hakios\.(?:hi_lock_policy=[012]|hi_display_requested)$'
+$script:P10ActivePhase=''
+$script:P10PhaseStats=[ordered]@{}
+$script:P10PolicySeen=-1
+$script:P10ScreenOffSeen=$false
 function Say([string]$Message){
     $record=('{0:yyyy-MM-ddTHH:mm:ss.fffZ} {1}' -f [datetime]::UtcNow,$Message)
     $script:Events.Add($record)
     Write-Host ('[{0:HH:mm:ss}] {1}' -f (Get-Date),$Message)
 }
 function Scan-Line([string]$Line){
+    if($P10Lock -or $P10Restore){Scan-P10-Line $Line}
     if($Line -match '^hi: enabled .+policy=autonomous_cross_over'){$script:BootProven=$true}
     if($Line -match '^hi: auto=REARM '){
         $script:AutoStages.Clear()
@@ -286,7 +297,7 @@ function Check-Thermal{
     if($script:BatteryStop){
         throw "Battery reached $($script:BatteryC)C >= safety limit $BatteryStopC C; restore requested"
     }
-    if($P7PowerTest -or $P8Unified -or $P9Fix){
+    if($P7PowerTest -or $P8Unified -or $P9Fix -or $P10Lock){
         if($script:PowerThermalArmed){
             if($script:CpuThermalWhen -eq [datetime]::MinValue -or
                ([datetime]::UtcNow-$script:CpuThermalWhen).TotalSeconds -gt 15){
@@ -343,7 +354,7 @@ function Test-SysctlReadback([string]$Text,[string]$Name,[string]$Expected){
     return $Text -match ('(?m)usb: '+[regex]::Escape($Name+' = '+$Expected)+'\r?$')
 }
 function Send-Checked([string]$Cmd,[string]$Additional='',[int]$ExtraAppWaitSeconds=0){
-    if($Cmd -cnotmatch $script:Allowed -and $Cmd -cnotmatch $script:P9Allowed){throw "Command outside conservative HI2/P9 allowlist: $Cmd"}
+    if($Cmd -cnotmatch $script:Allowed -and $Cmd -cnotmatch $script:P9Allowed -and $Cmd -cnotmatch $script:P10Allowed){throw "Command outside conservative HI2/P9/P10 allowlist: $Cmd"}
     if(-not $Execute){Say "PREVIEW SEND $Cmd";return}
     # Never treat stale ACKs from preceding phases as proof of this command.
     $drain=[datetime]::UtcNow.AddMilliseconds(210)
@@ -423,7 +434,18 @@ function Dump-P7-Rings{
 . (Join-Path $PSScriptRoot 's9-p7-power-ab.inc.ps1')
 . (Join-Path $PSScriptRoot 's9-p8-unified-serial.inc.ps1')
 . (Join-Path $PSScriptRoot 's9-p9-power-fix.inc.ps1')
+if($P10Lock -or $P10Restore){
+    $p10Companion=Join-Path $PSScriptRoot 's9-p10-lockscreen-serial.inc.ps1'
+    if(-not (Test-Path -LiteralPath $p10Companion)){
+        throw 'P10 needs s9-p10-lockscreen-serial.inc.ps1 beside the main script; P9 uses its previous companion files unchanged.'
+    }
+    . $p10Companion
+}
 function Run-Scenario{
+    if($P10Lock -or $P10Restore){
+        Run-P10Lock
+        return
+    }
     if($P9Fix -or $P9Restore){
         Run-P9Fix
         return
@@ -599,7 +621,7 @@ function Invoke-Report{
     Say ('HOST EVENTS: '+$events)
     $report=$stem+'.report.txt'
     $parser=Join-Path $PSScriptRoot 's9-home-idle-report.ps1'
-    if(-not $P7PowerTest -and (Test-Path $parser)){
+    if(-not $P7PowerTest -and -not $P10Lock -and -not $P10Restore -and (Test-Path $parser)){
         try{
             $result=& $parser -Log $script:LogPathFinal 2>&1
             $result|Out-File -LiteralPath $report -Encoding UTF8
@@ -618,6 +640,9 @@ function Invoke-Report{
                 foreach($line in @($lines)){Write-Host $line}
             }catch{Say ('P7 report failed but RAW LOG preserved: '+$_.Exception.Message)}
         }
+    }
+    if($P10Lock){
+        Save-P10Report -Stem $stem
     }
     if($P8Unified -or $DumpP8History){
         $p8report=$stem+'.p8-report.txt'
@@ -741,6 +766,13 @@ if(($P8Unified -or $DumpP8History) -and ($P7Unified -or $P7PowerTest -or $DumpP7
     throw 'P8 standalone options must not be combined with HI2/P7 destructive or legacy scenario switches.'
 }
 if($P8LeaveAuditRunning -and -not $P8Unified){throw '-P8LeaveAuditRunning requires -P8Unified'}
+if($P10Mode2 -and -not $P10Lock){throw '-P10Mode2 requires -P10Lock'}
+if($P10Lock -and $P10Restore){throw 'Choose P10Lock or P10Restore; never both'}
+if(($P10Lock -or $P10Restore) -and ($P9Fix -or $P9Restore -or $P8Unified -or $DumpP8History -or
+   $P7Unified -or $P7PowerTest -or $DumpP7History -or $ActiveG3DGate -or
+   $ActiveCpuPark -or $LeaveP7AuditRunning -or $P8LeaveAuditRunning)){
+   throw 'P10 source-only A/B cannot be combined with P7/P8/P9 power tests, avoids hardware OFF/ON changes'
+}
 if($P9Fix -and $P9Restore){throw 'Choose P9Fix or P9Restore, never both.'}
 if(($P9Fix -or $P9Restore) -and ($P8Unified -or $DumpP8History -or $P7Unified -or
    $P7PowerTest -or $DumpP7History -or $ActiveG3DGate -or $ActiveCpuPark -or
@@ -751,9 +783,17 @@ if($P7PowerTest -and ($P7Unified -or $DumpP7History -or
    $ActiveG3DGate -or $ActiveCpuPark -or $LeaveP7AuditRunning)){
     throw 'P7PowerTest is standalone: do not combine it with HI2/other power flags or history dump.'
 }
-Say ('S9 '+$(if($P9Fix){'P9 SOURCE FIX'}elseif($P9Restore){'P9 RESTORE'}elseif($P8Unified){'P8 UNIFIED SAFE LAB'}elseif($DumpP8History){'P8 OFFLINE HISTORY DUMP'}elseif($P7PowerTest){'P7 '+$P7PowerTest+' A/B/A'}else{'HI2 SERIAL AUTO'})+': '+$(if($Execute){'EXECUTE'}else{'PREVIEW'}))
+Say ('S9 '+$(if($P10Lock){'P10 LOCKSCREEN SOURCE A/B'}elseif($P10Restore){'P10 LOCKSCREEN RESTORE'}elseif($P9Fix){'P9 SOURCE FIX'}elseif($P9Restore){'P9 RESTORE'}elseif($P8Unified){'P8 UNIFIED SAFE LAB'}elseif($DumpP8History){'P8 OFFLINE HISTORY DUMP'}elseif($P7PowerTest){'P7 '+$P7PowerTest+' A/B/A'}else{'HI2 SERIAL AUTO'})+': '+$(if($Execute){'EXECUTE'}else{'PREVIEW'}))
 if(-not $Execute){
     Say 'Preview: close PuTTY then re-run with -Port COMxxx -Execute; it will log DIRECTLY over USB.'
+    if($P10Lock -or $P10Restore){
+        Say 'P10 source timer only: needs P10-matched firmware, display ON at Lock Screen, P9.1 panel DCS=0. No panel/GPU, buttons or frame-drop writes.'
+        if($P10Lock){
+            Say ('P10 auto A/B: policy0 baseline '+$P10WindowSeconds+'s, policy1 exact Clock '+$P10WindowSeconds+'s, policy0 recovery '+$P10WindowSeconds+'s; optional mode2='+[bool]$P10Mode2+'. Always restore policy0.')
+        }else{Say 'P10 restore sets only kern.hakios.hi_lock_policy=0; leaves all P9.1 power policies intact.'}
+        Say 'Collect RAW .log + HOST .events.txt + P10 .p10-report.txt (A/B actual cuts, fps, CA and scene proof).'
+        return
+    }
     if($P9Fix -or $P9Restore){
         Say 'P9 preview: uses the matching P9 firmware, NEVER CPU_OFF or voltage writes.'
         if($P9Fix){
@@ -796,7 +836,7 @@ while([IO.Ports.SerialPort]::GetPortNames() -notcontains $Port){
 # If PuTTY still owns the port, SerialPort.Open throws before changing anything.
 Say ('Opening exclusive '+$Port+'. CLOSE PuTTY first; no manual commands will be required.')
 if([string]::IsNullOrWhiteSpace($LogPath)){
-    $prefix=if($P9Fix){'putty-S9-p9-fix-'}elseif($P9Restore){'putty-S9-p9-restore-'}elseif($P8Unified){'putty-S9-p8-unified-'}elseif($DumpP8History){'putty-S9-p8-dump-'}elseif($P7PowerTest){'putty-S9-p7-'+$P7PowerTest.ToLowerInvariant()+'-'}else{'putty-S9-hi2-auto-'}
+    $prefix=if($P10Lock){'putty-S9-p10-lock-'}elseif($P10Restore){'putty-S9-p10-restore-'}elseif($P9Fix){'putty-S9-p9-fix-'}elseif($P9Restore){'putty-S9-p9-restore-'}elseif($P8Unified){'putty-S9-p8-unified-'}elseif($DumpP8History){'putty-S9-p8-dump-'}elseif($P7PowerTest){'putty-S9-p7-'+$P7PowerTest.ToLowerInvariant()+'-'}else{'putty-S9-hi2-auto-'}
     $LogPath=$prefix+(Get-Date -Format 'yyyyMMdd-HHmmss')+'.log'
 }
 $script:LogPathFinal=[IO.Path]::GetFullPath($LogPath)
@@ -825,6 +865,10 @@ try{
         # Each restore is independent; a missing/unresponsive sysctl must
         # not prevent the subsequent GPU/CPU/Clock safety restorations.
         $restore=New-Object 'System.Collections.Generic.List[string]'
+        if($P10Lock -or $P10Restore){
+            [void]$restore.Add('sysctl kern.hakios.hi_lock_policy=0')
+            Say 'P10 CLEANUP: always request timer policy=0. P9 GPU/panel/power policies unchanged.'
+        }
         if($P9Fix -or $P9Restore){
             if(($null -ne $failed -or -not $script:Completed) -and $script:DisplayOff){
                 try{
@@ -881,7 +925,9 @@ try{
                 Say 'P7 CLEANUP: retain ONLY read-only CPU/GPU ring acquisition for battery-only sampling.'
             }
         }
-        [void]$restore.Add('sysctl kern.hakios.hi_cmd=201')
+        if(-not ($P10Lock -or $P10Restore)){
+            [void]$restore.Add('sysctl kern.hakios.hi_cmd=201')
+        }
         foreach($item in $restore){
             try{Send-Checked $item}
             catch{Say ('CLEANUP UNCONFIRMED '+$item+' : '+$_.Exception.Message)}
@@ -908,7 +954,7 @@ try{
     if($null -ne $script:Serial){$script:Serial.Dispose();$script:Serial=$null}
     Invoke-Report
 }
-$sessionName=if($P9Fix){'P9 screen-off source fixes'}elseif($P9Restore){'P9 restore'}elseif($P8Unified){'P8 unified passive'}elseif($DumpP8History){'P8 offline dump'}elseif($P7PowerTest){'P7 '+$P7PowerTest+' hardware A/B/A'}else{'HI2'}
+$sessionName=if($P10Lock){'P10 Lock Screen source A/B'}elseif($P10Restore){'P10 source restore'}elseif($P9Fix){'P9 screen-off source fixes'}elseif($P9Restore){'P9 restore'}elseif($P8Unified){'P8 unified passive'}elseif($DumpP8History){'P8 offline dump'}elseif($P7PowerTest){'P7 '+$P7PowerTest+' hardware A/B/A'}else{'HI2'}
 if($null -ne $failed){throw "$sessionName scenario incomplete. $failed . Raw log and reports retained."}
 if(-not $script:Completed){throw "$sessionName scenario did not complete all confirmed phases"}
-Say "$sessionName AUTOMATIC SESSION COMPLETE; send .log, .events.txt and .p8-report.txt (for P8) for attribution."
+Say "$sessionName AUTOMATIC SESSION COMPLETE; send .log, .events.txt and .p10-report.txt (for P10) for attribution."

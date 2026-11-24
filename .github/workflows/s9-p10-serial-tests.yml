@@ -1,0 +1,43 @@
+name: S9 P10 serial host A-B regression
+on:
+  push:
+    branches: [s9/p10-lockscreen-serial-ab]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  p10-windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: P10 Windows COM harness previews, A/B parser fixture and P9 power safety
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach($test in @(
+            'tools/tests/test-s9-p10-serial-harness.ps1',
+            'tools/tests/test-s9-p10-lockscreen-source.ps1',
+            'tools/tests/test-s9-p9-power-fix.ps1',
+            'tools/tests/test-s9-p8-unified.ps1')){
+            $out=Join-Path $env:RUNNER_TEMP ([IO.Path]::GetFileName($test)+'.stdout')
+            $err=Join-Path $env:RUNNER_TEMP ([IO.Path]::GetFileName($test)+'.stderr')
+            $p=Start-Process -FilePath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" `
+               -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$test) `
+               -PassThru -Wait -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
+            $stdout=[IO.File]::ReadAllText($out)
+            $stderr=[IO.File]::ReadAllText($err)
+            Write-Output $stdout
+            if($stderr){Write-Output $stderr}
+            if($p.ExitCode -ne 0){throw "P10 regression failed $test exit=$($p.ExitCode)"}
+          }
+      - name: Refuse P10 serial power writes and preserve source pin
+        run: |
+          $main=Get-Content tools/s9-home-idle-serial-auto.ps1 -Raw
+          $p10=Get-Content tools/s9-p10-lockscreen-serial.inc.ps1 -Raw
+          $p9=Get-Content tools/s9-p9-power-fix.inc.ps1 -Raw
+          if($main -notmatch '\$P10Lock' -or $main -notmatch 'Save-P10Report -Stem \$stem'){throw 'P10 harness not wired'}
+          if($p10 -notmatch 'hi_display_requested' -or $p10 -notmatch 'mode=0 panel_sleep=0 panel_asleep=0'){throw 'P9.1 panel safety not checked'}
+          if($p10 -match "Send-Checked 'button lock'" -or $p10 -match "Send-Checked 'sysctl kern.hakios.p9_auto_gpu="){throw 'P10 must not change power'}
+          if($p9 -match "Send-Checked 'sysctl kern.hakios.p9_panel_mode=1'"){throw 'P9.1 DCS wake regression'}
+          Write-Output 'P10 SERIAL P9.1 SAFETY PASS'
