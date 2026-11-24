@@ -453,6 +453,7 @@ modem_wait	k
 modem_wda_off	k
 net_names	k
 net_trace	k
+p122	k
 p12_gpu_boot_auto	k
 p3power	k
 p3rail	k

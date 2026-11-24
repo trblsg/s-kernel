@@ -429,6 +429,7 @@ MODEM_SIM_SWITCH_OFF	arg	modem_sim_switch_off	Cellular	k	hakios.mpss.c
 MODEM_STEP	arg	modem_step	Cellular	k	hakios.mpss.c	the steps once the root is there, then back to the loader if modem_return=1 says so
 MODEM_WAIT	arg	modem_wait	Cellular	k	hakios.mpss.c	
 MODEM_WDA_OFF	arg	modem_wda_off	Cellular	k	hakios.mpss.c	
+P122	arg	p122	GPU and display	k	hakios.mali.c	P12.2 causal diagnostics: constant low-overhead GPU clock-floor/queue/run histograms in all profiles
 P12_GPU_BOOT_AUTO	arg	p12_gpu_boot_auto	GPU and display	k	hakios.mali.c	Arm the existing guarded P9 automatic G3D screen-OFF gate after GPU initialization
 P3POWER	arg	p3power	GPU and display	k	hakios.mali.c	sample read-only G3D PMU and PLL state every five seconds
 P3RAIL	arg	p3rail	GPU and display	k	hakios.mali.c	read BUCK6 PMIC voltage at most once every thirty seconds

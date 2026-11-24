@@ -26,6 +26,8 @@
  *   mali_gov=1          the clock follows the load (see gov_window()). Needs mali_pll and mali_acpm.
  *   mali_gov_frame=MHZ  clock floor while frames are shown (default 572; 0: none).
  *   mali_probe=1        sample five-second GPU busy and thermal governor counters
+ *   p122=1             P12.2 causal diagnostics: constant low-overhead GPU clock-floor/queue/run histograms in all profiles;
+ *                       userland can switch only observer level 0/1/2 via kern.hakios.p122_diag_mode, no policy writes.
  *   p3power=1           sample read-only G3D PMU and PLL state every five seconds
  *   p3rail=1            read BUCK6 PMIC voltage at most once every thirty seconds
  *   g3d_sleep=1         after `g3d_sleep_ms` with no GPU job and no frame, power the G3D domain off and put BUCK6

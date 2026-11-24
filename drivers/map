@@ -41,6 +41,7 @@ gpu      iokit/Kernel/hakios.gpu.cpp
 gpu/mali bsd/dev/hakios.mali.c
 gpu/mali bsd/dev/hakios.mali_va.h
 gpu/mali bsd/dev/hakios.mali_lab_policy.h
+gpu/mali bsd/dev/hakios.p122_diag.h
 gpu/mali bsd/dev/hakios.mali_lab.h
 gpu/mali bsd/dev/hakios.p7_gpu_lab.h
 gpu/mali bsd/dev/hakios.p5_lab.h
