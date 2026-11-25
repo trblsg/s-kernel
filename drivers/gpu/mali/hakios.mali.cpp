@@ -931,6 +931,7 @@ HakiosMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
 	if (!hakios_mali_ready()) {
 		return kIOReturnNotReady;
 	}
+    if(selector==kPanfrostGetParam && (size!=sizeof(r.param) || !args->structureOutput || args->structureOutputSize<sizeof(r.param)))return kIOReturnBadArgument;
 	bzero(&r, sizeof(r));
 	memcpy(&r, args->structureInput, size);
 

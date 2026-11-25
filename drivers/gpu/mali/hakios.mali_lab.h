@@ -442,6 +442,72 @@ SYSCTL_PROC(_kern_hakios, OID_AUTO, g3d_lab_stats,
     CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
     g3d_lab_stats_sysctl, "A", "read-only PMU/rail/ON-OFF residency/wake/error statistics");
 
+/* P12.7.2 qualification snapshot. Only outside-domain PMU/CMU and
+ * cached temperatures; never GPU MMIO and never a power change. Trylock
+ * so a userland or serial reader cannot wait behind a hung GPU job. */
+extern int hakios_battery_temperature(void);
+/* Only called under mali_job_lock, all temperature reads are cached. */
+static bool
+p1272_probe_eligible_locked(void)
+{
+    int32_t b=hakios_exynos_tmu_zone_mc(0),l=hakios_exynos_tmu_zone_mc(1),g=hakios_exynos_tmu_zone_mc(2);
+    int bat=hakios_battery_temperature();
+    return hakios_mali_ready() && pmu && cmu_g3d &&
+        hakios_display_requested_on()==0 && (rd(pmu,PMU_G3D_STATUS)&G3D_ON)==0 &&
+        !(rd(cmu_g3d,MUX_G3D_USER)&MUX_SEL) &&
+        (rd(cmu_g3d,PLL_CON0)&(PLL_ENABLE|PLL_STABLE))!=(PLL_ENABLE|PLL_STABLE) &&
+        !g3d_awake && !g3d_lab_gpu_safe && !g3d_lab_fault &&
+        g3d_off_at && g3d_lab_age_ms(mach_absolute_time(),g3d_off_at)>=10000 &&
+        hakios_exynos_tmu_age_ms()<=2000 && b>=0 && b<70000 &&
+        l>=0 && l<67000 && g>=0 && g<68000 && bat>=0 && bat<45;
+}
+static int
+p1272_probe_state_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
+    __unused int arg2,struct sysctl_req *req)
+{
+    if(!hakios_mali_ready() || !pmu || !cmu_g3d)return ENODEV;
+    if(!lck_mtx_try_lock(&mali_job_lock))return EBUSY;
+    uint32_t domain=rd(pmu,PMU_G3D_STATUS)&G3D_ON;
+    uint32_t pll=rd(cmu_g3d,PLL_CON0),mux=rd(cmu_g3d,MUX_G3D_USER);
+    int display=hakios_display_requested_on();
+    uint32_t eligible=p1272_probe_eligible_locked();
+    char buf[320];
+    snprintf(buf,sizeof(buf),"version=1 eligible=%u display=%d domain=%u pll=%u mux=%u wake=%u off=%u wake_fail=%u fault=%u safe=%u tz=%u",
+        eligible,display,domain,(pll&(PLL_ENABLE|PLL_STABLE))==(PLL_ENABLE|PLL_STABLE)?1u:0u,
+        (mux&MUX_SEL)?1u:0u,g3d_lab_wake_count,g3d_lab_off_count,g3d_lab_wake_failed,g3d_lab_fault,
+        g3d_lab_gpu_safe?1u:0u,g3d_lab_protection_ok?1u:0u);
+    lck_mtx_unlock(&mali_job_lock);
+    return SYSCTL_OUT(req,buf,strlen(buf)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1272_probe_state,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,
+    p1272_probe_state_sysctl,"A","P12.7.2 read-only qualification state");
+
+/* One shot request for the opt-in userland worker, no MMIO or policy
+ * write. Expiry/cancel does not require USB. Only one request per boot. */
+static int
+p1272_probe_request_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
+    __unused int arg2,struct sysctl_req *req)
+{
+    int v=mach_absolute_time()<__atomic_load_n(&p1272_probe_until,__ATOMIC_ACQUIRE);
+    int err=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(err || req->newptr==USER_ADDR_NULL)return err;
+    if(v==0){__atomic_store_n(&p1272_probe_until,0,__ATOMIC_RELEASE);return 0;}
+    if(v!=1)return EINVAL;
+    if(!p1272_probe_enabled || !hakios_mali_ready())return ENODEV;
+    if(!lck_mtx_try_lock(&mali_job_lock))return EBUSY;
+    if(p1272_probe_used || !p1272_probe_eligible_locked()){
+        lck_mtx_unlock(&mali_job_lock);return EPERM;
+    }
+    p1272_probe_used=1;
+    uint64_t until=0;
+    clock_interval_to_deadline(60,NSEC_PER_SEC,&until);
+    __atomic_store_n(&p1272_probe_until,until,__ATOMIC_RELEASE);
+    lck_mtx_unlock(&mali_job_lock);
+    return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1272_probe_request,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,
+    p1272_probe_request_sysctl,"I","P12.7.2 opt-in once-per-boot userland qualification request (60s)");
+
 /* A phase tag is pure instrumentation: lets one serial log contain
  * multiple voltage/gating A/B steps with unambiguous boundaries. */
 static int
@@ -480,6 +546,7 @@ g3d_lab_reset_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
 		return err;
 	if (value != 1)
 		return EINVAL;
+	if(!hakios_mali_ready())return ENODEV;
 	lck_mtx_lock(&mali_job_lock);
 	if (!g3d_awake && !g3d_power_on()) {
 		lck_mtx_unlock(&mali_job_lock);
@@ -506,8 +573,10 @@ g3d_lab_reset_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
 		}
 		g3d_lab_protection_ok = true;
 	}
-	if (g3d_awake && !g3d_lab_gpu_safe) {
-		if (!gpu_reset() || !gpu_cores_on(&which)) {
+	if (g3d_awake && !p1272_mmio_ok()) {
+        mali_irq_detach();
+        __atomic_store_n(&p1272_live,0,__ATOMIC_RELEASE);
+		if (!p1272_power_present() || !g3d_lab_protection_ok || !gpu_reset() || !gpu_cores_on(&which)) {
 			g3d_lab_trip(3);
 			lck_mtx_unlock(&mali_job_lock);
 			say("g3d-lab: RESET failed: GPU cores did not recover; reboot required\n");
@@ -518,11 +587,11 @@ g3d_lab_reset_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
 		lck_mtx_unlock(&mali_lock);
 		gpu_answered = true;
 		g3d_lab_gpu_safe = true;
+		__atomic_store_n(&p1272_live,1,__ATOMIC_RELEASE);
 		if (mali_irq)
 			(void)mali_irq_arm();
 	}
-	if ((rd(pmu, PMU_G3D_STATUS) & G3D_ON) != G3D_ON ||
-	    !g3d_lab_gpu_safe || !g3d_lab_protection_ok) {
+	if (!p1272_mmio_ok()) {
 		g3d_lab_trip(3);
 		lck_mtx_unlock(&mali_job_lock);
 		return EIO;
@@ -557,6 +626,7 @@ g3d_lab_restore_after_job_error(void)
 		say("g3d-lab: GPU job error during undervolt; BUCK6 restored to 950mV, further changes latched OFF\n");
 	} else {
 		g3d_lab_gpu_safe = false; /* never dispatch another job with unknown rail voltage */
+		__atomic_store_n(&p1272_live,0,__ATOMIC_RELEASE);
 		say("g3d-lab: GPU job error: BUCK6 restore failed, GPU dispatch blocked until recovery\n");
 	}
 	lck_mtx_unlock(&mali_job_lock);

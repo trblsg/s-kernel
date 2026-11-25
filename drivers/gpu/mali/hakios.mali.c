@@ -246,6 +246,18 @@ static uint64_t g3d_lab_max_wake_us, g3d_lab_total_wake_us, g3d_lab_last_wake_at
 static uint64_t g3d_lab_last_shadow_at, g3d_lab_last_rail_at;
 static uint8_t g3d_lab_rail_ctrl, g3d_lab_rail_vsel;
 static bool g3d_lab_rail_valid;
+/* P12.7.2: immutable Panfrost properties, published before user clients.
+ * Never read GPU registers for GET_PARAM after boot, including OFF.
+ * 0..40 is the existing ABI, not new synthetic hardware capabilities. */
+#define P1272_CAPS 41u
+#define P1272_CAP_MASK ((1ull << P1272_CAPS)-1)
+static uint64_t p1272_caps[P1272_CAPS],p1272_cap_mask;
+static uint32_t p1272_cap_ready,p1272_live,p1272_probe_enabled,p1272_probe_used;
+static uint64_t p1272_probe_until;
+static uint64_t p1272_hits,p1272_off_hits,p1272_reject,p1272_param2,p1272_off_param2,p1272_mmio_denied;
+static bool p1272_capture_caps(void);
+static bool p1272_power_present(void);
+static void mali_irq_detach(void);
 static bool g3d_ensure_on(void);        /* (mali_job_lock held: the G3D back on after g3d_sleep) */
 static bool g3d_power_on(void);         /* (mali_job_lock held: the power-on steps, without the g3d_sleep test) */
 static void g3d_idle_gate(void);
@@ -1013,6 +1025,13 @@ g3d_off(void)
 	uint64_t answer;
 
 	if (gpu_answered) {
+        /* Boot failure cleanup and runtime gate both reach this helper.
+         * A stale answered flag is not permission to reset an OFF block. */
+        if(!p1272_power_present() || !g3d_lab_protection_ok){
+            g3d_lab_trip(4);g3d_lab_gpu_safe=false;
+            __atomic_store_n(&p1272_live,0,__ATOMIC_RELEASE);
+            return;
+        }
 		say("mali: before the power goes: a reset\n");
 		if (!gpu_reset()) {
 			/* Fail closed: an incomplete reset is NOT safe to power gate.
@@ -1379,6 +1398,9 @@ g3d_power_on(void)
 	const char *which = NULL;
 	uint64_t now, began = mach_absolute_time();
 
+	__atomic_store_n(&p1272_live,0,__ATOMIC_RELEASE);
+    g3d_lab_gpu_safe=false;
+    mali_irq_detach();
 	say("mali: g3d_sleep: the first work after the power went: the G3D is coming back on\n");
 	if (!step_power()) {
 		g3d_lab_wake_failed++;
@@ -1401,6 +1423,9 @@ g3d_power_on(void)
 		return false;
 	}
 	g3d_lab_protection_ok = true;
+    if(!p1272_power_present()){
+        g3d_lab_wake_failed++;g3d_lab_trip(4);return false;
+    }
 	if (!gpu_reset()) {
 		g3d_lab_wake_failed++;
 		g3d_lab_trip(4);
@@ -1419,6 +1444,7 @@ g3d_power_on(void)
 	gpu_answered = true;
 	g3d_awake = true;
 	g3d_lab_gpu_safe = true;
+	__atomic_store_n(&p1272_live,1,__ATOMIC_RELEASE);
 	if (mali_irq) {
 		(void)mali_irq_arm();           /* (the domain is on: the GIC line can be attached again) */
 	}
@@ -1444,18 +1470,47 @@ g3d_power_on(void)
 	return true;
 }
 
-/* Called with mali_job_lock held by the job worker before a submission or by an MMU update. */
+/* PMU and CMU are outside the GPU domain. This is an additional check
+ * under mali_job_lock, not a substitute for the verified restore path.
+ * Do not infer MMIO safety from !g3d_sleep or reached alone. */
+static bool
+p1272_power_present(void)
+{
+    return mali && pmu && cmu_g3d &&
+        (rd(pmu,PMU_G3D_STATUS)&G3D_ON)==G3D_ON &&
+        (rd(cmu_g3d,PLL_CON0)&(PLL_ENABLE|PLL_STABLE))==(PLL_ENABLE|PLL_STABLE) &&
+        (rd(cmu_g3d,MUX_G3D_USER)&MUX_SEL);
+}
+static bool
+p1272_mmio_ok(void)
+{
+    return g3d_awake && g3d_lab_gpu_safe && g3d_lab_protection_ok && p1272_power_present();
+}
+static bool
+p1272_require_mmio(void)
+{
+    if(p1272_mmio_ok())return true;
+    __atomic_fetch_add(&p1272_mmio_denied,1,__ATOMIC_RELAXED);
+    /* Do not latch a normal, known-OFF query as a fault. A caller
+     * expecting live MMIO, however, cannot resume on stale TLB state. */
+    g3d_lab_gpu_safe=false;
+    __atomic_store_n(&p1272_live,0,__ATOMIC_RELEASE);
+    g3d_lab_trip(4);
+    return false;
+}
+
+/* Called with mali_job_lock held by the job worker before a submission. */
 static bool
 g3d_ensure_on(void)
 {
 	if (g3d_awake || !g3d_sleep) {
-		return g3d_lab_gpu_safe && g3d_lab_protection_ok;
+		return p1272_require_mmio();
 	}
 	/* A failed power-on is not safe to retry for every queued job. The
 	 * operator can issue g3d_lab_reset=1 or reboot with Lab defaults. */
 	if (g3d_lab_fault != 0)
 		return false;
-	return g3d_power_on();
+	return g3d_power_on() && p1272_require_mmio();
 }
 
 /* 4: which GPU, and what it has. */
@@ -1596,13 +1651,22 @@ static bool
 step_serve(void)
 {
 	say("mali: 9: HakiosMali started: programs can draw with the GPU (Mesa's panfrost; drivers/gpu/mali/hakios.mali.cpp)\n");
-	reached = 9;                            /* (the user client asks hakios_mali_ready()) */
+
 	/*
 	 * From here the GPU counts as on. g3d_sleep=1 must know that: otherwise the first job would re-run the power-on
 	 * steps on a domain that never went off. Only this thread writes g3d_awake; users of it take mali_job_lock.
 	 */
 	lck_mtx_lock(&mali_job_lock);
 	g3d_awake = true;
+    if(!p1272_mmio_ok() || !p1272_capture_caps()){
+        g3d_lab_trip(4);g3d_lab_gpu_safe=false;
+        lck_mtx_unlock(&mali_job_lock);
+        say("mali: P12.7.2 capability capture refused; user service not published\n");
+        return false;
+    }
+    __atomic_store_n(&p1272_live,1,__ATOMIC_RELEASE);
+    __atomic_store_n(&reached,9,__ATOMIC_RELEASE);
+    __atomic_store_n(&p1272_cap_ready,1,__ATOMIC_RELEASE);
 	__atomic_store_n(&g3d_last_busy, mach_absolute_time(), __ATOMIC_RELAXED);
 	if (mali_irq) {
 		(void)mali_irq_arm();           /* (before HakiosMaliStart: the first client job sees the line) */
@@ -1660,25 +1724,17 @@ extern void gic_v3_spi_detach(uint32_t intid);
 static void
 mali_job_interrupt(__unused void *context, uint32_t intid)
 {
-	uint32_t raw = rd(mali, JOB_INT_RAWSTAT);
-
-	/*
-	 * A line with no bit set is a stale one: the worker has already cleared the job. It happens when the previous job's
-	 * handler runs after that job's wait returned; waking the next wait for it would make the next job look done. Mask it
-	 * anyway: if the level is still asserted with nothing to clear, leaving it on would be a storm. The worker unmasks
-	 * after the next job's bits are cleared, so at most one job falls back to the 200 us watchdog.
-	 */
-	if (raw == 0) {
-		__atomic_add_fetch(&mali_irq_empty, 1, __ATOMIC_RELAXED);
-		gic_v3_spi_mask(intid);
-		return;
-	}
-	if (!__atomic_load_n(&mali_irq_armed, __ATOMIC_ACQUIRE)) {
-		__atomic_add_fetch(&mali_irq_empty, 1, __ATOMIC_RELAXED);
-		wr(mali, JOB_INT_CLEAR, raw);           /* (between jobs: quiet the source, no waiter to wake) */
-		return;
-	}
-	gic_v3_spi_mask(intid);
+	/* P12.7.2: IRQ context must never touch powered-domain MMIO.
+     * Mask first; the job worker owns the raw status/clear under the
+     * power lock. A stale/spurious wake cannot complete a job because
+     * wait_job rechecks the actual slot bits. "empty" now means idle or
+     * unavailable software state, not a sampled zero raw register. */
+    gic_v3_spi_mask(intid);
+    if(!__atomic_load_n(&p1272_live,__ATOMIC_ACQUIRE) ||
+       !__atomic_load_n(&mali_irq_armed,__ATOMIC_ACQUIRE)){
+        __atomic_add_fetch(&mali_irq_empty,1,__ATOMIC_RELAXED);
+        return;
+    }
 	__atomic_add_fetch(&mali_irq_count, 1, __ATOMIC_RELEASE);
 	wakeup((caddr_t)&mali_wait_event);
 }
@@ -1687,7 +1743,7 @@ mali_job_interrupt(__unused void *context, uint32_t intid)
 static bool
 mali_irq_arm(void)
 {
-	if (mali == 0 || !mali_irq) {
+	if (!mali_irq || !p1272_require_mmio()) {
 		return false;
 	}
 	wr(mali, JOB_INT_CLEAR, 0xffffffffu);
@@ -1720,7 +1776,7 @@ static void
 mali_irq_off(void)
 {
 	mali_irq_detach();
-	if (mali != 0 && (g3d_awake || !g3d_sleep)) {
+	if (p1272_mmio_ok()) {
 		wr(mali, JOB_INT_CLEAR, 0xffffffffu);
 	}
 }
@@ -1928,12 +1984,13 @@ hakios_mali_map_read_only(uint64_t gpu, uint64_t phys)
 bool
 hakios_mali_ready(void)
 {
-	return reached >= STEPS;
+	return __atomic_load_n(&p1272_cap_ready,__ATOMIC_ACQUIRE)!=0;
 }
 
-/* Linux's DRM_PANFROST_PARAM_*, in its order, from the registers they come from. */
-bool
-hakios_mali_parameter(uint32_t which, uint64_t *value)
+/* Boot-only register reader. Invoked only by capture under mali_job_lock
+ * after successful core/table tests and before publishing HakiosMali. */
+static bool
+p1272_read_cap_on(uint32_t which, uint64_t *value)
 {
 	static const uint16_t simple[] = {
 		[5] = 0xe00,    /* STACK_PRESENT (none on Bifrost: reads 0) */
@@ -1942,9 +1999,6 @@ hakios_mali_parameter(uint32_t which, uint64_t *value)
 		[18] = 0x0b0, [19] = 0x0b4, [20] = 0x0b8, [21] = 0x0bc,
 	};
 
-	if (!hakios_mali_ready()) {
-		return false;
-	}
 	switch (which) {
 	case 0:
 		*value = gpu_id >> 16;
@@ -2003,6 +2057,62 @@ hakios_mali_parameter(uint32_t which, uint64_t *value)
 	}
 }
 
+/* The complete existing ABI must be captured, including legitimate
+ * zero-valued registers (STACK_PRESENT, AFBC_FEATURES). Never use zero
+ * as a cache-miss sentinel. Cache is written once and never invalidated
+ * by a power cycle or a GPU fault. */
+static bool
+p1272_capture_caps(void)
+{
+    if(__atomic_load_n(&p1272_cap_ready,__ATOMIC_ACQUIRE) || !p1272_mmio_ok())return false;
+    uint64_t valid=0;
+    for(uint32_t i=0;i<P1272_CAPS;i++){
+        if(!p1272_read_cap_on(i,&p1272_caps[i]))return false;
+        valid|=1ull<<i;
+    }
+    if(valid!=P1272_CAP_MASK)return false;
+    p1272_cap_mask=valid;
+    say("mali: P12.7.2 capability cache captured: count=%u mask=%llx shader=%llx\n",
+        P1272_CAPS,(unsigned long long)valid,(unsigned long long)p1272_caps[2]);
+    return true;
+}
+bool
+hakios_mali_parameter(uint32_t which,uint64_t *value)
+{
+    if(!value || !hakios_mali_ready() || which>=P1272_CAPS ||
+       !(p1272_cap_mask&(1ull<<which))){
+        __atomic_fetch_add(&p1272_reject,1,__ATOMIC_RELAXED);
+        return false;
+    }
+    *value=p1272_caps[which];
+    __atomic_fetch_add(&p1272_hits,1,__ATOMIC_RELAXED);
+    if(which==2)__atomic_fetch_add(&p1272_param2,1,__ATOMIC_RELAXED);
+    /* This is a software availability hint, not PMU residency proof. */
+    if(!__atomic_load_n(&p1272_live,__ATOMIC_ACQUIRE)){
+        __atomic_fetch_add(&p1272_off_hits,1,__ATOMIC_RELAXED);
+        if(which==2)__atomic_fetch_add(&p1272_off_param2,1,__ATOMIC_RELAXED);
+    }
+    return true;
+}
+static int
+p1272_gpu_caps_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unused int arg2,struct sysctl_req *req)
+{
+    char buf[400];
+    bool ready=hakios_mali_ready();
+    snprintf(buf,sizeof(buf),"version=1 ready=%u mask=%llx hits=%llu off_hits=%llu param2=%llu off_param2=%llu reject=%llu denied=%llu live=%u",
+        ready?1u:0u,(unsigned long long)(ready?p1272_cap_mask:0),
+        (unsigned long long)__atomic_load_n(&p1272_hits,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p1272_off_hits,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p1272_param2,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p1272_off_param2,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p1272_reject,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p1272_mmio_denied,__ATOMIC_RELAXED),
+        __atomic_load_n(&p1272_live,__ATOMIC_ACQUIRE));
+    return SYSCTL_OUT(req,buf,strlen(buf)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1272_gpu_caps,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,
+    p1272_gpu_caps_sysctl,"A","P12.7.2 immutable GPU capability cache and MMIO guards");
+
 /*
  * `size` bytes of GPU addresses between 32 MB and 4 GB (hakios.mali_va.h). `executable`: a buffer the GPU may run code
  * from (Linux's flags without PANFROST_BO_NOEXEC). Such a buffer never crosses a 16 MB line, which is panfrost's rule
@@ -2040,9 +2150,17 @@ hakios_mali_unmap(uint64_t gpu, uint64_t size)
 	lck_mtx_lock(&mali_job_lock);                   /* an entry taken out: the TLB may hold it */
 	lck_mtx_lock(&mali_lock);
 	/* With the G3D off (g3d_sleep=1) its MMU has nothing cached: g3d_ensure_on() does the full update when it powers on. */
-	if (g3d_awake || !g3d_sleep) {
+	if (p1272_mmio_ok()) {
 		as0_update(pt_transtab, pt_transcfg());
-	}
+	} else if (!pmu || (rd(pmu,PMU_G3D_STATUS)&G3D_ON)!=0) {
+        /* Unverified/partial ON: no TLB update is safe. Latch and
+         * quarantine this GPU VA until reboot, rather than reissue it.
+         * Explicit recovery resets the GPU and rebuilds its tables. */
+        (void)p1272_require_mmio();
+        lck_mtx_unlock(&mali_lock);
+        lck_mtx_unlock(&mali_job_lock);
+        return;
+    }
 	/* only now, with nothing of the buffer left in the tables or the MMU, are its addresses free to be given again */
 	(void)mali_va_free(&mali_va, gpu, size);
 	lck_mtx_unlock(&mali_lock);
@@ -2063,7 +2181,8 @@ hakios_mali_mapped(void)
 	}
 	lck_mtx_lock(&mali_job_lock);
 	/* With the G3D off (g3d_sleep=1) its MMU has nothing cached; the power-on in g3d_ensure_on() updates it. */
-	if (g3d_sleep && !g3d_awake) {
+	if (!p1272_mmio_ok()) {
+        if(!pmu || (rd(pmu,PMU_G3D_STATUS)&G3D_ON)!=0)(void)p1272_require_mmio();
 		lck_mtx_unlock(&mali_job_lock);
 		return;
 	}
@@ -2105,8 +2224,11 @@ hakios_mali_submit(uint64_t chain, bool fragment)
 		return 0xff;
 	}
 	lck_mtx_lock(&mali_lock);
-	wr(mali, JOB_INT_CLEAR, (1u << slot) | (1u << (slot + 16)));
+	/* No previous job remains under this serialization. A stale IRQ
+     * may have masked the line while idle; clear both slots first. */
+    wr(mali,JOB_INT_CLEAR,0xffffffffu);
 	__atomic_store_n(&mali_irq_armed, mali_irq_attached ? 1u : 0u, __ATOMIC_RELEASE);
+    if(mali_irq_attached)gic_v3_spi_unmask(MALI_JOB_INTID);
 	wr(mali, js + JS_HEAD_NEXT_LO, (uint32_t)chain);
 	wr(mali, js + JS_HEAD_NEXT_HI, (uint32_t)(chain >> 32));
 	wr(mali, js + JS_AFFINITY_NEXT_LO, shader_mask);
@@ -2140,14 +2262,19 @@ hakios_mali_submit(uint64_t chain, bool fragment)
 		describe_address(last_failure.fault_address | ((uint64_t)rd(mali, AS0 + 0x24) << 32));
 		const char *which = NULL;
 
-		(void)gpu_reset();                      /* a reset, then everything back as it was */
-		if (!gpu_cores_on(&which)) {
-			printf("mali: after the reset, %s did not power up again\n", which);
-		}
-		if (mali_irq) {
-			(void)mali_irq_arm();           /* (the reset may have taken JOB_INT_MASK with it) */
-		}
+		/* An unsuccessful reset is not permission to keep touching
+         * registers or submit future jobs. IRQ callback quiesced first. */
+        mali_irq_detach();
+        __atomic_store_n(&p1272_live,0,__ATOMIC_RELEASE);
+        if(!gpu_reset() || !gpu_cores_on(&which)){
+            g3d_lab_gpu_safe=false;g3d_lab_trip(4);
+            __atomic_store_n(&mali_irq_armed,0,__ATOMIC_RELEASE);
+            lck_mtx_unlock(&mali_lock);lck_mtx_unlock(&mali_job_lock);
+            return MALI_HUNG;
+        }
 		as0_update(pt_transtab, pt_transcfg());
+        __atomic_store_n(&p1272_live,1,__ATOMIC_RELEASE);
+        if(mali_irq)(void)mali_irq_arm();
 		wr(mali, MMU_INT_CLEAR, 0xffffffffu);
 	}
 	wr(mali, JOB_INT_CLEAR, (1u << slot) | (1u << (slot + 16)));
@@ -2666,20 +2793,26 @@ gov_set(unsigned level)
 	if (level == gov_level || level >= GOV_LEVELS) {
 		return;
 	}
+	lck_mtx_lock(&mali_job_lock);
+    /* No governor clock/rail changes while another owner has gated the
+     * domain or marked it unsafe. Preserve existing rate decisions. */
+    if(!p1272_mmio_ok()){
+        lck_mtx_unlock(&mali_job_lock);return;
+    }
 	/* mali_dvs: the voltage up before the clock goes up (a failed raise: no switch) */
 	if (gov_dvs && level > gov_level && gov_vsel(level) > gov_vsel(gov_level) && !rail_set(gov_vsel(level))) {
 		say("mali: mali_dvs: BUCK6 not raised for %u MHz: no switch\n", g3d_rates[level].mhz);
+        lck_mtx_unlock(&mali_job_lock);
 		return;
 	}
-	lck_mtx_lock(&mali_job_lock);
 	pll_quiet = true;
 	switched = pll_switch(&g3d_rates[level]);
 	pll_quiet = false;
-	lck_mtx_unlock(&mali_job_lock);
 	/* ... and down only after the clock has come down */
 	if (switched && gov_dvs && level < gov_level && gov_vsel(level) < gov_vsel(gov_level)) {
 		(void)rail_set(gov_vsel(level));
 	}
+	lck_mtx_unlock(&mali_job_lock);
 	if (switched) {
 		gov_ups += level > gov_level;
 		gov_downs += level < gov_level;
@@ -2692,7 +2825,9 @@ gov_set(unsigned level)
 		gov_on = false;
 		if (gov_dvs) {
 			gov_dvs = false;
-			(void)rail_set(B6OUT_950MV);    /* wherever the clock stopped, the voltage for any of them */
+            lck_mtx_lock(&mali_job_lock);
+			if(p1272_power_present())(void)rail_set(B6OUT_950MV);
+            lck_mtx_unlock(&mali_job_lock);
 		}
 		say("mali: mali_gov: PLL_G3D did not switch to %u MHz (%u times in a row; it runs at %u MHz): the governor stops\n",
 		    g3d_rates[level].mhz, gov_failed, pll_mhz());
@@ -2975,6 +3110,7 @@ g3d_idle_gate(void)
 	say("g3d-lab: OFF candidate mode=%u idle=%ums job_age=%llums frame_age=%llums queue=0\n",
 	    gate_mode, ms, job_age, frame_age);
 	mali_irq_off();            /* detach GIC before any GPU block can disappear */
+	__atomic_store_n(&p1272_live,0,__ATOMIC_RELEASE);
 	g3d_off();
 	state = rd(pmu, PMU_G3D_STATUS) & G3D_ON;
 	if (state == 0) {
@@ -2985,7 +3121,7 @@ g3d_idle_gate(void)
 		say("g3d-lab: G3D domain OFF; next GPU job must restore SMC/PLL/MMU first\n");
 	} else if (state == G3D_ON) {
 		g3d_awake = true;
-		if (!g3d_lab_gpu_safe && g3d_lab_protection_ok) {
+		if (!g3d_lab_gpu_safe && g3d_lab_protection_ok && p1272_power_present()) {
 			/* A reset may have run before DTZPC SAVE refused.
 			 * Reconstruct cores and MMU before allowing ANY job. */
 			const char *which = NULL;
@@ -3007,8 +3143,10 @@ g3d_idle_gate(void)
 			g3d_lab_gpu_safe = false;
 			say("g3d-lab: DTZPC restore not verified: no GPU MMIO or submit before explicit reset\n");
 		}
-		if (mali_irq && g3d_lab_gpu_safe)
-			(void)mali_irq_arm();
+		if(p1272_mmio_ok()){
+            __atomic_store_n(&p1272_live,1,__ATOMIC_RELEASE);
+            if(mali_irq)(void)mali_irq_arm();
+        }
 	} else {
 		g3d_lab_trip(3);
 		g3d_awake = false;
@@ -3061,7 +3199,7 @@ g3d_sleep_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 		return 0;
 	}
 	lck_mtx_lock(&mali_job_lock);
-	if (g3d_awake && !g3d_lab_gpu_safe) {
+	if (g3d_awake && !p1272_mmio_ok()) {
 		lck_mtx_unlock(&mali_job_lock);
 		return EIO; /* use g3d_lab_reset for GPU reinit before dispatch */
 	}
@@ -3405,7 +3543,7 @@ mali_thread(__unused void *parameter, __unused wait_result_t result)
 			say("mali: step %u: FAILED; the steps after it are not made\n", step);
 			break;
 		}
-		reached = step;
+		__atomic_store_n(&reached,step,__ATOMIC_RELEASE);
 		say("mali: step %u: done\n", step);
 	}
 	if (job_page != 0) {
@@ -3414,7 +3552,7 @@ mali_thread(__unused void *parameter, __unused wait_result_t result)
 		lck_mtx_lock(&mali_lock);
 		if (pt_top != NULL) {
 			unmap_pages(FIRST_JOB_GPU, PAGE_SIZE);  /* removed before the page is freed, so the GPU has nothing to point at */
-			as0_update(pt_transtab, pt_transcfg());
+			if(p1272_power_present() && g3d_lab_protection_ok)as0_update(pt_transtab, pt_transcfg());
 		}
 		lck_mtx_unlock(&mali_lock);
 		lck_mtx_unlock(&mali_job_lock);
@@ -3495,6 +3633,9 @@ hakios_mali_init(void)
 	(void)PE_parse_boot_argn("p122", &p122_enabled, sizeof(p122_enabled));
 	if(p122_enabled!=1)p122_enabled=0;
 	/* p12_gpu_boot_auto=1: Arm the existing guarded P9 automatic G3D screen-OFF gate after GPU initialization. */
+	/* p1272_probe=1: enable one host-requested OFF capability and wake qualification. */
+	(void)PE_parse_boot_argn("p1272_probe", &p1272_probe_enabled, sizeof(p1272_probe_enabled));
+	p1272_probe_enabled=p1272_probe_enabled==1;
 	(void)PE_parse_boot_argn("p12_gpu_boot_auto", &p12_gpu_boot_auto, sizeof(p12_gpu_boot_auto));
 	p12_gpu_boot_auto = p12_gpu_boot_auto == 1 ? 1u : 0u;
 	(void)PE_parse_boot_argn("mali_probe", &mali_probe, sizeof(mali_probe));

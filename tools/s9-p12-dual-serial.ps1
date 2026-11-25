@@ -39,6 +39,8 @@ $script:P12Refusal=$null
 $script:P12ReadPaceMs=0
 $script:P12ReadAttempts=1
 $script:P12Journal=''
+$script:P1272HostEnabled=$false
+$script:P1272ProbeLines=New-Object 'System.Collections.Generic.List[string]'
 $script:P12PreflightVerified=$false
 $script:P12CpuDirty=$false
 $script:P12WfiDirty=$false
@@ -83,7 +85,7 @@ function P12-ReplyShape([string]$Name,[string]$Reply,[bool]$Mixed){
         p127_ticker='wait due wake'
         p127_fg_seq='seq slots'
     }
-    if($Name -match '^(?:p125_(?:mode|select)|p126_mode|p127_mode|p6_usb_(?:ticks|connected_ticks)|p69_usb_disconnected_ticks)$'){
+    if($Name -match '^(?:p125_(?:mode|select)|p126_mode|p127_mode|p1272_probe_request|p6_usb_(?:ticks|connected_ticks)|p69_usb_disconnected_ticks)$'){
         $n=[uint64]0
         return ($Reply -cmatch "^$dec$" -and [uint64]::TryParse($Reply,[ref]$n))
     }
@@ -93,6 +95,8 @@ function P12-ReplyShape([string]$Name,[string]$Reply,[bool]$Mixed){
         return ($Reply -cmatch ($pattern+'$'))
     }
     switch -Regex ($Name){
+        '^p1272_gpu_caps$' {return ($Reply -cmatch "^version=1 ready=[01] mask=$hex hits=$dec off_hits=$dec param2=$dec off_param2=$dec reject=$dec denied=$dec live=[01]$")}
+        '^p1272_probe_state$' {return ($Reply -cmatch "^version=1 eligible=[01] display=-?[0-9]+ domain=$dec pll=[01] mux=[01] wake=$dec off=$dec wake_fail=$dec fault=$dec safe=[01] tz=[01]$")}
         '^p125_status$' {
             return ($Reply -cmatch "^version=1 active=[0-3] armed=[0-3] start=$dec end=$dec now=$dec hz=$dec reason=$dec down=$dec up=$dec display_on=$dec anchor=$hex slots=512 rows=2 counters=28 kinds=15 cumulative=1(?: page_lookup=scalar)?$")
         }
@@ -126,6 +130,7 @@ function P12-ReplyShape([string]$Name,[string]$Reply,[bool]$Mixed){
 }
 $script:LifeLineObserver={
     param([string]$Line,[datetime]$At)
+    if($script:P1272HostEnabled -and $Line -match '(?:^|\s)p1272-probe: .+$'){$script:P1272ProbeLines.Add($Line)}
     if($script:P12Command){
         $echo=[regex]::Escape('usb> '+$script:P12Command)
         if($Line -cmatch "(?:^|(?<=\s))$echo\s*$"){
@@ -182,6 +187,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
     if($script:P125HostEnabled){$allowed+=@('p125_mode','p125_status','p125_select','p125_page','p6_usb_ticks','p6_usb_connected_ticks','p69_usb_disconnected_ticks')+(0..7|ForEach-Object {"p125_counts$_";"p125_coverage$_"})}
     if($script:P126HostEnabled){$allowed+=@('p126_mode','p126_status','p126_diag')}
     if($script:P127HostEnabled){$allowed+=@('p127_mode','p127_status','p127_metrics','p127_wifi','p127_bt','p127_ticker','p127_bus','p127_shub','p127_fg_seq')+(0..7|ForEach-Object {"p127_wfi$_"})+(0..15|ForEach-Object {"p127_fg$_"})}
+    if($script:P1272HostEnabled){$allowed+=@('p1272_gpu_caps','p1272_probe_state','p1272_probe_request')}
     if($Name -notin $allowed){throw "P12 sysctl disallowed $Name"}
     if($script:P124HostEnabled -and $Name -eq 'p1231_hash_mode' -and $Value -eq '1'){throw 'P12.4 rejects scalar thermal trial'}
     if($Value -ne '' -and -not (
@@ -191,6 +197,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
         ($script:P123HostEnabled -and $Name -eq 'p123_floor_mode' -and $Value -in @('0','1')) -or
         ($script:P123HostEnabled -and $Name -eq 'p1231_hash_mode' -and $Value -in @('0','1','2')) -or
         ($script:P123HostEnabled -and $script:P123ClockAllowed -and $Name -eq 'hi_cmd' -and $Value -eq '252') -or
+        ($script:P1272HostEnabled -and $Name -eq 'p1272_probe_request' -and $Value -in @('0','1')) -or
         ($script:P127HostEnabled -and $Name -eq 'p127_mode' -and $Value -in @('0','1','3','5','9','17','33','49','65','81','129','257','513')) -or
         ($script:P126HostEnabled -and $Name -eq 'p126_mode' -and $Value -match '^\d{1,2}$' -and [int]$Value -le 63) -or
         ($script:P125HostEnabled -and $Name -eq 'p125_mode' -and $Value -in @('0','1','2','3')) -or
@@ -205,6 +212,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
     if($script:P125HostEnabled){$restore+='p125_mode'}
     if($script:P126HostEnabled){$restore+='p126_mode'}
     if($script:P127HostEnabled){$restore+='p127_mode'}
+    if($script:P1272HostEnabled){$restore+='p1272_probe_request'}
     $clockStop=(($script:P123ClockAllowed -or $script:P124ClockAllowed) -and $script:P123HostEnabled -and $Name -eq 'hi_cmd' -and $Value -eq '201')
     if($Cleanup -and -not $clockStop -and ($Name -notin $restore -or $Value -ne '0')){
         throw 'P12.1/P12.2 Cleanup bypass is reserved for bounded restore-to-zero writes only'

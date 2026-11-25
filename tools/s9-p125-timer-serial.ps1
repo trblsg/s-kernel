@@ -4,7 +4,7 @@
 param(
  [ValidatePattern('^COM[0-9]+$')][string]$Port='COM125',
  [string]$ReconnectPort='',
- [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump','DriverTrials','EnergyTrials','EnergyOffline')][string]$Scenario='Trace',
+ [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump','DriverTrials','EnergyTrials','EnergyOffline','GpuCacheCheck')][string]$Scenario='Trace',
  [ValidateRange(30,90)][int]$TraceSeconds=60,
  [ValidateRange(12,40)][int]$AggregateSeconds=20,
  [string]$SymbolMap='',
@@ -16,6 +16,7 @@ param(
  [string]$EnergyModules='USB,ABOX,BT,WIFI,TICKER,PSR,LITTLE949',
  [ValidateRange(30,250)][int]$ReadPaceMs=60,
  [switch]$AllowLowerFloor,
+ [switch]$RequireGpuCache,
  [switch]$Execute,[switch]$LibraryOnly
 )
 Set-StrictMode -Version 2
@@ -26,6 +27,9 @@ $Execute=$script:P125Exec;$LibraryOnly=$script:P125Lib
 $script:P125HostEnabled=$true
 $script:P126HostEnabled=$true
 $script:P127HostEnabled=$true
+$script:P1272HostEnabled=$true
+$script:P1272Dirty=$false
+$script:P1272Required=$RequireGpuCache
 # P12.7.1 transport only, no new firmware ABI.
 $script:P12ReadPaceMs=$ReadPaceMs
 $script:P12ReadAttempts=2
@@ -455,8 +459,47 @@ function P127-Delta($Before,$After,$Timer,[string]$Label,[string]$Stem){
     if($num){$samples.Values|Sort-Object seq|Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath "$Stem.$Label.fg.csv"}
     $script:P125Report.Add("P127 FG $Label samples=$num; signed NET battery power, not whole-system watts when external=1")
 }
+function P1272-Caps {
+    $line=P12-Query 'p1272_gpu_caps'
+    $c=P125-Fields $line
+    if($c.version -ne '1' -or $c.ready -ne '1' -or $c.mask -ne '1ffffffffff' -or [uint64]$c.denied -ne 0){
+        throw "P1272 GPU capability cache or MMIO guard check failed: $line"
+    }
+    return $c
+}
+function P1272-Check {
+    $script:P12Phase='GPU-CACHE-CHECK'
+    $pre=P1272-Caps
+    $state=P125-Fields (P12-Query 'p1272_probe_state')
+    if($state.eligible -ne '1' -or $state.domain -ne '0' -or $state.pll -ne '0' -or $state.mux -ne '0' -or $state.fault -ne '0' -or $pre.live -ne '0'){throw 'P1272 not eligible: keep display OFF and allow cooling'}
+    if((P125-Status).armed -ne '0' -or (P126-Status).mode -ne '0' -or (P127-Status).mode -ne '0'){throw 'P1272 requires all timer/driver trials stopped'}
+    if((P12-Query 'p1272_probe_request') -ne '0'){throw 'P1272 prior request pending'}
+    $script:P1272ProbeLines.Clear()
+    $script:P1272Dirty=$true
+    [void](P12-Query 'p1272_probe_request' '1')
+    Life-Say 'P1272 waiting for fresh IOKit GET_PARAM and single real GPU job; keep screen OFF'
+    $end=(Life-Now).AddSeconds(60)
+    $done=$false
+    while((Life-Now) -lt $end){
+        P125-PumpOff 1
+        if(@($script:P1272ProbeLines|Where-Object {$_ -match 'p1272-probe: (?:INCONCLUSIVE|GET_PARAM .* refused)'}).Count){throw 'P1272 qualification failed or inconclusive; see raw log'}
+        if(@($script:P1272ProbeLines|Where-Object {$_ -match 'p1272-probe: COMPLETE PASS wake=\d+->\d+ domain=15 safe=1 tz=1 caps_equal=1 job_good=1\s*$'}).Count){$done=$true;break}
+    }
+    if(-not $done -or -not @($script:P1272ProbeLines|Where-Object {$_ -match 'p1272-probe: OFF_GET_PARAM PASS count=41 domain=0 pll=0 mux=0 wake=\d+ off=\d+\s*$'}).Count){throw 'P1272 missing fresh OFF/real-job proof (boot p1272_probe=1, host request once per boot)'}
+    [void](P12-Query 'p1272_probe_request' '0' -Cleanup)
+    $script:P1272Dirty=$false
+    $post=P1272-Caps
+    if((P125-Sub ([uint64]$post.off_hits) ([uint64]$pre.off_hits)) -lt 41 -or (P125-Sub ([uint64]$post.off_param2) ([uint64]$pre.off_param2)) -lt 1){throw 'P1272 OFF capability counter evidence missing'}
+    P125-PumpOff 25
+    $final=P125-Fields (P12-Query 'p1272_probe_state')
+    if($final.domain -ne '0' -or $final.pll -ne '0' -or $final.mux -ne '0' -or $final.fault -ne '0' -or [uint64]$final.wake -le [uint64]$state.wake -or [uint64]$final.off -le [uint64]$state.off -or $final.wake_fail -ne $state.wake_fail){throw 'P1272 re-gate or wake proof missing'}
+    [void](P1272-Caps)
+    $script:P125Report.Add('P1272 GPU_CACHE_CHECK PASS fresh 41-property GET_PARAM OFF, real write job, identical properties ON, re-gated')
+    Life-Say 'P1272 GPU_CACHE_CHECK PASS'
+}
 function P127-Window([string]$Label,[int]$Mask,[int]$Seconds,[string]$Stem,$BeforeTimer,[switch]$Offline){
     $script:P12Phase="$Label-PRE"
+    if($script:P1272Required){[void](P1272-Caps)}
     $initial=P127-Status
     if($initial.mode -ne '0'){throw 'P127 old mode still active'}
     $before=P127-Read
@@ -488,6 +531,7 @@ function P127-Window([string]$Label,[int]$Mask,[int]$Seconds,[string]$Stem,$Befo
     if((P125-Sub ([uint64]$w.attach) ([uint64]$before.Wifi.attach)) -ne (P125-Sub ([uint64]$w.detach) ([uint64]$before.Wifi.detach))){throw 'P127 INTx restore counts disagree'}
     if((P125-Sub ([uint64]$m.psr_mask) ([uint64]$before.Metrics.psr_mask)) -gt (P125-Sub ([uint64]$m.psr_unmask) ([uint64]$before.Metrics.psr_unmask))){throw 'P127 PSR unmask not proven'}
     $script:P127Dirty=$false
+    if($script:P1272Required){[void](P1272-Caps)}
     $script:P125Report.Add("P127 RESTORE $Label mode=0 $($restored.little_cur) kHz")
     $script:P12Phase="$Label-FG"
     P127-Delta $before $after $afterTimer.Status $Label $Stem
@@ -571,6 +615,10 @@ function P125-Run {
         P125-PumpOff 25
         $g=P12-Query 'g3d_lab_stats'
         if($g -notmatch ' domain=0 pll=0 ' -or $g -notmatch ' fault=0 '){throw 'P125 independent GPU OFF evidence missing'}
+        if($Scenario -eq 'GpuCacheCheck'){
+            P1272-Check
+            return
+        }
         if($Scenario -in @('EnergyTrials','EnergyOffline')){
             P127-RunEnergy $stem
             return
@@ -588,6 +636,9 @@ function P125-Run {
     }catch{
         $errorText=$_.Exception.Message;Life-Say "P125 STOP $errorText"
     }finally{
+        if($script:P1272Dirty -and $null -ne $script:LifeSerial -and $script:LifeSerial.IsOpen){
+            try{[void](P12-Query 'p1272_probe_request' '0' -Cleanup);$script:P1272Dirty=$false}catch{Life-Say 'P1272 request cancel unconfirmed; 60s bounded expiry'}
+        }
         if($script:P127Dirty -and $null -ne $script:LifeSerial -and $script:LifeSerial.IsOpen){
             try{[void](P12-Query 'p127_mode' '0' -Cleanup);$script:P127Dirty=$false;Life-Say 'P127 cleanup mode=0 ACK'}catch{Life-Say 'P127 restore ACK missing; bounded kernel expiry'}
         }

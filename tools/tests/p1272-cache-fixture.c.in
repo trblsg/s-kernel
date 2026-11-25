@@ -1,0 +1,49 @@
+/* Exact extracted functions, mocked hardware; never a device test. */
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+/* DEFS */
+#define say(...) ((void)0)
+static const uintptr_t mali=1,pmu=2,cmu_g3d=3;
+static bool powered=true,clocked=true,g3d_awake=true,g3d_lab_gpu_safe=true,g3d_lab_protection_ok=true;
+static unsigned reads;
+static uint32_t gpu_id=0x62210000,l2_mask=3;
+static uint64_t p1272_caps[P1272_CAPS],p1272_cap_mask;
+static uint32_t p1272_cap_ready,p1272_live;
+static uint64_t p1272_hits,p1272_off_hits,p1272_reject,p1272_param2,p1272_off_param2;
+static uint32_t rd(uintptr_t base,uint32_t at){
+    if(base==pmu)return powered?G3D_ON:0;
+    if(base==cmu_g3d)return clocked?(at==PLL_CON0?PLL_ENABLE|PLL_STABLE|MUX_SEL:MUX_SEL):0;
+    assert(base==mali && powered && clocked && g3d_lab_protection_ok);reads++;
+    if(at==0xe00 || at==THREAD_TLS_ALLOC)return 0;
+    return at+1;
+}
+/* FUNCTIONS */
+int main(void){
+    uint64_t expected[P1272_CAPS],v;
+    assert(!hakios_mali_parameter(2,&v));
+    for(uint32_t i=0;i<P1272_CAPS;i++)assert(p1272_read_cap_on(i,&expected[i]));
+    assert(p1272_capture_caps());assert(p1272_cap_mask==P1272_CAP_MASK);
+    assert(!hakios_mali_parameter(2,&v));
+    __atomic_store_n(&p1272_live,1,__ATOMIC_RELEASE);
+    __atomic_store_n(&p1272_cap_ready,1,__ATOMIC_RELEASE);
+    assert(!p1272_capture_caps());
+    unsigned boot_reads=reads;
+    for(uint32_t i=0;i<P1272_CAPS;i++){assert(hakios_mali_parameter(i,&v));assert(v==expected[i]);}
+    powered=clocked=g3d_awake=g3d_lab_gpu_safe=g3d_lab_protection_ok=false;
+    __atomic_store_n(&p1272_live,0,__ATOMIC_RELEASE);
+    assert(!p1272_mmio_ok());
+    for(unsigned loop=0;loop<10;loop++)for(uint32_t i=0;i<P1272_CAPS;i++){
+        assert(hakios_mali_parameter(i,&v));assert(v==expected[i]);
+    }
+    assert(hakios_mali_parameter(5,&v)&&v==0);
+    assert(hakios_mali_parameter(40,&v)&&v==0);
+    assert(!hakios_mali_parameter(41,&v)&&!hakios_mali_parameter(UINT32_MAX,&v)&&!hakios_mali_parameter(2,NULL));
+    assert(reads==boot_reads && p1272_off_param2==10 && p1272_off_hits==412);
+    powered=g3d_awake=g3d_lab_gpu_safe=g3d_lab_protection_ok=true;
+    assert(!p1272_mmio_ok());clocked=true;assert(p1272_mmio_ok());
+    puts("P12.7.2 exact extracted C cache, invalid/zero params, OFF no MMIO, guards PASS");
+    return 0;
+}

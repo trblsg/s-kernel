@@ -27,6 +27,7 @@ jobs:
           node tools/tests/test-p125-symbol-map.js
           node tools/tests/test-p126-contract.js
           node tools/tests/test-p127-contract.js
+          node tools/tests/test-p1272-gpu-cache.js --compile
           python3 tools/tests/test_p127_jiffies_header.py
       - name: Check source guards, preserving P9 panel and P7 CPU recovery safety
         run: |
@@ -132,6 +133,7 @@ jobs:
             'tools/tests/test-s9-p126-driver-trials.ps1',
             'tools/tests/test-s9-p127-energy-trials.ps1',
             'tools/tests/test-s9-p127-serial-recovery.ps1',
+            'tools/tests/test-s9-p1272-gpu-cache.ps1',
             'tools/tests/test-s9-p11-lifecycle-serial.ps1',
             'tools/tests/test-s9-p10-lockscreen-source.ps1',
             'tools/tests/test-s9-p10-serial-harness.ps1',
