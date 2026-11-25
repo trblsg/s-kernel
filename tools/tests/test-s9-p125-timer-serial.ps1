@@ -11,6 +11,7 @@ $script:fixtureEnd=$false
 $script:fixturePage=0
 $script:fixtureLegacy=$false
 $script:fixturePageReads=0
+$script:fixtureMissingUsb=$false
 function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
     if($Name -eq 'p125_status'){
         $s='version=1 active=0 armed=0 start=100 end=60100 now=60110 hz=1000 reason=0 down=0 up=0 display_on=0 anchor=fffffff007000000 slots=512 rows=2 counters=28 kinds=15'
@@ -29,7 +30,10 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
     }
     if($Name -eq 'p125_select'){$script:fixturePage=[int]$Value;return $Value}
     if($Name -eq 'p125_page'){$script:fixturePageReads++;return "version=1 page=$script:fixturePage r=0/1/fffffff007000000/0/0/c/0/0/0/0/1/20/-"}
-    if($Name -match '^p(6|69)_usb_'){return '0'}
+    if($Name -match '^p(6|69)_usb_'){
+        if($script:fixtureMissingUsb -and $Name -eq 'p6_usb_connected_ticks'){throw "Missing echo and sysctl readback sysctl kern.hakios.$Name"}
+        return '0'
+    }
     throw "unexpected fixture request $Name"
 }
 $before=P125-ReadSnapshot 'BASE'
@@ -60,6 +64,13 @@ try{
     try{P125-CheckFrozenIdentity $bad $complete}catch{if($_.Exception.Message -match 'counters changed'){$failed=$true}else{throw}}
     if(-not $failed){throw 'changed cumulative counter accepted during resume'}
     $ResumeSnapshot=''
+    $Scenario='EnergyTrials';$script:fixtureMissingUsb=$true
+    $partial=P125-ReadSnapshot 'USB_MISSING' -CountsOnly
+    if($partial.Usb.ContainsKey('p6_usb_connected_ticks') -or $partial.Counts[3][4] -ne 12 -or -not (Test-Path -LiteralPath "$stem.USB_MISSING.scalar.clixml")){throw 'missing USB count invented or scalar checkpoint lost'}
+    $Scenario='Trace'
+    $failed=$false;try{[void](P125-ReadSnapshot 'STRICT' -CountsOnly)}catch{if($_.Exception.Message -match 'Missing echo'){$failed=$true}else{throw}}
+    if(-not $failed){throw 'legacy scenario accepted missing USB count'}
+    $script:fixtureMissingUsb=$false
     $script:P125Stem=''
     P125-Delta $before $after 'A0' 2 $stem
     $r=@(Import-Csv "$stem.A0.rows.csv")

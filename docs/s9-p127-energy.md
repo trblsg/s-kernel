@@ -22,6 +22,25 @@ Each phase keeps P126 COMBINED (15) active via P127 base bit1; one additional mo
 UART source: Scion-Project/android_kernel_samsung_exynos9810 lineage-24.0 arch/arm64/boot/dts/exynos/exynos9810-starlte_eur_open_26.dts, uart@10840000 interrupts=<0 422 0>, FIFO256; include/linux/serial_s3c.h and drivers/tty/serial/samsung.c. GIC INTID454, level. Register settings not hardware qualified. Watchdog fallback does not prove no bytes were lost before detection. ABOX stops only RDMA0/UAIF1, NOT shared AUD power domain or clocks. If DMA stop/resume ambiguous, retain ring and fail closed; cannot promise seamless recovery. PSR masks refresh trigger only, not proof scanout/rail off. INTx attach is not proof traffic delivered. Actual active functionality must be checked.
 
 ## Host
+### P12.7.1 host-only transport update (compatible with 11ea4c6 firmware)
+The 090722 log reached the end of USB-B; wifid's locale message prefixed
+the valid 80464 sysctl response. The old start-of-line parser timed out.
+Update s9-p125-timer-serial.ps1 and s9-p12-dual-serial.ps1; no flash or
+new boot args. Readback requires exact command echo and expected field,
+typed complete payload (including mixed lines), default 60ms pump pacing,
+at most two READ attempts with a fresh echo. No automatic WRITE retry.
+Every accepted response is journaled immediately. All eight frozen CPU
+counters are checkpointed before legacy USB reads; missing auxiliary
+USB reads after retry in EnergyTrials/EnergyOffline are marked UNAVAILABLE
+rather than zero. Transport exceptions, refusals, thermal and mandatory
+data errors still abort. P127 saves pre/post/complete phase checkpoints;
+policy is restored before gauge page retrieval, and each gauge page
+and partial CSV is saved. ABA_COMPLETE marks completed module only after
+A1; APPLIED alone is not completed A/B/A. After reboot start a fresh
+capture; never subtract counters from different boots. To skip completed
+modules in a later run explicitly select remaining EnergyModules; a new
+baseline is always taken. No automated cross-boot resume.
+
 Use matched s9-p125-timer-serial.ps1, s9-p12-dual-serial.ps1, s9-screen-lifecycle-serial.ps1. Close other COM clients. No symbol map required in these aggregate trials.
 
 First short qualification (select only desired modules):

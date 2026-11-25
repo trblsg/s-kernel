@@ -13,7 +13,8 @@ param(
  [ValidateRange(15,60)][int]$DriverSeconds=30,
  [string]$DriverModules='COMBINED',
  [ValidateRange(15,300)][int]$EnergySeconds=30,
- [string]$EnergyModules='USB,ABOX,BT,WIFI,TICKER',
+ [string]$EnergyModules='USB,ABOX,BT,WIFI,TICKER,PSR,LITTLE949',
+ [ValidateRange(30,250)][int]$ReadPaceMs=60,
  [switch]$AllowLowerFloor,
  [switch]$Execute,[switch]$LibraryOnly
 )
@@ -25,6 +26,9 @@ $Execute=$script:P125Exec;$LibraryOnly=$script:P125Lib
 $script:P125HostEnabled=$true
 $script:P126HostEnabled=$true
 $script:P127HostEnabled=$true
+# P12.7.1 transport only, no new firmware ABI.
+$script:P12ReadPaceMs=$ReadPaceMs
+$script:P12ReadAttempts=2
 $script:P127Dirty=$false
 $script:P126Dirty=$false
 $script:P125Dirty=$false
@@ -111,8 +115,22 @@ function P125-ReadSnapshot([string]$Label,[switch]$CountsOnly){
         $coverage[$cpu]=[pscustomobject]@{Bins=$bs;Kinds=$ts;MapDrop=[uint64]$v.mapdrop}
     }
     $usb=@{}
-    foreach($k in @('p6_usb_ticks','p6_usb_connected_ticks','p69_usb_disconnected_ticks')){$usb[$k]=[uint64](P12-Query $k)}
     $snapshot=[pscustomobject]@{Status=$status;Rows=$rows;Counts=$counts;Coverage=$coverage;Usb=$usb;PageMasks=$pageMasks}
+    if($script:P125Stem){
+        # Save all eight CPU counters BEFORE the optional legacy USB reads.
+        $snapshot|Export-Clixml -Depth 8 -LiteralPath "$script:P125Stem.$Label.scalar.clixml"
+    }
+    foreach($k in @('p6_usb_ticks','p6_usb_connected_ticks','p69_usb_disconnected_ticks')){
+        try{$usb[$k]=[uint64](P12-Query $k)}
+        catch{
+            # P127 has independent USB cadence counters. Only exhausted
+            # READ timeout is optional; refusal, transport and safety
+            # failures still stop the suite. Never substitute zero.
+            if($Scenario -notin @('EnergyTrials','EnergyOffline') -or $_.Exception.Message -ne "Missing echo and sysctl readback sysctl kern.hakios.$k"){throw}
+            $msg="P127 USB_OPTIONAL_MISSING $Label $k (no delta for this counter)"
+            $script:P125Report.Add($msg);Life-Say $msg
+        }
+    }
     if($script:P125Stem){
         # Write the frozen scalar evidence before any page request. Even if
         # COM drops later, do not lose IRQ/queue/deadline counters.
@@ -231,7 +249,11 @@ function P125-Delta($Before,$After,[string]$Label,[int]$Mode,[string]$Stem,[swit
     $cb=($big|Measure-Object callbacks -Sum).Sum;$zero=($big|Measure-Object zero_cb -Sum).Sum
     $line="PHASE $Label mode=$Mode seconds=$([Math]::Round($seconds,3)) BIG_IRQ=$irq BIG_IRQ_s=$([Math]::Round($irq/$seconds,2)) BIG_QUEUE=$q BIG_CALLBACKS=$cb BIG_ZERO=$zero reason=$($st.reason) display_on=$($st.display_on) coverage_accounting=$valid"
     $script:P125Report.Add($line);Life-Say $line
-    foreach($k in $After.Usb.Keys){$script:P125Report.Add("USB $Label $k delta=$(P125-Sub $After.Usb[$k] $Before.Usb[$k])")}
+    foreach($k in @('p6_usb_ticks','p6_usb_connected_ticks','p69_usb_disconnected_ticks')){
+        if($Before.Usb.ContainsKey($k) -and $After.Usb.ContainsKey($k)){
+            $script:P125Report.Add("USB $Label $k delta=$(P125-Sub $After.Usb[$k] $Before.Usb[$k])")
+        }else{$script:P125Report.Add("USB $Label $k delta=UNAVAILABLE")}
+    }
     foreach($kind in 1..14){
         $top=@($data|Where-Object {$_.kind_id -eq $kind}|Group-Object func,owner,aux|ForEach-Object {
             $r=$_.Group[0]
@@ -416,6 +438,7 @@ function P127-Delta($Before,$After,$Timer,[string]$Label,[string]$Stem){
     }
     foreach($page in ($pages.Keys|Sort-Object)){
         $line=P12-Query "p127_fg$page"
+        Add-Content -Encoding UTF8 -LiteralPath "$Stem.$Label.fg-pages.txt" -Value $line
         if($line -notmatch "^version=1 page=$page(?: |$)"){throw 'P127 gauge page mismatch'}
         foreach($m in [regex]::Matches($line,'(?:^| )r=(\d+)/(\d+)/(-?\d+)/(-?\d+)/(\d+)/(\d+)/(\d+)/(\d+)')){
             $seq=[uint64]$m.Groups[1].Value
@@ -425,6 +448,7 @@ function P127-Delta($Before,$After,$Timer,[string]$Label,[string]$Stem){
             $ua=[int]$m.Groups[3].Value;$uv=[uint32]$m.Groups[5].Value
             $samples[$seq]=[pscustomobject]@{phase=$Label;seq=$seq;ticks=$ticks;seconds_from_start=([double]$ticks-[double]$Timer.start)/$hz;in_window=($ticks -ge [uint64]$Timer.start -and $ticks -le [uint64]$Timer.end);current_ua=$ua;avg_ua=[int]$m.Groups[4].Value;voltage_uv=$uv;external=[int]$m.Groups[6].Value;charger_state=[int]$m.Groups[7].Value;qh_raw=[uint32]$m.Groups[8].Value;net_battery_w=[double]$ua*[double]$uv/1e12}
         }
+        if($samples.Count){$samples.Values|Sort-Object seq|Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath "$Stem.$Label.fg-partial.csv"}
         Start-Sleep -Milliseconds $PagePaceMs
     }
     if($samples.Count -ne $num){throw 'P127 gauge sequence gap'}
@@ -432,9 +456,11 @@ function P127-Delta($Before,$After,$Timer,[string]$Label,[string]$Stem){
     $script:P125Report.Add("P127 FG $Label samples=$num; signed NET battery power, not whole-system watts when external=1")
 }
 function P127-Window([string]$Label,[int]$Mask,[int]$Seconds,[string]$Stem,$BeforeTimer,[switch]$Offline){
+    $script:P12Phase="$Label-PRE"
     $initial=P127-Status
     if($initial.mode -ne '0'){throw 'P127 old mode still active'}
     $before=P127-Read
+    [pscustomobject]@{Version=1;Label=$Label;Mask=$Mask;Seconds=$Seconds;Offline=[bool]$Offline;BeforeTimer=$BeforeTimer;Before=$before}|Export-Clixml -Depth 12 -LiteralPath "$Stem.$Label.energy-pre.clixml"
     $script:P127Dirty=$true
     [void](P12-Query 'p127_mode' "$Mask")
     $armed=P127-Status
@@ -443,9 +469,11 @@ function P127-Window([string]$Label,[int]$Mask,[int]$Seconds,[string]$Stem,$Befo
     $timerMode=if($Offline){3}else{1}
     if($Offline){$script:TraceSeconds=$Seconds}
     $afterTimer=P125-Phase $Label $timerMode $Seconds $Stem $BeforeTimer -CountsOnly -OfflineAggregate:$Offline
+    $script:P12Phase="$Label-POST"
     $after=P127-Read
+    [pscustomobject]@{Version=1;Label=$Label;Mask=$Mask;Timer=$afterTimer;Before=$before;After=$after}|Export-Clixml -Depth 12 -LiteralPath "$Stem.$Label.energy-post.clixml"
     if([int]$after.Status.mode -ne $Mask -or $after.Status.reason -ne '0'){throw "P127 $Label lease revoked; phase invalid"}
-    P127-Delta $before $after $afterTimer.Status $Label $Stem
+    # Stop policy before reading gauge pages. P125 already froze WFI/FG.
     [void](P12-Query 'p127_mode' '0' -Cleanup)
     P125-PumpOff 2
     $restored=P127-Status
@@ -461,7 +489,11 @@ function P127-Window([string]$Label,[int]$Mask,[int]$Seconds,[string]$Stem,$Befo
     if((P125-Sub ([uint64]$m.psr_mask) ([uint64]$before.Metrics.psr_mask)) -gt (P125-Sub ([uint64]$m.psr_unmask) ([uint64]$before.Metrics.psr_unmask))){throw 'P127 PSR unmask not proven'}
     $script:P127Dirty=$false
     $script:P125Report.Add("P127 RESTORE $Label mode=0 $($restored.little_cur) kHz")
-    return [pscustomobject]@{Timer=$afterTimer;Pre=$before;Post=$after;Restored=$restored}
+    $script:P12Phase="$Label-FG"
+    P127-Delta $before $after $afterTimer.Status $Label $Stem
+    $result=[pscustomobject]@{Timer=$afterTimer;Pre=$before;Post=$after;Restored=$restored}
+    $result|Export-Clixml -Depth 12 -LiteralPath "$Stem.$Label.energy-complete.clixml"
+    return $result
 }
 function P127-RunEnergy([string]$Stem){
     $defs=@{USB=3;ABOX=5;PSR=9;WIFI=129;BT=257;TICKER=513;LITTLE949=17;LITTLE832=33;LITTLE715=49;LITTLE598=65;LITTLE455=81}
@@ -494,6 +526,9 @@ function P127-RunEnergy([string]$Stem){
         $line="P127 MODULE $name "+$(if($eligible){'APPLIED'}else{'NO_ELIGIBLE_PATH_OR_FALLBACK'})
         $script:P125Report.Add($line);Life-Say $line
         $a=P127-Window "P127-$name-A1" 1 $EnergySeconds $Stem $b.Timer
+        $script:P125Report.Add("P127 MODULE $name ABA_COMPLETE applied=$eligible")
+        $script:P125Report|Set-Content -Encoding UTF8 -LiteralPath "$Stem.p125-report.txt"
+        Life-Say "P127 MODULE $name ABA_COMPLETE applied=$eligible"
     }
 }
 function P125-Run {
@@ -506,6 +541,8 @@ function P125-Run {
     if($ReconnectPort -and $ReconnectPort -notmatch '^COM[0-9]+$'){throw 'ReconnectPort must be COM number'}
     $stem=Join-Path (Get-Location).Path ('putty-S9-p125-timer-'+(Get-Date -Format 'yyyyMMdd-HHmmss'))
     $raw=$stem+'.log';$errorText=$null;$script:P125Stem=$stem
+    $script:P12Journal="$stem.readback-journal.txt"
+    Life-Say 'P12.7.1 host serial parser: typed mixed replies, paced read-only retry, incremental checkpoint'
     try{
         $script:LifeRaw=[IO.FileStream]::new($raw,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
         P125-Open $Port
@@ -552,7 +589,7 @@ function P125-Run {
         $errorText=$_.Exception.Message;Life-Say "P125 STOP $errorText"
     }finally{
         if($script:P127Dirty -and $null -ne $script:LifeSerial -and $script:LifeSerial.IsOpen){
-            try{[void](P12-Query 'p127_mode' '0' -Cleanup);$script:P127Dirty=$false}catch{Life-Say 'P127 restore ACK missing; bounded kernel expiry'}
+            try{[void](P12-Query 'p127_mode' '0' -Cleanup);$script:P127Dirty=$false;Life-Say 'P127 cleanup mode=0 ACK'}catch{Life-Say 'P127 restore ACK missing; bounded kernel expiry'}
         }
         if($script:P126Dirty -and $null -ne $script:LifeSerial -and $script:LifeSerial.IsOpen){
             try{[void](P12-Query 'p126_mode' '0' -Cleanup);$script:P126Dirty=$false}catch{Life-Say 'P126 cleanup ACK missing; 120s bounded kernel lease'}

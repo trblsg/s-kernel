@@ -36,6 +36,9 @@ $script:P12Command=''
 $script:P12Echo=$false
 $script:P12Reply=$null
 $script:P12Refusal=$null
+$script:P12ReadPaceMs=0
+$script:P12ReadAttempts=1
+$script:P12Journal=''
 $script:P12PreflightVerified=$false
 $script:P12CpuDirty=$false
 $script:P12WfiDirty=$false
@@ -64,18 +67,91 @@ $script:P12Phase='PREFLIGHT'
 $script:P12Results=New-Object 'System.Collections.Generic.List[string]'
 $script:P12Phases=New-Object 'System.Collections.Generic.List[object]'
 $script:P12CA=@{}
+# P12.7.1: accept a complete, typed USB reply following a real command
+# echo even if another producer prepended text on the same physical line.
+# Never strip arbitrary suffixes or accept a partial numeric/structured value.
+function P12-ReplyShape([string]$Name,[string]$Reply,[bool]$Mixed){
+    $hex='[0-9a-fA-F]{1,16}'
+    $dec='[0-9]{1,20}'
+    $fields=@{
+        p126_status='mode reason haptic wifi_worker gnss touch touch_leeway shub lease_s watchdog_ms'
+        p126_diag='bt_idle bt_busy bt_rx bt_tty_tx_dequeued bt_uart_error abox_quiet abox_busy shub_quiet shub_busy hal_speaker'
+        p127_status='mode reason lease_s little_request little_cur ufs_safe ufs_busy floor_hits floor_bypass'
+        p127_metrics='usb_stock usb_8ms usb_linkdown usb_bypass usb_other abox_stop abox_resume abox_idle_wait abox_fault psr_mask psr_unmask psr_bypass psr_fault'
+        p127_wifi='attach irq watchdog fallback detach'
+        p127_bt='attach irq watchdog fallback detach tx_wake'
+        p127_ticker='wait due wake'
+        p127_fg_seq='seq slots'
+    }
+    if($Name -match '^(?:p125_(?:mode|select)|p126_mode|p127_mode|p6_usb_(?:ticks|connected_ticks)|p69_usb_disconnected_ticks)$'){
+        $n=[uint64]0
+        return ($Reply -cmatch "^$dec$" -and [uint64]::TryParse($Reply,[ref]$n))
+    }
+    if($fields.ContainsKey($Name)){
+        $pattern='^version=1'
+        foreach($k in $fields[$Name].Split(' ')){$pattern+=" $k=$dec"}
+        return ($Reply -cmatch ($pattern+'$'))
+    }
+    switch -Regex ($Name){
+        '^p125_status$' {
+            return ($Reply -cmatch "^version=1 active=[0-3] armed=[0-3] start=$dec end=$dec now=$dec hz=$dec reason=$dec down=$dec up=$dec display_on=$dec anchor=$hex slots=512 rows=2 counters=28 kinds=15 cumulative=1(?: page_lookup=scalar)?$")
+        }
+        '^p125_counts([0-7])$' {
+            $cpu=$Matches[1];return ($Reply -cmatch "^version=1 cpu=$cpu counters=$hex(?:,$hex){27}$")
+        }
+        '^p125_coverage([0-7])$' {
+            $cpu=$Matches[1];return ($Reply -cmatch "^version=1 cpu=$cpu pages=$hex(?:,$hex){3} mapdrop=$dec bins=$hex(?:,$hex){4} totals=$hex/$hex(?:,$hex/$hex){13}$")
+        }
+        '^p127_wfi([0-7])$' {
+            $cpu=$Matches[1];return ($Reply -cmatch "^version=1 cpu=$cpu sgi=$hex ppi=$hex spi=$hex bins=$hex/$hex(?:,$hex/$hex){6}$")
+        }
+        '^p127_fg([0-9]|1[0-5])$' {
+            $page=$Matches[1];return ($Reply -cmatch "^version=1 page=$page(?: r=$dec/$dec/-?$dec/-?$dec/$dec/[01]/$dec/$dec){0,4}$")
+        }
+        '^p127_bus$' {return ($Reply -cmatch "^version=1 at=$dec valid=$hex mif=$dec int=$dec intcam=$dec cam=$dec disp=$dec aud=$dec$")}
+        '^p127_shub$' {
+            $pattern="^version=1 enabled=$hex"
+            foreach($i in @(0,1,4,5,7,9)){$pattern+=" s$i=$dec/$dec"}
+            return ($Reply -cmatch ($pattern+'$'))
+        }
+        '^p125_page$' {return ($Reply -cmatch "^version=1 page=$dec(?: r=$hex(?:/$hex){11}/[a-zA-Z0-9_.-]+){1,2}$")}
+        '^g3d_lab_stats$' {
+            # Older firmware may use a different field set; require typed
+            # key=value tokens only for the mixed-line recovery case.
+            if($Mixed){return ($Reply -cmatch '^[a-zA-Z_][a-zA-Z0-9_]*=-?[0-9]+(?: [a-zA-Z_][a-zA-Z0-9_]*=-?[0-9]+)+$')}
+        }
+    }
+    # Preserve legacy parser compatibility for unmixed older sysctls.
+    return (-not $Mixed -and $Reply.Length -gt 0)
+}
 $script:LifeLineObserver={
     param([string]$Line,[datetime]$At)
-    if($script:P12Command -and $Line.Contains('usb> '+$script:P12Command)){
-        $script:P12Echo=$true
-    }
-    if($script:P12Command -and $script:P12Echo -and $Line.StartsWith('usb: '+$script:P12Command+':') -and $Line -notmatch ': set \(0\)$'){
-        $script:P12Refusal=$Line
-    }
-    if($script:P12Command -and $script:P12Echo -and $Line -match '^usb: kern\.hakios\.([a-zA-Z_0-9]+) = (.*)$'){
-        $name=$Matches[1];$value=$Matches[2].Trim()
-        $expected=$script:P12Command.Substring(('sysctl kern.hakios.').Length).Split('=')[0]
-        if($name -eq $expected){$script:P12Reply=$value}
+    if($script:P12Command){
+        $echo=[regex]::Escape('usb> '+$script:P12Command)
+        if($Line -cmatch "(?:^|(?<=\s))$echo\s*$"){
+            $script:P12Echo=$true
+        }
+        if($script:P12Echo){
+            $ref=[regex]::Escape('usb: '+$script:P12Command+':')
+            if($Line -cmatch "(?:^|(?<=\s))$ref(?<tail>.*)$" -and $Matches['tail'] -cnotmatch '^ set \(0\)\s*$'){
+                $script:P12Refusal=$Line
+            }
+            $expected=$script:P12Command.Substring(('sysctl kern.hakios.').Length).Split('=')[0]
+            $prefix=[regex]::Escape('usb: kern.hakios.'+$expected+' = ')
+            if($Line -cmatch "(?:^|(?<=\s))$prefix(?<reply>.*)$"){
+                $value=$Matches['reply'].Trim()
+                $mixed=-not $Line.StartsWith('usb: kern.hakios.'+$expected+' = ',[StringComparison]::Ordinal)
+                # Multiple USB tokens on a line are ambiguous.
+                if(([regex]::Matches($Line,'(?:^|(?<=\s))usb[:>]')).Count -eq 1 -and (P12-ReplyShape $expected $value $mixed)){
+                    if($null -ne $script:P12Reply -and $script:P12Reply -cne $value){
+                        $script:P12Refusal='Conflicting duplicate sysctl replies: '+$expected
+                    }else{
+                        $script:P12Reply=$value
+                        if($mixed){Life-Say "P12 MIXED_REPLY_RECOVERED $expected"}
+                    }
+                }
+            }
+        }
     }
     if($script:LifeSynced -and $Line -match '^hi: auto=ABORT .+reason=manual_usb_control'){
         $script:P12HiAbortSeen=$true
@@ -135,29 +211,42 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
     }
     $cmd='sysctl kern.hakios.'+$Name
     if($Value -ne ''){$cmd+='='+$Value}
-    $script:P12Command=$cmd
-    $script:P12Reply=$null
-    $script:P12Refusal=$null
-    $script:P12Echo=$false
     # Mark a failed/uncertain ENABLE write dirty before sending it, so
     # a thermal abort cannot skip its bounded restore-to-zero attempt.
     if($Name -eq 'p12_cpu_mode' -and $Value -eq '1'){$script:P12CpuDirty=$true}
     if($Name -eq 'p12_wfi_probe' -and $Value -eq '1'){$script:P12WfiDirty=$true}
     if($Name -eq 'hi_cmd' -and $Value -in @('201','252','253')){$script:P12HiDirty=$true}
     $bytes=[Text.Encoding]::ASCII.GetBytes($cmd+[char]13)
-    $script:LifeSerial.Write($bytes,0,$bytes.Length)
-    Life-Say ('P12 '+$(if($Value -eq ''){'READ '}else{'WRITE '})+$cmd)
-    $deadline=(Life-Now).AddSeconds(12)
-    while((Life-Now) -lt $deadline -and $null -eq $script:P12Reply -and $null -eq $script:P12Refusal){
-        Life-Pump
-        # During thermal abort cleanup, STOP checking the existing hot
-        # sample; doing so would mask a successful CPU/WFI restore ACK.
-        if(-not $Cleanup){Life-CheckSafety (Life-Now)}
+    $attempts=if($Value -eq '' -and -not $Cleanup){$script:P12ReadAttempts}else{1}
+    for($attempt=1;$attempt -le $attempts;$attempt++){
+        $script:P12Command=''
+        # Drain briefly before retry so late data cannot satisfy a new echo.
+        # Read-only retries only: never retransmit a policy or cursor write.
+        $pace=if($attempt -gt 1){300}else{$script:P12ReadPaceMs}
+        if($pace -gt 0 -and -not $Cleanup){
+            $until=(Life-Now).AddMilliseconds($pace)
+            while((Life-Now) -lt $until){Life-Pump;Life-CheckSafety (Life-Now)}
+        }
+        $script:P12Reply=$null;$script:P12Refusal=$null;$script:P12Echo=$false
+        $script:P12Command=$cmd
+        $script:LifeSerial.Write($bytes,0,$bytes.Length)
+        Life-Say ('P12 '+$(if($Value -eq ''){'READ '}else{'WRITE '})+$cmd)
+        $deadline=(Life-Now).AddSeconds(12)
+        while((Life-Now) -lt $deadline -and $null -eq $script:P12Reply -and $null -eq $script:P12Refusal){
+            Life-Pump
+            # During cleanup, do not mask the restore ACK with old heat.
+            if(-not $Cleanup){Life-CheckSafety (Life-Now)}
+        }
+        if($null -ne $script:P12Refusal){$reason=$script:P12Refusal;$script:P12Command='';throw "P12 sysctl rejected: $reason"}
+        if($null -ne $script:P12Reply){break}
+        $script:P12Command=''
+        if($attempt -lt $attempts){Life-Say "P12 READ_RETRY $Name attempt=$($attempt+1)/$attempts"}
     }
-    if($null -ne $script:P12Refusal){$reason=$script:P12Refusal;$script:P12Command='';throw "P12 sysctl rejected: $reason"}
     if($null -eq $script:P12Reply){$script:P12Command='';throw "Missing echo and sysctl readback $cmd"}
     $reply=$script:P12Reply
-    $script:P12Results.Add(('{0:HH:mm:ss.fff}Z {1} {2}={3}' -f (Life-Now),$script:P12Phase,$Name,$reply))
+    $record=('{0:HH:mm:ss.fff}Z {1} {2}={3}' -f (Life-Now),$script:P12Phase,$Name,$reply)
+    $script:P12Results.Add($record)
+    if($script:P12Journal){Add-Content -Encoding UTF8 -LiteralPath $script:P12Journal -Value $record}
     $script:P12Command=''
     $script:P12Echo=$false
     if($Value -ne '' -and $reply -ne $Value){throw "P12 readback mismatch for $Name, got $reply"}

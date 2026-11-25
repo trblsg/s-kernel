@@ -131,6 +131,7 @@ jobs:
             'tools/tests/test-s9-p125-timer-serial.ps1',
             'tools/tests/test-s9-p126-driver-trials.ps1',
             'tools/tests/test-s9-p127-energy-trials.ps1',
+            'tools/tests/test-s9-p127-serial-recovery.ps1',
             'tools/tests/test-s9-p11-lifecycle-serial.ps1',
             'tools/tests/test-s9-p10-lockscreen-source.ps1',
             'tools/tests/test-s9-p10-serial-harness.ps1',
