@@ -35,6 +35,7 @@ fork_checkout() {
 	if [ "$s" = profiles/ios-16.5.copy ]; then
 		python3 "$HERE/p124-gic-observer.py" osfmk/arm64/gic_v3_irq.c || return 1
 		python3 "$HERE/p1241-timer-observer.py" osfmk/arm/arm_timer.c osfmk/arm/rtclock.c || return 1
+		python3 "$HERE/p125-timer-observer.py" . || return 1
 	fi
 	echo "fork: $1: $url ${branch:-?} at ${FORK_COMMIT:0:12}"
 }

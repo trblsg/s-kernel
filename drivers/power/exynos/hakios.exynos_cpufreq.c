@@ -141,6 +141,8 @@
  * read for these facts, not one line copied.
  */
 #include <kern/clock.h>
+#include <kern/hakios_p125.h>
+#include <sys/proc.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <mach/mach_time.h>
@@ -713,6 +715,7 @@ p1241_timer_stats_sysctl(__unused struct sysctl_oid *oidp,
 P1241_TIMER_SYSCTL(0); P1241_TIMER_SYSCTL(1); P1241_TIMER_SYSCTL(2); P1241_TIMER_SYSCTL(3);
 P1241_TIMER_SYSCTL(4); P1241_TIMER_SYSCTL(5); P1241_TIMER_SYSCTL(6); P1241_TIMER_SYSCTL(7);
 #undef P1241_TIMER_SYSCTL
+#include "hakios.p125_sysctl.h"
 
 /* kern.hakios.gov_policy: gov_policy=, changed while the system runs (the USB console's "sysctl kern.hakios.gov_policy=N") */
 static int
@@ -1177,7 +1180,7 @@ p124_cpu_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     __atomic_store_n(&p124_cpu_reason,why,__ATOMIC_RELAXED);
     if(why){say("p124-cpu: refused mode=%d reason=%u\n",v,why);return EPERM;}
     uint64_t span=0;
-    nanoseconds_to_absolutetime(30ull*NSEC_PER_SEC,&span);
+    nanoseconds_to_absolutetime((v==1?90ull:30ull)*NSEC_PER_SEC,&span);
     __atomic_store_n(&p1241_initial_big,hakios_exynos_tmu_zone_mc(0),__ATOMIC_RELAXED);
     __atomic_store_n(&p1241_initial_lit,hakios_exynos_tmu_zone_mc(1),__ATOMIC_RELAXED);
     __atomic_store_n(&p1241_initial_gpu,hakios_exynos_tmu_zone_mc(2),__ATOMIC_RELAXED);
@@ -1195,7 +1198,7 @@ p124_cpu_stats_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     char buf[512];
     unsigned mode=p124_cpu_active(mach_absolute_time());
     snprintf(buf,sizeof(buf),"version=1 active=%u reason=%u effective=%llu bypass=%llu "
-        "little_floor=%u little_cur=%u big_cur=%u stock_lit_touch=%u stock_big_touch=%u stock_big_frame=%u ufs_safe=%u ufs_busy=%u guard_revision=2",
+        "little_floor=%u little_cur=%u big_cur=%u stock_lit_touch=%u stock_big_touch=%u stock_big_frame=%u ufs_safe=%u ufs_busy=%u guard_revision=2 floor_lease_s=90",
         mode,__atomic_load_n(&p124_cpu_reason,__ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&p124_cpu_effective,__ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&p124_cpu_bypass,__ATOMIC_RELAXED),
@@ -1911,6 +1914,7 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 			cool(&clusters[0]);
 			cool(&clusters[1]);
 			ocp_poll();
+			p125_guard(); /* only revokes read-only probe, no DVFS override */
 		}
 		decide(&clusters[0], now, (uint32_t)span_ms);
 		decide(&clusters[1], now, (uint32_t)span_ms);

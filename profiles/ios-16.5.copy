@@ -14,6 +14,8 @@ xnu/files/GenericARMPE.cpp iokit/Kernel/GenericARMPE.cpp
 # instead of leaving it in PROCESSOR_START) and the firmware's answers logged: AFFINITY_INFO before a restart,
 # the last stage and AFFINITY_INFO after the 5 s wait, and a CPU_OFF that returns.
 xnu/files/cpu.c osfmk/arm64/cpu.c
+xnu/files/hakios_p125.h osfmk/kern/hakios_p125.h
+xnu/files/hakios_p125_impl.h osfmk/arm64/hakios_p125_impl.h
 xnu/files/processor.c osfmk/kern/processor.c
 xnu/files/psci_smp.c osfmk/arm64/psci_smp.c
 # Core PSCI cannot depend on BSD's sys/ include path. Install the exact

@@ -338,6 +338,11 @@ static uint64_t dma_pa;
 static uint32_t ev_pos;
 static thread_call_t call;
 static int stage;                       /* how far the bring-up got: 0 none ... 5 */
+#if __has_include(<kern/hakios_p125.h>)
+#include <kern/hakios_p125.h>
+#else
+static inline void hakios_p125_usb_event(unsigned connected){(void)connected;}
+#endif
 static bool started, connected, high_speed;
 static uint32_t busy;                   /* the poll, or the way back to the loader, has the controller */
 /* P6.1 attribution: driver CALL COUNTS, not GIC IRQs or CPU wakeup counts.
@@ -1245,6 +1250,7 @@ on_connect_done(void)
 
 	high_speed = speed == 0;
 	acm.high_speed = high_speed;
+	if(!connected)hakios_p125_usb_event(1);
 	connected = true;
 	usb_speed_v = (int)speed;
 	(void)ep_config(0, 0, USBACM_EP0_MPS, DEPCFG_ACTION_MODIFY, 0);
@@ -1283,6 +1289,7 @@ events(void)
 			switch ((ev >> 8) & 0xf) {
 			case DEVT_DISCONNECT:
 				say("usb: disconnected\n");
+				if(connected)hakios_p125_usb_event(0);
 				connected = false;
 				bulk_down();
 				usbacm_reset(&acm);
@@ -1952,6 +1959,7 @@ link_down(void)
 	if (phase != SHOT_OFF && phase != SHOT_PREP) {
 		os_atomic_store(&shot.phase, SHOT_OFF, release);
 	}
+	if(connected)hakios_p125_usb_event(0);
 	connected = false;
 	usbacm_reset(&acm);
 	memset(&cline, 0, sizeof(cline));

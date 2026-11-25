@@ -13,7 +13,8 @@ param(
  [switch]$MicroGesture,[switch]$IncludeIdle,[switch]$WfiProbe,[switch]$WakeCheck,
  [switch]$P123,[switch]$AdaptiveFloor,[switch]$ClockCrossover,[switch]$IdleOnly,[switch]$HashCrossover,
  [switch]$P124,[ValidateRange(0,2)][int]$CpuFloorStep=0,[ValidateRange(0,2)][int]$BoostTrial=0,[switch]$ClockCadence,[switch]$GestureDetail,
- [switch]$QuietSuite,
+ [switch]$QuietSuite,[string]$Modules='LITTLE,GPU,CLOCK,HASH',
+ [ValidateRange(12,60)][int]$CpuFloorWindowSeconds=12,
  [switch]$Execute,[switch]$LibraryOnly
 )
 Set-StrictMode -Version 2
@@ -37,6 +38,10 @@ $script:P124ClockAllowed=[bool]($P124 -and ($ClockCadence -or $QuietSuite))
 $script:P1241Live=$false
 $script:P1241Anchor=$null
 $script:P1241SuiteResults=New-Object 'System.Collections.Generic.List[string]'
+$script:P125Selected=@($Modules.Split(',')|ForEach-Object {$_.Trim().ToUpperInvariant()})
+if(@($script:P125Selected|Where-Object {$_ -notin @('LITTLE','GPU','CLOCK','HASH')}).Count -or @($script:P125Selected|Select-Object -Unique).Count -ne $script:P125Selected.Count){throw 'Invalid or duplicate -Modules selection'}
+if($Modules -ne 'LITTLE,GPU,CLOCK,HASH' -and -not $QuietSuite){throw '-Modules requires -QuietSuite'}
+if($CpuFloorWindowSeconds -gt 12 -and (-not $P124 -or ($CpuFloorStep -ne 1 -and (-not $QuietSuite -or 'LITTLE' -notin $script:P125Selected)))){throw 'Long CPU window requires P124 LITTLE949 only'}
 if($QuietSuite -and (-not $P124 -or $AdaptiveFloor -or $ClockCrossover -or $ClockCadence -or $CpuFloorStep -or $HashCrossover -or $IdleOnly -or $MicroGesture -or $BoostTrial -or $GestureDetail -or $WakeCheck -or ([bool]$IncludeIdle -ne [bool]$WfiProbe))){throw '-QuietSuite requires -P124; optional -IncludeIdle -WfiProbe together; no individual scenarios'}
 $script:P124CpuDirty=$false
 $script:P124ClockArmed=$false
@@ -503,7 +508,7 @@ function P1241-Begin([string]$Kind){
     $script:P1241Anchor=[pscustomobject]@{Big=$script:LifeLastBig;Little=$script:LifeLastLittle;Gpu=$script:LifeLastGpuC}
 }
 function P1241-QuietSuite {
-    foreach($name in @('LITTLE','GPU','CLOCK','HASH')){
+    foreach($name in $script:P125Selected){
         $kind=if($name -eq 'HASH'){'Hash'}else{'Quiet'}
         try{
             P1241-RequireReady $kind
@@ -541,7 +546,7 @@ function P1241-QuietSuite {
         }finally{$script:P1241Anchor=$null}
     }
     $passed=@($script:P1241SuiteResults|Where-Object {$_ -match '^MODULE \w+ COMPLETE$'}).Count
-    Life-Say "P1241_SUITE_FINISHED completed=$passed/4; see per-module COMPLETE/SKIPPED; not a claim all modules passed"
+    Life-Say "P1241_SUITE_FINISHED completed=$passed/$($script:P125Selected.Count); see per-module COMPLETE/SKIPPED; not a claim all modules passed"
     if($passed -eq 0 -and -not $IncludeIdle){throw 'P1241 no eligible quiet modules; no cooldown retry'}
 }
 # P12.4 uses existing serial/safety harness. No raw frequency writes.
@@ -549,6 +554,7 @@ function P124-CpuProfile([string]$Label,[int]$Mode){
     $script:P12Phase=$Label
     P123-Guard
     $before=P12-Query 'p124_cpu_stats'
+    if($CpuFloorWindowSeconds -gt 12 -and $before -notmatch 'floor_lease_s=90'){throw 'Long floor window requires matched P12.5 kernel'}
     [void](P12-Query 'p1231_ufs_stats')
     if($Mode -ne 0){
         if($script:P1241Live -and $before -notmatch 'ufs_safe=1 ufs_busy=0 '){throw 'P1241_SKIP LITTLE storage busy or ineligible before arm'}
@@ -557,7 +563,7 @@ function P124-CpuProfile([string]$Label,[int]$Mode){
     $script:P124CpuDirty=$true
     try{
         [void](P12-Query 'p124_cpu_mode' "$Mode")
-        P12-Observe $Label 12 'No touch. Stock load governor and thermal ceiling retained'
+        P12-Observe $Label $CpuFloorWindowSeconds 'No touch. Stock load governor and thermal ceiling retained'
         $after=P12-Query 'p124_cpu_stats'
         [void](P12-Query 'p1231_ufs_stats')
         if((P122-CountField $after 'active') -ne $Mode){throw 'P12.4 CPU lease revoked; comparison incomplete'}
@@ -829,7 +835,7 @@ function P122-Run {
  }finally{
     if($script:P12PreflightVerified -and $null -ne $script:LifeSerial -and $script:LifeSerial.IsOpen){
         if($script:P124CpuDirty){
-            try{[void](P12-Query 'p124_cpu_mode' '0' -Cleanup);$script:P124CpuDirty=$false}catch{Life-Say ('P12.4 CPU restore UNSURE; 30s expiry '+$_.Exception.Message)}
+            try{[void](P12-Query 'p124_cpu_mode' '0' -Cleanup);$script:P124CpuDirty=$false}catch{Life-Say ('P12.4 CPU restore UNSURE; bounded expiry <=90s '+$_.Exception.Message)}
         }
         if($script:P123HashDirty){
             try{[void](P12-Query 'p1231_hash_mode' '0' -Cleanup);$script:P123HashDirty=$false}catch{Life-Say ('Hash restore UNSURE; 30s deadline '+$_.Exception.Message)}

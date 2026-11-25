@@ -232,6 +232,7 @@ static GenericARMCPU ** gCPUList;               /* GenericARMPE::start()'s cpus[
 static uint32_t gPanelSleep, gSleepCores, gSleepCoresAfter = 10;
 static thread_call_t gSleepCoresCall;
 static volatile int gDisplayOn = -1;            /* -1: not said yet */
+#include <kern/hakios_p125.h>
 /* P7 read-only display request, NOT proof of panel/DECON power state. */
 extern "C" int
 hakios_display_requested_on(void)
@@ -370,6 +371,8 @@ hakios_display_power(int on)
 		return;
 	}
 	gDisplayOn = on;
+	/* P12.5 observation of actual display requests only. */
+	hakios_p125_display_event(on ? 1u : 0u);
 	hakios_say("GenericARMPE: the display %s (iOS's power request)%s%s\n", on ? "on" : "off",
 	    gPanelSleep ? "; panel_sleep=1" : "", gSleepCores ? "; sleep_cores=" : "");
 	if (gPanelSleep || hakios_p9_panel_auto_on()) {

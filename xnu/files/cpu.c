@@ -106,6 +106,7 @@ volatile uint32_t hakios_p124_phys[8],hakios_p124_phys_valid[8];
 volatile uint64_t hakios_p124_irq[8][1020],hakios_p124_vtimer[8];
 volatile uint64_t hakios_p124_wfi_hist[8][5];
 volatile uint64_t hakios_p124_wfi_bounds[4];
+#include "hakios_p125_impl.h"
 /* P12.4.1: classify actual software timer service and deadline requests.
  * Overlapping reasons are counted independently; no callback/deadline changes.
  * 0 calls, 1 idle, 2 queue, 3 running, 4 none, 5 before rtcPop,
@@ -137,6 +138,7 @@ void hakios_p124_irq_observe(int cpu,uint32_t intid,bool timer);
 void
 hakios_p124_irq_observe(int cpu,uint32_t intid,bool timer)
 {
+    if(timer && cpu>=0 && cpu<8 && hakios_p125_active())hakios_p125_inc((unsigned)cpu,P125_IRQ27,1);
     if(!__atomic_load_n(&hakios_p12_wfi_probe_enable,__ATOMIC_RELAXED) ||
         cpu<0 || cpu>=8 || intid>=1020)return;
     __atomic_fetch_add(&hakios_p124_irq[cpu][intid],1,__ATOMIC_RELAXED);

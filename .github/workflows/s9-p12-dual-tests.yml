@@ -23,6 +23,7 @@ jobs:
           /tmp/s9-p9
           python3 tools/tests/test_p124_gic_observer.py
           python3 tools/tests/test_p1241_timer_observer.py
+          python3 tools/tests/test_p125_timer_observer.py
       - name: Check source guards, preserving P9 panel and P7 CPU recovery safety
         run: |
           python3 - <<'PY'
@@ -123,6 +124,7 @@ jobs:
             'tools/tests/test-s9-p1231-thermal-serial.ps1',
             'tools/tests/test-s9-p124-thermal-serial.ps1',
             'tools/tests/test-s9-p1241-suite.ps1',
+            'tools/tests/test-s9-p125-timer-serial.ps1',
             'tools/tests/test-s9-p11-lifecycle-serial.ps1',
             'tools/tests/test-s9-p10-lockscreen-source.ps1',
             'tools/tests/test-s9-p10-serial-harness.ps1',
