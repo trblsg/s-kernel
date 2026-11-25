@@ -63,6 +63,22 @@ int main(void)
           for(unsigned burst=0;burst<2;burst++)
             for(unsigned moving=0;moving<2;moving++)
               assert(s9_p124_boost_request(m,f,big,burst,moving)<=f);
-    puts("P12/P12.4 CPU thermal lower-only fail-open policy PASS");
+    /* Warm quiet-floor admission accepts the real refused 67/65.6/65
+     * baseline; interaction retains extra headroom. */
+    assert(s9_p1241_temp_ok(1,true,100,67000,65600,65000));
+    assert(s9_p1241_temp_ok(2,true,100,68000,67000,67000));
+    assert(!s9_p1241_temp_ok(1,true,100,68001,67000,67000));
+    assert(!s9_p1241_temp_ok(1,true,100,68000,67001,67000));
+    assert(!s9_p1241_temp_ok(1,true,2001,67000,65600,65000));
+    assert(s9_p1241_temp_ok(3,true,100,67000,65000,66000));
+    assert(!s9_p1241_temp_ok(3,true,100,67000,65600,65000));
+    assert(!s9_p1241_temp_ok(1,false,100,76000,66000,65000));
+    assert(!s9_p1241_temp_ok(1,false,100,67000,70000,65000));
+    assert(!s9_p1241_temp_ok(3,false,100,67000,66000,72000));
+    assert(s9_p1241_rise_ok(68999,66999,67999,66000,65000,65000));
+    assert(!s9_p1241_rise_ok(69000,66000,65000,66000,65000,65000));
+    assert(!s9_p1241_rise_ok(67000,67000,65000,66000,65000,65000));
+    assert(!s9_p1241_rise_ok(67000,66000,68000,66000,65000,65000));
+    puts("P12/P12.4.1 CPU thermal lower-only fail-open policy PASS");
     return 0;
 }

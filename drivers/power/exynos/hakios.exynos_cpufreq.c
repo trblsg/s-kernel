@@ -300,6 +300,7 @@ static uint32_t p124_cpu_mode;
 static bool p124_enabled;
 static uint64_t p124_cpu_until, p124_cpu_effective, p124_cpu_bypass;
 static uint32_t p124_cpu_reason;
+static int32_t p1241_initial_big,p1241_initial_lit,p1241_initial_gpu;
 extern bool hakios_p124_ufs_safe(void);
 extern bool hakios_p124_ufs_busy(void);
 extern void hakios_p124_gpu_touch(void);
@@ -564,6 +565,7 @@ extern volatile uint64_t hakios_p12_wfi_entries[8];
 extern volatile uint64_t hakios_p12_wfi_ticks[8];
 extern volatile uint32_t hakios_p124_phys[8],hakios_p124_phys_valid[8];
 extern volatile uint64_t hakios_p124_irq[8][1020],hakios_p124_vtimer[8];
+extern volatile uint64_t hakios_p1241_timer[8][13];
 extern volatile uint64_t hakios_p124_wfi_hist[8][5],hakios_p124_wfi_bounds[4];
 static int
 p12_wfi_probe_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
@@ -691,6 +693,26 @@ p124_irq_stats_sysctl(__unused struct sysctl_oid *oidp,
 P124_IRQ_SYSCTL(0); P124_IRQ_SYSCTL(1); P124_IRQ_SYSCTL(2); P124_IRQ_SYSCTL(3);
 P124_IRQ_SYSCTL(4); P124_IRQ_SYSCTL(5); P124_IRQ_SYSCTL(6); P124_IRQ_SYSCTL(7);
 #undef P124_IRQ_SYSCTL
+static int
+p1241_timer_stats_sysctl(__unused struct sysctl_oid *oidp,
+    __unused void *arg1,int cpu,struct sysctl_req *req)
+{
+    if(cpu<0 || cpu>=8)return EINVAL;
+    unsigned long long a[13];
+    for(unsigned i=0;i<13;i++)a[i]=(unsigned long long)
+        __atomic_load_n(&hakios_p1241_timer[cpu][i],__ATOMIC_RELAXED);
+    char buf[512];
+    snprintf(buf,sizeof(buf),"version=1 cpu=%d calls=%llu idle_due=%llu queue_due=%llu "
+        "running_expired=%llu none_due=%llu before_rtcPop=%llu setpop=%llu overdue=%llu "
+        "pop_bins_lt100_500_1000_10000_ge10000us=%llu,%llu,%llu,%llu,%llu overlapping_reasons=1",
+        cpu,a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9],a[10],a[11],a[12]);
+    return SYSCTL_OUT(req,buf,strlen(buf)+1);
+}
+#define P1241_TIMER_SYSCTL(N) SYSCTL_PROC(_kern_hakios,OID_AUTO,p124_timer##N, \
+    CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,N,p1241_timer_stats_sysctl,"A","P12.4.1 read-only timer service and setPop")
+P1241_TIMER_SYSCTL(0); P1241_TIMER_SYSCTL(1); P1241_TIMER_SYSCTL(2); P1241_TIMER_SYSCTL(3);
+P1241_TIMER_SYSCTL(4); P1241_TIMER_SYSCTL(5); P1241_TIMER_SYSCTL(6); P1241_TIMER_SYSCTL(7);
+#undef P1241_TIMER_SYSCTL
 
 /* kern.hakios.gov_policy: gov_policy=, changed while the system runs (the USB console's "sysctl kern.hakios.gov_policy=N") */
 static int
@@ -1107,7 +1129,11 @@ p124_cpu_refusal(bool arm,unsigned mode,uint64_t now)
     if(!p124_enabled || !gov_running || gov_policy!=2 || __atomic_load_n(&p12_cpu_mode,__ATOMIC_ACQUIRE) || clusters[0].online!=4 ||
         clusters[1].online!=4 || hakios_cpu_exit_mask || big_cores!=SCION_BIG_CORES)why|=1;
     if(hakios_display_requested_on()!=1)why|=2;
-    if(!s9_p124_temp_ok(arm,hakios_exynos_tmu_age_ms(),big,lit,gpu))why|=4;
+    if(!s9_p1241_temp_ok(mode,arm,hakios_exynos_tmu_age_ms(),big,lit,gpu))why|=4;
+    if(!arm && mode<=2 && !s9_p1241_rise_ok(big,lit,gpu,
+        __atomic_load_n(&p1241_initial_big,__ATOMIC_RELAXED),
+        __atomic_load_n(&p1241_initial_lit,__ATOMIC_RELAXED),
+        __atomic_load_n(&p1241_initial_gpu,__ATOMIC_RELAXED)))why|=512;
     if(arm && !hakios_p123_input_quiet(now))why|=8;
     if(mode<=2){
         if(clusters[0].floor!=1053000 || !p124_rate_present(&clusters[0],s9_p124_floor_request(mode)) ||
@@ -1152,6 +1178,9 @@ p124_cpu_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     if(why){say("p124-cpu: refused mode=%d reason=%u\n",v,why);return EPERM;}
     uint64_t span=0;
     nanoseconds_to_absolutetime(30ull*NSEC_PER_SEC,&span);
+    __atomic_store_n(&p1241_initial_big,hakios_exynos_tmu_zone_mc(0),__ATOMIC_RELAXED);
+    __atomic_store_n(&p1241_initial_lit,hakios_exynos_tmu_zone_mc(1),__ATOMIC_RELAXED);
+    __atomic_store_n(&p1241_initial_gpu,hakios_exynos_tmu_zone_mc(2),__ATOMIC_RELAXED);
     __atomic_store_n(&p124_cpu_mode,(uint32_t)v,__ATOMIC_RELAXED);
     __atomic_store_n(&p124_cpu_until,now+span,__ATOMIC_RELEASE);
     return 0;
@@ -1166,7 +1195,7 @@ p124_cpu_stats_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     char buf[512];
     unsigned mode=p124_cpu_active(mach_absolute_time());
     snprintf(buf,sizeof(buf),"version=1 active=%u reason=%u effective=%llu bypass=%llu "
-        "little_floor=%u little_cur=%u big_cur=%u stock_lit_touch=%u stock_big_touch=%u stock_big_frame=%u ufs_safe=%u ufs_busy=%u",
+        "little_floor=%u little_cur=%u big_cur=%u stock_lit_touch=%u stock_big_touch=%u stock_big_frame=%u ufs_safe=%u ufs_busy=%u guard_revision=2",
         mode,__atomic_load_n(&p124_cpu_reason,__ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&p124_cpu_effective,__ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&p124_cpu_bypass,__ATOMIC_RELAXED),

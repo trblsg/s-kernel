@@ -106,6 +106,33 @@ volatile uint32_t hakios_p124_phys[8],hakios_p124_phys_valid[8];
 volatile uint64_t hakios_p124_irq[8][1020],hakios_p124_vtimer[8];
 volatile uint64_t hakios_p124_wfi_hist[8][5];
 volatile uint64_t hakios_p124_wfi_bounds[4];
+/* P12.4.1: classify actual software timer service and deadline requests.
+ * Overlapping reasons are counted independently; no callback/deadline changes.
+ * 0 calls, 1 idle, 2 queue, 3 running, 4 none, 5 before rtcPop,
+ * 6 setPop, 7 requested overdue, 8..12 programmed duration bins. */
+volatile uint64_t hakios_p1241_timer[8][13];
+void hakios_p1241_timer_observe(unsigned cpu,unsigned reasons);
+void hakios_p1241_pop_observe(unsigned cpu,uint64_t deadline,uint64_t now,unsigned ticks);
+void
+hakios_p1241_timer_observe(unsigned cpu,unsigned reasons)
+{
+    if(!__atomic_load_n(&hakios_p12_wfi_probe_enable,__ATOMIC_RELAXED) || cpu>=8)return;
+    __atomic_fetch_add(&hakios_p1241_timer[cpu][0],1,__ATOMIC_RELAXED);
+    for(unsigned i=0;i<3;i++)
+        if(reasons&(1u<<i))__atomic_fetch_add(&hakios_p1241_timer[cpu][1+i],1,__ATOMIC_RELAXED);
+    if(!(reasons&7u))__atomic_fetch_add(&hakios_p1241_timer[cpu][4],1,__ATOMIC_RELAXED);
+    if(reasons&8u)__atomic_fetch_add(&hakios_p1241_timer[cpu][5],1,__ATOMIC_RELAXED);
+}
+void
+hakios_p1241_pop_observe(unsigned cpu,uint64_t deadline,uint64_t now,unsigned ticks)
+{
+    if(!__atomic_load_n(&hakios_p12_wfi_probe_enable,__ATOMIC_RELAXED) || cpu>=8)return;
+    __atomic_fetch_add(&hakios_p1241_timer[cpu][6],1,__ATOMIC_RELAXED);
+    if(deadline<=now)__atomic_fetch_add(&hakios_p1241_timer[cpu][7],1,__ATOMIC_RELAXED);
+    unsigned b=0;
+    while(b<4 && (uint64_t)ticks>=__atomic_load_n(&hakios_p124_wfi_bounds[b],__ATOMIC_RELAXED))b++;
+    __atomic_fetch_add(&hakios_p1241_timer[cpu][8+b],1,__ATOMIC_RELAXED);
+}
 void hakios_p124_irq_observe(int cpu,uint32_t intid,bool timer);
 void
 hakios_p124_irq_observe(int cpu,uint32_t intid,bool timer)

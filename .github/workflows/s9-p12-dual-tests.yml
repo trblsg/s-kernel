@@ -22,6 +22,7 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -O2 tools/tests/test_s9_p9_clock_policy.c -o /tmp/s9-p9
           /tmp/s9-p9
           python3 tools/tests/test_p124_gic_observer.py
+          python3 tools/tests/test_p1241_timer_observer.py
       - name: Check source guards, preserving P9 panel and P7 CPU recovery safety
         run: |
           python3 - <<'PY'
@@ -64,6 +65,9 @@ jobs:
           assert 'p1231-clock-view:' in s('userland/src/s9_hi_clock_resolve.inc')
           assert 'p1231_ufs_stats_sysctl' in s('drivers/storage/ufs/hakios.ufs.c')
           assert 'p124_cpu_mode_sysctl' in cpu and 's9_p124_temp_ok' in thermal
+          assert 's9_p1241_temp_ok' in cpu and 's9_p1241_rise_ok' in cpu and 'guard_revision=2' in cpu
+          assert 'p1241_timer_stats_sysctl' in cpu and 'hakios_p1241_timer_observe' in xnu
+          assert 'p1241-timer-observer.py' in s('xnu/fork.sh')
           assert 'hakios_p124_loader_gone' in s('xnu/files/psci_smp.c')
           assert 'hakios_p124_ufs_safe' in s('drivers/storage/ufs/hakios.ufs.c')
           assert 'hakios_p124_irq_observe' in xnu and 'p124-gic-observer.py' in s('xnu/fork.sh')
@@ -118,6 +122,7 @@ jobs:
             'tools/tests/test-s9-p123-source-serial.ps1',
             'tools/tests/test-s9-p1231-thermal-serial.ps1',
             'tools/tests/test-s9-p124-thermal-serial.ps1',
+            'tools/tests/test-s9-p1241-suite.ps1',
             'tools/tests/test-s9-p11-lifecycle-serial.ps1',
             'tools/tests/test-s9-p10-lockscreen-source.ps1',
             'tools/tests/test-s9-p10-serial-harness.ps1',

@@ -99,7 +99,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
         'p122_diag_mode','p122_gpu_stats',
         'p7_cpu_stats','p4_stats')
     if($script:P123HostEnabled){$allowed+=@('p123_floor_mode','p123_floor_stats','p1231_hash_mode','p1231_ufs_stats')}
-    if($script:P124HostEnabled){$allowed+=@('p124_cpu_mode','p124_cpu_stats')+(0..7|ForEach-Object {"p124_irq$_"})}
+    if($script:P124HostEnabled){$allowed+=@('p124_cpu_mode','p124_cpu_stats')+(0..7|ForEach-Object {"p124_irq$_";"p124_timer$_"})}
     if($Name -notin $allowed){throw "P12 sysctl disallowed $Name"}
     if($script:P124HostEnabled -and $Name -eq 'p1231_hash_mode' -and $Value -eq '1'){throw 'P12.4 rejects scalar thermal trial'}
     if($Value -ne '' -and -not (
@@ -168,6 +168,7 @@ function P12-CoolStart([int]$Seconds=12){
         Life-Pump
         $now=Life-Now
         Life-CheckSafety $now
+        P12-EarlyThermalGuard
         if($script:LifeState -ne 'ON'){
             throw 'P12.1 cool preflight: screen is not ON; refuse active A/B. Leave screen OFF for cooling.'
         }
