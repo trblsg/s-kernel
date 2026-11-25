@@ -61,6 +61,9 @@ if [ "$BUILDER" != dxb-ios ] && [ -d "$SRC" ] && grep -qF "# HakiOS drivers: mad
 	xnu/sync-drivers.sh "$SRC" || exit 1
 	python3 tools/hakios-config.py kernel --tree "$SRC" || exit 1
 fi
+if [ "$(OS_PROFILE_QUIET=1 python3 tools/os-profile.py get fork_copy 2>/dev/null)" = profiles/ios-16.5.copy ]; then
+	python3 xnu/p125-timer-observer.py --verify "$SRC" || exit 1
+fi
 export XNU_SRC=${XNU_SRC:-$PWD/$SRC}
 log=${KERNEL_LOG:-xnu-build.log}
 if [ "$BUILDER" = dxb-ios ]; then

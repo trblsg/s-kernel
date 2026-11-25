@@ -22,4 +22,17 @@ for(const [file,arr] of Object.entries(edits)){
  if(out!==s)throw Error(file+' inverse');
  console.log('PASS '+file+' '+arr.length+' anchors');
 }
-console.log('P125 pinned exact source '+total+' anchors PASS');
+const makefile=fs.readFileSync(path.join(root,'osfmk/kern/Makefile'),'utf8').replace(/\r\n/g,'\n');
+const anchor='XNU_ONLY_EXPORTS = '+String.fromCharCode(92)+'\n';
+const entry='\thakios_p125.h '+String.fromCharCode(92)+'\n';
+if(makefile.split(anchor).length!==2 || makefile.includes('hakios_p125.h'))throw Error('export anchor');
+const patched=makefile.replace(anchor,anchor+entry);
+if(patched.split(anchor+entry).length!==2 || patched.replace(anchor+entry,anchor)!==makefile)throw Error('export round-trip');
+const exportList=patched.split(anchor)[1].split('\n\n')[0];
+if(!exportList.includes(entry) || !patched.includes('${XNU_ONLY_EXPORTS}'))throw Error('header not in export list');
+const mapping=fs.readFileSync('drivers/map','utf8').split(/\r?\n/);
+if(mapping.filter(l=>l==='power/exynos bsd/dev/hakios.p125_sysctl.h').length!==1)throw Error('missing driver map entry');
+for(const [f,target] of [['xnu/files/hakios_p125.h','osfmk/kern/hakios_p125.h'],['xnu/files/hakios_p125_impl.h','osfmk/arm64/hakios_p125_impl.h']]){
+ if(!fs.existsSync(f)||!fs.readFileSync('profiles/ios-16.5.copy','utf8').split(/\r?\n/).includes(f+' '+target))throw Error('missing overlay '+f);
+}
+console.log('P125 pinned exact source '+total+' C/C++ anchors + XNU-only export + header maps PASS');

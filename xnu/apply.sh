@@ -32,6 +32,9 @@ while read -r sub tree _; do
 	cp -p "$HERE/../drivers/$sub/$(basename "$tree")" "$tree"
 	NDRIVERS=$((NDRIVERS + 1))
 done < "$HERE/../drivers/map"
+if [ "$(_scion_profile_get fork_copy || true)" = profiles/ios-16.5.copy ]; then
+	python3 "$HERE/p125-timer-observer.py" --verify "$DIR" || exit 1
+fi
 # the drivers of the SoC and device repositories checked out (socs/*/drivers/, devices/*/drivers/)
 python3 "$HERE/../tools/hakios-config.py" external-files | while IFS="$(printf '\t')" read -r src tree; do
 	mkdir -p "$(dirname "$tree")"

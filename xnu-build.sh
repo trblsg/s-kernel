@@ -57,6 +57,18 @@ fi
 # The kernel's makefiles pass -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang: clang 15 and older need
 # it, clang 16 and later (Xcode's today) refuse it. The compiler is asked once; xnu-deps/host/bin/xnu-clang keeps or drops it.
 export XNU_CLANG_TAVI_FLAG=$(/usr/bin/clang -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang -fsyntax-only -x c /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
-exec make HAKIOS_OBJECTS="$LX" SDKROOT=iphoneos ARCH_CONFIGS=ARM64 MACHINE_CONFIGS=${MACHINE:-$(_scion_profile machine BCM2837)} KERNEL_CONFIGS=DEVELOPMENT \
-  ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=${XNU_ARCH_STRING:-arm64} BUILD_WERROR=0 BUILD_LTO=0 DO_CTFMERGE=0 \
-  HOST_CC="$HOSTCC" HOST_FLEX=flex HOST_BISON=bison HOST_GM4=m4 CC=xnu-clang CXX=xnu-clang++ LOGCOLORS=n $XNU_MAKE_ARGS "$@"
+make_args=(HAKIOS_OBJECTS="$LX" SDKROOT=iphoneos ARCH_CONFIGS=ARM64 MACHINE_CONFIGS=${MACHINE:-$(_scion_profile machine BCM2837)} KERNEL_CONFIGS=DEVELOPMENT
+  ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=${XNU_ARCH_STRING:-arm64} BUILD_WERROR=0 BUILD_LTO=0 DO_CTFMERGE=0
+  HOST_CC="$HOSTCC" HOST_FLEX=flex HOST_BISON=bison HOST_GM4=m4 CC=xnu-clang CXX=xnu-clang++ LOGCOLORS=n)
+# Installer calls this with only make flags (-k/-j). Exercise XNU's real
+# header export step before compiling thousands of objects.
+if [ "${P125_EXPORT_PREFLIGHT:-0}" = 1 ]; then
+  make "${make_args[@]}" $XNU_MAKE_ARGS "$@" exporthdrs || exit 1
+  exported="${OBJROOT:-$PWD/BUILD/obj}/EXPORT_HDRS/osfmk/kern/hakios_p125.h"
+  cmp -s osfmk/kern/hakios_p125.h "$exported" || {
+    echo "P12.5 ERROR: missing or stale exported header: $exported" >&2
+    exit 1
+  }
+  echo "P12.5 actual XNU EXPORT_HDRS preflight PASS"
+fi
+exec make "${make_args[@]}" $XNU_MAKE_ARGS "$@"
