@@ -4,10 +4,14 @@
 param(
  [ValidatePattern('^COM[0-9]+$')][string]$Port='COM125',
  [string]$ReconnectPort='',
- [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump')][string]$Scenario='Trace',
+ [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump','DriverTrials')][string]$Scenario='Trace',
  [ValidateRange(30,90)][int]$TraceSeconds=60,
  [ValidateRange(12,40)][int]$AggregateSeconds=20,
  [string]$SymbolMap='',
+ [string]$ResumeSnapshot='',
+ [ValidateRange(50,500)][int]$PagePaceMs=80,
+ [ValidateRange(15,60)][int]$DriverSeconds=30,
+ [string]$DriverModules='COMBINED',
  [switch]$Execute,[switch]$LibraryOnly
 )
 Set-StrictMode -Version 2
@@ -16,6 +20,8 @@ $script:P125Exec=$Execute;$script:P125Lib=$LibraryOnly
 . (Join-Path $PSScriptRoot 's9-p12-dual-serial.ps1') -LibraryOnly -Port $Port
 $Execute=$script:P125Exec;$LibraryOnly=$script:P125Lib
 $script:P125HostEnabled=$true
+$script:P126HostEnabled=$true
+$script:P126Dirty=$false
 $script:P125Dirty=$false
 $script:P125Stem=''
 $script:P125Kinds=@('unused','IRQ_CALLBACK','ENTER','WAIT_ARM','WAIT_EXPIRE','DELAYED_READY','THREAD_CALL_INVOKE','MK_ARM','MK_SEND','IOKIT_ACTION','OTHER_QUEUE_CALLBACK','ASSIGN','MK_CANCEL','CANCEL','WAIT_STALE')
@@ -61,6 +67,22 @@ function P125-Symbol([uint64]$Address){
     if($off -eq 0){return $s.Name}
     return ($s.Name+'+0x'+$off.ToString('x'))
 }
+function P125-CheckFrozenIdentity($Old,$New){
+    foreach($k in @('version','active','armed','start','end','hz','reason','anchor','slots','rows','counters','kinds')){
+        if($Old.Status[$k] -ne $New.Status[$k]){throw "P125 resume identity mismatch $k"}
+    }
+    for($cpu=0;$cpu -lt 8;$cpu++){
+        if(($Old.Counts[$cpu] -join ',') -ne ($New.Counts[$cpu] -join ',') -or
+           ($Old.PageMasks[$cpu] -join ',') -ne ($New.PageMasks[$cpu] -join ',') -or
+           ($Old.Coverage[$cpu].Bins -join ',') -ne ($New.Coverage[$cpu].Bins -join ',')){
+            throw "P125 resume counters changed CPU=$cpu"
+        }
+        for($i=0;$i -lt 14;$i++){
+            if($Old.Coverage[$cpu].Kinds[$i].Total -ne $New.Coverage[$cpu].Kinds[$i].Total -or
+               $Old.Coverage[$cpu].Kinds[$i].Drop -ne $New.Coverage[$cpu].Kinds[$i].Drop){throw 'P125 resume coverage changed'}
+        }
+    }
+}
 function P125-ReadSnapshot([string]$Label,[switch]$CountsOnly){
     $script:P12Phase=$Label
     $status=P125-Status
@@ -95,6 +117,23 @@ function P125-ReadSnapshot([string]$Label,[switch]$CountsOnly){
     if(-not $status.ContainsKey('page_lookup') -or $status.page_lookup -ne 'scalar'){
         throw 'P125 unsafe legacy page resolver; use FrozenSummary or matched P12.5.1 kernel'
     }
+    $saved=@{}
+    if($ResumeSnapshot -and $Label -eq 'RECOVERED'){
+        if($ResumeSnapshot -notmatch '\.frozen\.clixml$'){throw 'ResumeSnapshot must be a frozen.clixml checkpoint'}
+        $old=Import-Clixml -LiteralPath $ResumeSnapshot
+        P125-CheckFrozenIdentity $old $snapshot
+        $pageFile=$ResumeSnapshot -replace '\.frozen\.clixml$','.pages.txt'
+        if(Test-Path -LiteralPath $pageFile){
+            foreach($line in Get-Content -LiteralPath $pageFile){
+                if($line -notmatch '^version=1 page=(\d+) '){throw 'P125 invalid saved page'}
+                $n=[int]$Matches[1]
+                if($saved.ContainsKey($n)){throw 'P125 duplicate saved page'}
+                $saved[$n]=$line
+            }
+        }
+        Life-Say "P125 resume identity verified; saved pages=$($saved.Count)"
+    }
+    $reused=0
     for($cpu=0;$cpu -lt 8;$cpu++){
         $masks=$pageMasks[$cpu]
         for($bank=0;$bank -lt 4;$bank++){
@@ -102,8 +141,14 @@ function P125-ReadSnapshot([string]$Label,[switch]$CountsOnly){
                 if(($masks[$bank] -band ([uint64]1 -shl $bit)) -eq 0){continue}
                 $page=$cpu*256+$bank*64+$bit
                 Life-Say "P125 frozen page CPU=$cpu page=$page"
-                [void](P12-Query 'p125_select' "$page")
-                $line=P12-Query 'p125_page'
+                if($saved.ContainsKey($page)){
+                    $line=$saved[$page];$reused++
+                }else{
+                    [void](P12-Query 'p125_select' "$page")
+                    Start-Sleep -Milliseconds $PagePaceMs
+                    $line=P12-Query 'p125_page'
+                    Start-Sleep -Milliseconds $PagePaceMs
+                }
                 if($line -notmatch "^version=1 page=$page(?:\s|$)"){throw 'P125 stale page cursor'}
                 $found=0
                 foreach($m in [regex]::Matches($line,'(?:^| )r=([^\s]+)')){
@@ -118,9 +163,11 @@ function P125-ReadSnapshot([string]$Label,[switch]$CountsOnly){
                     $found++
                 }
                 if($found -lt 1 -or $found -gt 2){throw 'P125 page bitmap/row disagreement'}
+                if($script:P125Stem){Add-Content -Encoding UTF8 -LiteralPath "$script:P125Stem.$Label.pages.txt" -Value $line}
             }
         }
     }
+    if($reused -ne $saved.Count){throw 'P125 saved pages outside frozen bitmap'}
     if($script:P125Stem){$snapshot|Export-Clixml -Depth 8 -LiteralPath "$script:P125Stem.$Label.complete.clixml"}
     return $snapshot
 }
@@ -236,7 +283,7 @@ function P125-Offline {
     Life-SyncReadOnly
     if($script:LifeState -ne 'OFF'){throw 'P125 reconnected while screen ON'}
 }
-function P125-Phase([string]$Label,[int]$Mode,[int]$Seconds,[string]$Stem,$Before){
+function P125-Phase([string]$Label,[int]$Mode,[int]$Seconds,[string]$Stem,$Before,[switch]$CountsOnly){
     $script:P12Phase=$Label;$script:P125Dirty=$true
     [void](P12-Query 'p125_mode' "$Mode")
     $armed=P125-Status
@@ -245,13 +292,62 @@ function P125-Phase([string]$Label,[int]$Mode,[int]$Seconds,[string]$Stem,$Befor
     [void](P12-Query 'p125_mode' '0' -Cleanup)
     $script:P125Dirty=$false
     P125-PumpOff 2
-    $after=P125-ReadSnapshot "$Label-END"
+    $after=P125-ReadSnapshot "$Label-END" -CountsOnly:$CountsOnly
+    if($Scenario -eq 'DriverTrials'){
+        $diag=P12-Query 'p126_diag'
+        $script:P125Report.Add("P126 DIAG $Label cumulative $diag")
+    }
     P125-Delta $Before $after $Label $Mode $Stem
     return $after
 }
+function P126-Status{
+    $v=P125-Fields (P12-Query 'p126_status')
+    if($v.version -ne '1' -or $v.lease_s -ne '120' -or $v.watchdog_ms -ne '100'){throw 'P126 matched ABI required'}
+    foreach($k in @('mode','reason','haptic','wifi_worker','gnss','touch','touch_leeway','shub')){if(-not $v.ContainsKey($k)){throw "P126 status missing $k"}}
+    return $v
+}
+function P126-DriverTrials([string]$Stem){
+    $modules=@{HAPTIC=1;WIFI=2;GNSS=4;TOUCH=8;LEEWAY=16;SHUB=32;COMBINED=15}
+    $fields=@{HAPTIC='haptic';WIFI='wifi_worker';GNSS='gnss';TOUCH='touch';LEEWAY='touch_leeway';SHUB='shub'}
+    $selected=@($DriverModules.Split(',')|ForEach-Object {$_.Trim().ToUpperInvariant()})
+    if(@($selected|Where-Object {-not $modules.ContainsKey($_)}).Count -or
+       @($selected|Select-Object -Unique).Count -ne $selected.Count){throw 'Invalid/duplicate DriverModules'}
+    $v=P126-Status
+    if($v.mode -ne '0'){throw 'P126 prior policy still active; do not overlap trials'}
+    $before=P125-ReadSnapshot 'P126-BASE' -CountsOnly
+    $before=P125-Phase 'P126-A0' 1 $DriverSeconds $Stem $before -CountsOnly
+    foreach($name in $selected){
+        $mask=$modules[$name]
+        $pre=P126-Status
+        if($pre.mode -ne '0'){throw 'P126 baseline mode not stock'}
+        $script:P126Dirty=$true
+        [void](P12-Query 'p126_mode' "$mask")
+        $armed=P126-Status
+        if([int]$armed.mode -ne $mask){throw 'P126 arm not verified'}
+        P125-PumpOff 2
+        $after=P125-Phase "P126-$name-B" 1 $DriverSeconds $Stem $before -CountsOnly
+        $post=P126-Status
+        if([int]$post.mode -ne $mask -or $post.reason -ne '0'){throw "P126 $name lease revoked; B invalid"}
+        $hits=@()
+        foreach($field in $fields.Values){
+            $delta=P125-Sub ([uint64]$post[$field]) ([uint64]$pre[$field])
+            $hits+="$field=$delta"
+        }
+        [void](P12-Query 'p126_mode' '0' -Cleanup)
+        $script:P126Dirty=$false
+        $restored=P126-Status
+        if($restored.mode -ne '0'){throw 'P126 restore failed'}
+        P125-PumpOff 2
+        $before=P125-Phase "P126-$name-A1" 1 $DriverSeconds $Stem $after -CountsOnly
+        $applied=if($name -eq 'COMBINED'){@($fields.Values|Where-Object {[uint64]$post[$_] -gt [uint64]$pre[$_]}).Count -gt 0}else{[uint64]$post[$fields[$name]] -gt [uint64]$pre[$fields[$name]]}
+        $result=if($applied){'COMPLETE'}else{'NO_ELIGIBLE_PATH'}
+        $line="P126 MODULE $name $result applied=$applied hits=$($hits -join ',')"
+        $script:P125Report.Add($line);Life-Say $line
+    }
+}
 function P125-Run {
     if(-not $Execute){
-        Write-Host 'P12.5 preview: -Execute to measure OFF timer source. Trace=aggregate+detail; UsbCrossover=aggregate+A0/B/A1; OfflineOnly=B; AggregateOnly=aggregate; FrozenSummary=read-only counters; FrozenDump=read-only counters and pages on fixed firmware. No automatic cooling wait.'
+        Write-Host 'P12.5 preview: -Execute to measure OFF timer source. Trace=aggregate+detail; UsbCrossover=aggregate+A0/B/A1; OfflineOnly=B; AggregateOnly=aggregate; FrozenSummary=read-only counters; FrozenDump=read-only counters and pages on fixed firmware. No automatic cooling wait. DriverTrials=selective bounded A/B/A without page dumps; default COMBINED. ResumeSnapshot=FrozenDump checkpoint.'
         return
     }
     if($env:OS -ne 'Windows_NT'){throw 'Windows serial runner only'}
@@ -266,6 +362,7 @@ function P125-Run {
         $s=P125-Status
         if($s.armed -ne '0'){throw 'P125 previous probe still armed; bounded expiry required'}
         P125-Symbols $SymbolMap $s.anchor
+        if($ResumeSnapshot -and $Scenario -ne 'FrozenDump'){throw 'ResumeSnapshot requires FrozenDump'}
         if($Scenario -in @('FrozenSummary','FrozenDump')){
             # Read-only recovery: do not arm/stop probe, change policy, or
             # require another OFF window. FrozenSummary is safe for old ABI.
@@ -286,6 +383,10 @@ function P125-Run {
         P125-PumpOff 25
         $g=P12-Query 'g3d_lab_stats'
         if($g -notmatch ' domain=0 pll=0 ' -or $g -notmatch ' fault=0 '){throw 'P125 independent GPU OFF evidence missing'}
+        if($Scenario -eq 'DriverTrials'){
+            P126-DriverTrials $stem
+            return
+        }
         $before=P125-ReadSnapshot 'BASE'
         if($Scenario -in @('Trace','UsbCrossover','AggregateOnly')){$before=P125-Phase 'AGG' 1 $AggregateSeconds $stem $before}
         if($Scenario -in @('Trace','UsbCrossover')){$before=P125-Phase 'A0' 2 $TraceSeconds $stem $before}
@@ -295,6 +396,9 @@ function P125-Run {
     }catch{
         $errorText=$_.Exception.Message;Life-Say "P125 STOP $errorText"
     }finally{
+        if($script:P126Dirty -and $null -ne $script:LifeSerial -and $script:LifeSerial.IsOpen){
+            try{[void](P12-Query 'p126_mode' '0' -Cleanup);$script:P126Dirty=$false}catch{Life-Say 'P126 cleanup ACK missing; 120s bounded kernel lease'}
+        }
         if($script:P125Dirty -and $null -ne $script:LifeSerial -and $script:LifeSerial.IsOpen){
             try{[void](P12-Query 'p125_mode' '0' -Cleanup);$script:P125Dirty=$false}catch{Life-Say 'P125 cleanup ACK missing; kernel lease <=180s'}
         }

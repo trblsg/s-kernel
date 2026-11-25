@@ -67,6 +67,14 @@
  * +0x20AC, its RSTnSYNC +0x2074; its Q-channel +0x3050 (cal-if/exynos9810/cmucal-sfr.c of the S9's kernel).
  */
 #include <kern/clock.h>
+#include <kern/sched_prim.h>
+#if __has_include(<kern/hakios_p125.h>)
+#include <kern/hakios_p125.h>
+#else
+#define P126_HAPTIC 0u
+static inline unsigned hakios_p126_active(unsigned bit){(void)bit;return 0;}
+static inline void hakios_p126_hit(unsigned index){(void)index;}
+#endif
 #include <kern/locks.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
@@ -628,6 +636,7 @@ static uint32_t pwm_count;                      /* the period in the PWM's ticks
 static bool motor_broken, motor_on;
 static volatile uint64_t heard_us;
 static volatile uint32_t heard_peak;
+static unsigned p126_haptic_waiting;
 static uint64_t motor_since_us;
 static unsigned buzzes, capped;
 
@@ -731,8 +740,9 @@ haptic_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 			peak = v > peak ? v : peak;
 		}
 		if (peak > HAPTIC_SILENT_BELOW) {
-			heard_us = now_us();
-			heard_peak = peak;
+			__atomic_store_n(&heard_peak,peak,__ATOMIC_RELAXED);
+			__atomic_store_n(&heard_us,now_us(),__ATOMIC_SEQ_CST);
+			if(__atomic_load_n(&p126_haptic_waiting,__ATOMIC_SEQ_CST))thread_wakeup((event_t)&heard_us);
 		}
 	}
 	return error;
@@ -755,26 +765,46 @@ static const struct cdevsw haptic_cdevsw = {
 static void
 haptic_thread(__unused void *arg, __unused wait_result_t result)
 {
-	for (unsigned tick = 1;; tick++) {
+	uint64_t said_us=now_us();
+	for (;;) {
+		uint64_t stamp=__atomic_load_n(&heard_us,__ATOMIC_ACQUIRE);
 		uint64_t now = now_us();
-		bool wanted = heard_us != 0 && now - heard_us < HAPTIC_ACTIVE_US;
+		bool wanted = stamp != 0 && now - stamp < HAPTIC_ACTIVE_US;
 
 		if (wanted && motor_on && now - motor_since_us >= HAPTIC_MAX_MS * 1000ull) {
 			capped++;
 			motor_still();
-			heard_us = 0;           /* (until iOS plays anew) */
+			/* Do not erase a newer waveform that raced the safety cutoff. */
+			(void)__atomic_compare_exchange_n(&heard_us,&stamp,0,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);
 		} else if (wanted && !motor_broken) {
 			/* the strength from iOS's loudness, with a floor a tap can be felt at */
-			uint32_t strength = heard_peak * 10000u / 32768u;
+			uint32_t strength = __atomic_load_n(&heard_peak,__ATOMIC_RELAXED) * 10000u / 32768u;
 
 			motor_go(strength < 3000 ? 3000 : strength);
 		} else {
 			motor_still();
 		}
-		if (tick % (60 * 500) == 0) {
+		if (now - said_us >= 60000000ull) {
+			said_us=now;
 			say("max77705: haptic: a minute: %u buzzes, %u cut at %u ms\n", buzzes, capped, HAPTIC_MAX_MS);
 		}
-		delay_for_interval(2, NSEC_PER_MSEC);
+		if(!motor_on && !wanted && hakios_p126_active(P126_HAPTIC)){
+			/* Register wait before rechecking the producer timestamp.
+			 * No mutex or I2C in the writer; timeout is only a rollback
+			 * watchdog, not the active waveform cadence. */
+			uint64_t span=0;
+			nanoseconds_to_absolutetime(100ULL*NSEC_PER_MSEC,&span);
+			__atomic_store_n(&p126_haptic_waiting,1,__ATOMIC_SEQ_CST);
+			if(assert_wait_deadline((event_t)&heard_us,THREAD_UNINT,mach_absolute_time()+span)==THREAD_WAITING){
+				uint64_t latest=__atomic_load_n(&heard_us,__ATOMIC_SEQ_CST);
+				uint64_t check=now_us();
+				if(!hakios_p126_active(P126_HAPTIC) || (latest && check-latest<HAPTIC_ACTIVE_US))
+					(void)clear_wait(current_thread(),THREAD_AWAKENED);
+				else hakios_p126_hit(0);
+				(void)thread_block(THREAD_CONTINUE_NULL);
+			}
+			__atomic_store_n(&p126_haptic_waiting,0,__ATOMIC_RELEASE);
+		}else delay_for_interval(2, NSEC_PER_MSEC);
 	}
 }
 

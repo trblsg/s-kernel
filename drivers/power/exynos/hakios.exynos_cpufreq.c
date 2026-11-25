@@ -1915,6 +1915,7 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 			cool(&clusters[1]);
 			ocp_poll();
 			p125_guard(); /* only revokes read-only probe, no DVFS override */
+			p126_guard(); /* bounded driver trials, never changes CPU/GPU policy */
 		}
 		decide(&clusters[0], now, (uint32_t)span_ms);
 		decide(&clusters[1], now, (uint32_t)span_ms);

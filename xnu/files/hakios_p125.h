@@ -44,6 +44,20 @@ extern uint64_t hakios_p125_lease, hakios_p125_start, hakios_p125_end;
 extern uint32_t hakios_p125_stop_reason;
 extern uint64_t hakios_p125_usb_down_at,hakios_p125_usb_up_at;
 extern uint64_t hakios_p125_display_events;
+/* P12.6 independent OFF-only experiments; lease low 6 bits = mask. */
+#define P126_HAPTIC 1u
+#define P126_WIFI_WORK 2u
+#define P126_GNSS 4u
+#define P126_TOUCH 8u
+#define P126_TOUCH_LEEWAY 16u
+#define P126_SHUB 32u
+#define P126_MASK 63u
+extern uint64_t hakios_p126_lease;
+extern uint32_t hakios_p126_reason;
+extern uint64_t hakios_p126_hits[6];
+extern uint64_t hakios_p126_diag[9];
+extern uint32_t hakios_p126_audio_state;
+/* Diagnostic indexes: BT idle/busy/RX/TTY TX/error, ABOX quiet/busy, SHUB quiet/busy. */
 /* 0 off, 1 aggregate, 2 detail, 3 USB-offline detail (pending until link-down).
  * Lease encodes expiry and arm mode. active() returns 0/1/2. */
 #ifdef __cplusplus
@@ -67,6 +81,12 @@ uint64_t hakios_p125_task_id(void *task);
 void hakios_p125_thread_register(uint64_t tid,uintptr_t entry);
 void hakios_p125_usb_event(unsigned connected);
 void hakios_p125_display_event(unsigned on);
+unsigned hakios_p126_active(unsigned bit);
+void hakios_p126_hit(unsigned index);
+void hakios_p126_stop(unsigned reason);
+void hakios_p126_diag_add(unsigned index,uint64_t count);
+void hakios_p126_audio_set(unsigned state);
+unsigned hakios_p126_audio_get(void);
 #ifdef __cplusplus
 }
 #endif

@@ -13,6 +13,13 @@
  * A kernel built without the object has the lx_start() at the end of this file, which says so.
  */
 #include <kern/clock.h>
+#if __has_include(<kern/hakios_p125.h>)
+#include <kern/hakios_p125.h>
+#else
+#define P126_WIFI_WORK 0u
+static inline unsigned hakios_p126_active(unsigned bit){(void)bit;return 0;}
+static inline void hakios_p126_hit(unsigned index){(void)index;}
+#endif
 #include <kern/kalloc.h>
 #include <kern/locks.h>
 #include <kern/sched_prim.h>
@@ -331,6 +338,10 @@ lx_os_thread(const char *name, void (*function)(void *), void *argument)
 		return EAGAIN;
 	}
 	thread_set_thread_name(thread, name);
+#if __has_include(<kern/hakios_p125.h>)
+	printf("p126: lx thread tid=%llu name=%s entry=%llx\n",(unsigned long long)thread_tid(thread),name,
+	    (unsigned long long)hakios_p125_code((uintptr_t)function));
+#endif
 	thread_deallocate(thread);
 	return 0;
 }
@@ -377,6 +388,10 @@ lx_os_random(void *buffer, unsigned long size)
 unsigned
 lx_os_option(const char *name)
 {
+	if(strcmp(name,"p126_worker_wait")==0){
+		if(hakios_p126_active(P126_WIFI_WORK)){hakios_p126_hit(1);return 1;}
+		return 0;
+	}
 	return hakios_wifi_option(name);
 }
 

@@ -1,5 +1,7 @@
 /* P12.5 debug-only observation controls, no hardware power policy writes. */
 static int p125_page_select;
+/* P12.6 policy is separate from the observation probe. All waits are bounded
+ * so removal/expiry never depends on host USB or a producer wake. */
 static unsigned
 p125_thermal_reason(void)
 {
@@ -11,6 +13,68 @@ p125_thermal_reason(void)
     if(hakios_display_requested_on()!=0)return 4;
     return 0;
 }
+static void
+p126_guard(void)
+{
+    uint64_t lease=__atomic_load_n(&hakios_p126_lease,__ATOMIC_ACQUIRE);
+    if(!lease)return;
+    unsigned reason=p125_thermal_reason();
+    if(!reason && mach_absolute_time()>=(lease&~(uint64_t)P126_MASK))reason=1;
+    if(reason)hakios_p126_stop(reason);
+}
+static int
+p126_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
+    __unused int arg2,struct sysctl_req *req)
+{
+    p126_guard();
+    int v=(int)hakios_p126_active(P126_MASK);
+    int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(e || req->newptr==USER_ADDR_NULL)return e;
+    if(v<0 || v>(int)P126_MASK)return EINVAL;
+    if(!v){hakios_p126_stop(0);return 0;}
+    if(__atomic_load_n(&hakios_p126_lease,__ATOMIC_ACQUIRE))return EBUSY;
+    if(p125_thermal_reason())return EPERM;
+    uint64_t span=0;
+    nanoseconds_to_absolutetime(120ULL*NSEC_PER_SEC,&span);
+    uint64_t expected=0,next=((mach_absolute_time()+span)&~(uint64_t)P126_MASK)|(unsigned)v;
+    if(!__atomic_compare_exchange_n(&hakios_p126_lease,&expected,next,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return EBUSY;
+    __atomic_store_n(&hakios_p126_reason,0,__ATOMIC_RELEASE);
+    if(hakios_display_requested_on()!=0){hakios_p126_stop(4);return EPERM;}
+    return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p126_mode,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,
+    p126_mode_sysctl,"I","P12.6 OFF-only 120s lease: haptic1 wifi_worker2 gnss4 touch8 touch_leeway16 shub32");
+static int
+p126_status_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
+    __unused int arg2,struct sysctl_req *req)
+{
+    p126_guard();
+    char buf[320];
+    snprintf(buf,sizeof(buf),"version=1 mode=%u reason=%u haptic=%llu wifi_worker=%llu gnss=%llu touch=%llu touch_leeway=%llu shub=%llu lease_s=120 watchdog_ms=100",
+        hakios_p126_active(P126_MASK),__atomic_load_n(&hakios_p126_reason,__ATOMIC_ACQUIRE),
+        (unsigned long long)__atomic_load_n(&hakios_p126_hits[0],__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&hakios_p126_hits[1],__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&hakios_p126_hits[2],__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&hakios_p126_hits[3],__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&hakios_p126_hits[4],__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&hakios_p126_hits[5],__ATOMIC_RELAXED));
+    return SYSCTL_OUT(req,buf,strlen(buf)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p126_status,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,
+    p126_status_sysctl,"A","P12.6 module application counters and stop reason");
+static int
+p126_diag_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
+    __unused int arg2,struct sysctl_req *req)
+{
+    unsigned long long v[9];
+    for(unsigned i=0;i<9;i++)v[i]=(unsigned long long)__atomic_load_n(&hakios_p126_diag[i],__ATOMIC_RELAXED);
+    char buf[440];
+    snprintf(buf,sizeof(buf),"version=1 bt_idle=%llu bt_busy=%llu bt_rx=%llu bt_tty_tx_dequeued=%llu bt_uart_error=%llu abox_quiet=%llu abox_busy=%llu shub_quiet=%llu shub_busy=%llu hal_speaker=%u",
+        v[0],v[1],v[2],v[3],v[4],v[5],v[6],v[7],v[8],hakios_p126_audio_get());
+    return SYSCTL_OUT(req,buf,strlen(buf)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p126_diag,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,
+    p126_diag_sysctl,"A","P12.6 read-only next-stage driver eligibility and traffic");
 static void
 p125_finish(unsigned reason)
 {

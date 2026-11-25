@@ -151,6 +151,12 @@
  * through the guard, sized for the amplifiers at Android's loudest (attenuation 0, the most careful), after abox_gain.
  */
 #include <kern/clock.h>
+#if __has_include(<kern/hakios_p125.h>)
+#include <kern/hakios_p125.h>
+#else
+static inline unsigned hakios_p126_audio_get(void){return 0;}
+static inline void hakios_p126_diag_add(unsigned index,uint64_t count){(void)index;(void)count;}
+#endif
 #include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <libkern/OSAtomic.h>
@@ -1281,6 +1287,11 @@ stream_run(uint64_t tone_until_us, uint64_t until_us)
 
 			follow_headphones();
 			follow_input();
+			/* Candidate only; HAL hint is untrusted and may be stale.
+			 * Keep RDMA/UAIF and active 2ms refill unchanged. */
+			bool p126_quiet=hakios_p126_audio_get()==1 && sink_head==sink_tail && !amp_running &&
+			    !hp_on && !hakios_audio_input_wanted() && (sounded==0 || since>QUIET_STOP_US);
+			hakios_p126_diag_add(p126_quiet?5:6,1);
 
 			if (now - last_volume >= 100000) {
 				uint32_t below, generation;

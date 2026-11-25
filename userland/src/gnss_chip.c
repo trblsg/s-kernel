@@ -5,6 +5,8 @@
 #include "gnss_chip.h"
 
 #include <errno.h>
+#include <stdint.h>
+#include <sys/ioctl.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -55,6 +57,28 @@ now(void)
 	return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
+/* Matched kernel readiness wait. If absent or disabled, retry capability
+ * at most four times per second, preserving stock 2ms polling. */
+#define GNSS_WAIT_READABLE _IOW('G',0x60,uint32_t)
+static double p126_retry_at;
+static int
+wait_record(double end)
+{
+    double t=now(),remaining=end-t;
+    if(remaining<=0)return 0;
+    if(t>=p126_retry_at && remaining>=0.001){
+        uint32_t ms=remaining>=0.1?100:(uint32_t)(remaining*1000);
+        if(ioctl(fd,GNSS_WAIT_READABLE,&ms)==0)return 1;
+        int e=errno;
+        if(e==EINTR || e==EAGAIN || e==EWOULDBLOCK || e==ETIMEDOUT)return 1;
+        if(e!=ENOTTY && e!=ENOTSUP){errno=e;return -1;}
+        p126_retry_at=t+0.25;
+    }
+    /* Never round a sub-ms deadline up to the 2ms fallback. */
+    unsigned us=remaining>=0.002?2000:(unsigned)(remaining*1000000);
+    if(us)usleep(us);
+    return 1;
+}
 /* the next record within `timeout` seconds: 1, 0 on timeout, -1 when the device failed */
 static int
 next_rec(struct rec *r, double timeout)
@@ -86,8 +110,8 @@ next_rec(struct rec *r, double timeout)
 			say("gnss_chip: read " DEV ": %s", strerror(errno));
 			return -1;
 		}
-		if (now() >= end) return 0;
-		usleep(2000);
+		int ready=wait_record(end);
+		if(ready<=0)return ready;
 	}
 }
 
@@ -710,6 +734,7 @@ gc_open(const struct gc_events *e)
 	slen = 0;
 	last_state = -1;
 	bri_qn = bri_acc_n = 0;
+	p126_retry_at=0;
 	fd = open(DEV, O_RDWR | O_NONBLOCK);
 	return fd < 0 ? -1 : 0;
 }

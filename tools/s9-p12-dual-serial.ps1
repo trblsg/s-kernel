@@ -45,6 +45,7 @@ $script:P12HiDirty=$false
 $script:P123HostEnabled=$false
 $script:P124HostEnabled=$false
 $script:P125HostEnabled=$false
+$script:P126HostEnabled=$false
 $script:P124ClockAllowed=$false
 $script:P123ClockAllowed=$false
 $script:P123Strict=$false
@@ -102,6 +103,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
     if($script:P123HostEnabled){$allowed+=@('p123_floor_mode','p123_floor_stats','p1231_hash_mode','p1231_ufs_stats')}
     if($script:P124HostEnabled){$allowed+=@('p124_cpu_mode','p124_cpu_stats')+(0..7|ForEach-Object {"p124_irq$_";"p124_timer$_"})}
     if($script:P125HostEnabled){$allowed+=@('p125_mode','p125_status','p125_select','p125_page','p6_usb_ticks','p6_usb_connected_ticks','p69_usb_disconnected_ticks')+(0..7|ForEach-Object {"p125_counts$_";"p125_coverage$_"})}
+    if($script:P126HostEnabled){$allowed+=@('p126_mode','p126_status','p126_diag')}
     if($Name -notin $allowed){throw "P12 sysctl disallowed $Name"}
     if($script:P124HostEnabled -and $Name -eq 'p1231_hash_mode' -and $Value -eq '1'){throw 'P12.4 rejects scalar thermal trial'}
     if($Value -ne '' -and -not (
@@ -111,6 +113,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
         ($script:P123HostEnabled -and $Name -eq 'p123_floor_mode' -and $Value -in @('0','1')) -or
         ($script:P123HostEnabled -and $Name -eq 'p1231_hash_mode' -and $Value -in @('0','1','2')) -or
         ($script:P123HostEnabled -and $script:P123ClockAllowed -and $Name -eq 'hi_cmd' -and $Value -eq '252') -or
+        ($script:P126HostEnabled -and $Name -eq 'p126_mode' -and $Value -match '^\d{1,2}$' -and [int]$Value -le 63) -or
         ($script:P125HostEnabled -and $Name -eq 'p125_mode' -and $Value -in @('0','1','2','3')) -or
         ($script:P125HostEnabled -and $Name -eq 'p125_select' -and $Value -match '^\d{1,4}$' -and [int]$Value -lt 2048) -or
         ($script:P124HostEnabled -and $Name -eq 'p124_cpu_mode' -and $Value -in @('0','1','2','3','4')) -or
@@ -121,6 +124,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
     if($script:P123HostEnabled){$restore+=@('p123_floor_mode','p1231_hash_mode')}
     if($script:P124HostEnabled){$restore+='p124_cpu_mode'}
     if($script:P125HostEnabled){$restore+='p125_mode'}
+    if($script:P126HostEnabled){$restore+='p126_mode'}
     $clockStop=(($script:P123ClockAllowed -or $script:P124ClockAllowed) -and $script:P123HostEnabled -and $Name -eq 'hi_cmd' -and $Value -eq '201')
     if($Cleanup -and -not $clockStop -and ($Name -notin $restore -or $Value -ne '0')){
         throw 'P12.1/P12.2 Cleanup bypass is reserved for bounded restore-to-zero writes only'

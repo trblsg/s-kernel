@@ -34,6 +34,10 @@
  * (The audio server writes for as long as its device runs, a second or two beyond the sound.)
  */
 #include <kern/clock.h>
+#if __has_include(<kern/hakios_p125.h>)
+#include <kern/hakios_p125.h>
+#define P126_AUDIO_ACTIVITY _IOW('r',3,uint32_t)
+#endif
 #include <kern/locks.h>
 #include <kern/kalloc.h>
 #include <kern/thread_call.h>
@@ -236,6 +240,10 @@ audio_open(__unused dev_t dev, __unused int flags, __unused int devtype, __unuse
 static int
 audio_close(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
 {
+#if __has_include(<kern/hakios_p125.h>)
+	/* A closed or restarted HAL must not be assumed idle. */
+	hakios_p126_audio_set(0);
+#endif
 	return 0;
 }
 
@@ -291,6 +299,15 @@ audio_ioctl(__unused dev_t dev, u_long command, caddr_t data, __unused int flags
 	const struct hakios_audio_volume *volume = (const struct hakios_audio_volume *)data;
 	uint32_t below;
 
+	/* Telemetry only: the audio node is not a trusted policy owner. */
+#if __has_include(<kern/hakios_p125.h>)
+	if(command==P126_AUDIO_ACTIVITY){
+		uint32_t state=*(uint32_t *)data;
+		if(state>2)return EINVAL;
+		hakios_p126_audio_set(state);
+		return 0;
+	}
+#endif
 	if (command == HAKIOS_AUDIO_GET_ROUTE) {
 		int error = ENOTTY;     /* no jack known here (every machine but the S9 with cs47l93_hp=1): the plug-in shows none */
 

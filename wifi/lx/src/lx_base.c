@@ -604,7 +604,9 @@ worker(void *argument)
 		queue->running = NULL;
 		lx_os_wakeup(&queue->running);
 		while (queue->count == 0) {
-			lx_os_sleep(queue, SLICE_NS);
+			/* Enqueue and wake use the same lx lock. 100ms is a
+			 * bounded rollback watchdog, not a dispatch delay. */
+			lx_os_sleep(queue,lx_os_option("p126_worker_wait") ? 100000000ull : SLICE_NS);
 		}
 		work = queue->waiting[queue->first];
 		queue->first = (queue->first + 1) % nitems(queue->waiting);

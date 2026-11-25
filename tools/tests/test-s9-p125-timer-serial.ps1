@@ -2,7 +2,7 @@
 Set-StrictMode -Version 2
 $ErrorActionPreference='Stop'
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 's9-p125-timer-serial.ps1') -LibraryOnly
-foreach($bad in @(@('p125_mode','4'),@('p125_select','2048'),@('p125_counts3','1'),@('p125_page','1'))){
+foreach($bad in @(@('p125_mode','4'),@('p125_select','2048'),@('p125_counts3','1'),@('p125_page','1'),@('p126_mode','64'),@('p126_status','1'),@('p126_diag','1'))){
     $denied=$false
     try{[void](P12-Query $bad[0] $bad[1])}catch{$denied=$true}
     if(-not $denied){throw 'unsafe P125 write accepted'}
@@ -50,6 +50,16 @@ try{
     $script:fixtureLegacy=$false
     $complete=P125-ReadSnapshot 'FIXED'
     if($complete.Rows.Count -ne 1 -or -not (Test-Path -LiteralPath "$stem.FIXED.complete.clixml")){throw 'fixed page checkpoint missing'}
+    $resumeReads=$script:fixturePageReads
+    $ResumeSnapshot="$stem.FIXED.frozen.clixml"
+    $resumed=P125-ReadSnapshot 'RECOVERED'
+    if($resumed.Rows.Count -ne 1 -or $script:fixturePageReads -ne $resumeReads){throw 'resume re-read an already saved page'}
+    $bad=Import-Clixml -LiteralPath $ResumeSnapshot
+    $bad.Counts[3][4]=13
+    $failed=$false
+    try{P125-CheckFrozenIdentity $bad $complete}catch{if($_.Exception.Message -match 'counters changed'){$failed=$true}else{throw}}
+    if(-not $failed){throw 'changed cumulative counter accepted during resume'}
+    $ResumeSnapshot=''
     $script:P125Stem=''
     P125-Delta $before $after 'A0' 2 $stem
     $r=@(Import-Csv "$stem.A0.rows.csv")

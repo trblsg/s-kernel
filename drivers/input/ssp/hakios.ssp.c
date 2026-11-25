@@ -75,6 +75,17 @@
  *            little-endian s32 of /efs/FactoryApp/gyro_cal_data. Default: none.
  */
 #include <kern/clock.h>
+#include <sys/ioccom.h>
+#if __has_include(<kern/hakios_p125.h>)
+#include <kern/hakios_p125.h>
+#else
+#define P126_GNSS 0u
+#define P126_SHUB 0u
+static inline unsigned hakios_p126_active(unsigned bit){(void)bit;return 0;}
+static inline unsigned hakios_p125_active(void){return 0;}
+static inline void hakios_p126_hit(unsigned index){(void)index;}
+static inline void hakios_p126_diag_add(unsigned index,uint64_t count){(void)index;(void)count;}
+#endif
 #include <kern/locks.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
@@ -685,6 +696,7 @@ exchange(const uint8_t *p, size_t n)
  * loads and answers are awaited, 4 ms once the sensors run (samples come every 20 ms or slower).
  */
 static uint32_t idle_us = 500;
+static uint32_t p126_shub_interval(bool (*done)(void));
 
 static void
 pump(uint32_t ms, bool (*done)(void))
@@ -698,7 +710,7 @@ pump(uint32_t ms, bool (*done)(void))
 		if (host_req()) {
 			(void)exchange(NULL, 0);
 		} else if (idle_us >= 1000) {
-			delay_for_interval(idle_us, NSEC_PER_USEC);
+			delay_for_interval(p126_shub_interval(done), NSEC_PER_USEC);
 		} else {
 			delay(idle_us);
 		}
@@ -2153,12 +2165,38 @@ gnss_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 	return error;
 }
 
+/* P12.6 paired readiness ABI, not select (legacy d_select is eno_select).
+ * The same shub_lock protects the empty predicate and gnss_post wakeup.
+ * The ioctl does not consume bytes or change device ownership. The
+ * absolute protocol deadline remains in userland. */
+#define GNSS_WAIT_READABLE _IOW('G',0x60,uint32_t)
+static int
+gnss_ioctl(__unused dev_t dev,u_long cmd,caddr_t data,__unused int flags,__unused proc_t p)
+{
+    if(cmd!=GNSS_WAIT_READABLE || !hakios_p126_active(P126_GNSS))return ENOTTY;
+    uint32_t ms=*(uint32_t *)data;
+    if(!ms || ms>100)return EINVAL;
+    struct timespec timeout={.tv_sec=0,.tv_nsec=(long)ms*1000000L};
+    int error=0;
+    lck_mtx_lock(&shub_lock);
+    if(gnss_head==gnss_tail){
+        gnss_waiting=true;
+        hakios_p126_hit(2);
+        error=msleep(&gnss_head,&shub_lock,PZERO|PCATCH,GNSS_DEV_NAME,&timeout);
+        /* Spurious or competing reader: return to nonblocking read. */
+        if(!error && gnss_head==gnss_tail)error=EWOULDBLOCK;
+        if(gnss_head!=gnss_tail && error==EWOULDBLOCK)error=0;
+    }
+    lck_mtx_unlock(&shub_lock);
+    return error;
+}
+
 static const struct cdevsw gnss_cdevsw = {
 	.d_open = gnss_open,
 	.d_close = gnss_close,
 	.d_read = gnss_read,
 	.d_write = gnss_write,
-	.d_ioctl = eno_ioctl,
+	.d_ioctl = gnss_ioctl,
 	.d_stop = eno_stop,
 	.d_reset = eno_reset,
 	.d_select = eno_select,
@@ -2279,6 +2317,23 @@ apply_rates(void)
 		}
 		say("shub: sensor %u every %u ms (asked by user space): %s\n", id, ms, sensor_on(id, ms) ? "on" : "NOT taken");
 	}
+}
+
+/* Only the ordinary running pump, no command/firmware waits. Do not
+ * slow any enabled sensor, GNSS reader, pending rate or console request.
+ * A new request can arrive during the bounded 8ms sleep. */
+static uint32_t
+p126_shub_interval(bool (*done)(void))
+{
+    if(done!=gnss_pending || idle_us!=4000)return idle_us;
+    if(!hakios_p126_active(P126_SHUB) && !hakios_p125_active())return idle_us;
+    lck_mtx_lock(&shub_lock);
+    bool quiet=!ssp.enabled && !gnss_readers && !gnss_req_busy && !gnss_req_pending &&
+        !rate_pending && !console_cmd_pending && !(console_want_on|console_want_off);
+    lck_mtx_unlock(&shub_lock);
+    hakios_p126_diag_add(quiet?7:8,1);
+    if(quiet && hakios_p126_active(P126_SHUB)){hakios_p126_hit(5);return 8000;}
+    return idle_us;
 }
 
 static void

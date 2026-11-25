@@ -118,6 +118,11 @@
  * (init.samsungexynos9810.rc, proprietary-files.txt: the two .hcd files).
  */
 #include <kern/clock.h>
+#if __has_include(<kern/hakios_p125.h>)
+#include <kern/hakios_p125.h>
+#else
+static inline void hakios_p126_diag_add(unsigned index,uint64_t count){(void)index;(void)count;}
+#endif
 #include <kern/thread.h>
 #include <libkern/OSAtomic.h>
 #include <libkern/libkern.h>
@@ -417,6 +422,7 @@ bt_getc(void)
 		return -1;
 	}
 	if (rd(uart, UERSTAT) & 0xf) {
+		hakios_p126_diag_add(4,1);
 		rx_errors++;
 	}
 	return (int)(rd(uart, URXH) & 0xff);
@@ -1209,6 +1215,10 @@ bt_tty_pump(__unused void *arg, __unused wait_result_t w)
 		if (kctl_owns) {
 			kctl_pump(&in);
 		}
+		/* Read-only P12.6 evidence: no IRQ/mask/baud/FIFO changes. */
+		hakios_p126_diag_add((out==0 && in==0)?0:1,1);
+		if(in>0)hakios_p126_diag_add(2,(unsigned)in);
+		if(out>0)hakios_p126_diag_add(3,(unsigned)out);
 		if (out == 0 && in == 0) {
 			sleep_ms(1);
 		}

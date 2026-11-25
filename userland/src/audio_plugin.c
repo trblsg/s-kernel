@@ -246,6 +246,9 @@ static struct device devices[] = {
 static AudioServerPlugInHostRef host;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static int sink = -1;                   /* /dev/hakios-audio */
+#define P126_AUDIO_ACTIVITY _IOW('r',3,uint32_t)
+/* Read-only hint for ABOX eligibility diagnostics; legacy kernels ignore it. */
+static void p126_audio_activity(uint32_t state){if(sink>=0)(void)ioctl(sink,P126_AUDIO_ACTIVITY,&state);}
 static Float64 ticks_per_frame;
 static UInt64 written, refused;         /* frames since the speaker's I/O started */
 static Boolean inactive[OBJECT_LAST + 1];       /* streams the HAL has switched off */
@@ -397,6 +400,7 @@ initialize(__unused AudioServerPlugInDriverRef driver, AudioServerPlugInHostRef 
 	mach_timebase_info(&timebase);
 	ticks_per_frame = 1e9 * timebase.denom / timebase.numer / HAKIOS_AUDIO_RATE;
 	sink = open(HAKIOS_AUDIO_DEVICE, O_WRONLY);
+	p126_audio_activity(1);
 	say("hakios: audio: the speaker is with the HAL (%s: %s)\n", HAKIOS_AUDIO_DEVICE, sink < 0 ? strerror(errno) : "open");
 	/* the jack: only where the kernel knows one, and says where the sound goes */
 	if (sink >= 0 && ioctl(sink, HAKIOS_AUDIO_GET_ROUTE, &route) == 0) {
@@ -948,6 +952,7 @@ start_io(__unused AudioServerPlugInDriverRef driver, AudioObjectID object, __unu
 	}
 	pthread_mutex_lock(&lock);
 	if (d->running++ == 0) {
+		if(d->object==OBJECT_SPEAKER)p126_audio_activity(2);
 		d->anchor = mach_absolute_time();
 		d->periods = 0;
 		if (d->output != 0) {
@@ -972,6 +977,7 @@ stop_io(__unused AudioServerPlugInDriverRef driver, AudioObjectID object, __unus
 	}
 	pthread_mutex_lock(&lock);
 	if (d->running != 0 && --d->running == 0) {
+		if(d->object==OBJECT_SPEAKER)p126_audio_activity(1);
 		if (d->object == OBJECT_CODEC) {
 			codec_close();
 		} else if (d->output != 0) {

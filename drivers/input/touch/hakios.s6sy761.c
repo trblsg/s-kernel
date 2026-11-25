@@ -17,6 +17,14 @@
  * which run on the S9+ with the same bus, address and supplies.
  */
 #include <kern/clock.h>
+#if __has_include(<kern/hakios_p125.h>)
+#include <kern/hakios_p125.h>
+#else
+#define P126_TOUCH 0u
+#define P126_TOUCH_LEEWAY 0u
+static inline unsigned hakios_p126_active(unsigned bit){(void)bit;return 0;}
+static inline void hakios_p126_hit(unsigned index){(void)index;}
+#endif
 #include <kern/sched_prim.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
@@ -654,6 +662,7 @@ touch_thread(void *arg, __unused wait_result_t wr_)
 			 * only idle, screen-OFF fallback polling is relaxed. 4ms stays
 			 * the default, and no IRQ/GIC reconfiguration is attempted. */
 			uint32_t interval = POLL_MS;
+			bool p126_slack=false;
 			if (hakios_display_requested_on() == 0) {
 				bool active = false;
 				for (unsigned f = 0; f < FINGERS; f++)
@@ -661,9 +670,16 @@ touch_thread(void *arg, __unused wait_result_t wr_)
 				if (!active) {
 					uint32_t off_ms = __atomic_load_n(&p9_touch_off_ms, __ATOMIC_ACQUIRE);
 					if (off_ms) interval = off_ms;
+					if(hakios_p126_active(P126_TOUCH) && !irq_low()){
+						interval=16;hakios_p126_hit(3);
+					}
+					if(hakios_p126_active(P126_TOUCH_LEEWAY) && !irq_low()){
+						p126_slack=true;hakios_p126_hit(4);
+					}
 				}
 			}
-			delay_for_interval(interval, NSEC_PER_MSEC);
+			if(p126_slack)delay_for_interval_with_leeway(interval,1,NSEC_PER_MSEC);
+			else delay_for_interval(interval, NSEC_PER_MSEC);
 		}
 	}
 out:
