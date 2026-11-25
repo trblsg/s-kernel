@@ -299,6 +299,10 @@ const struct hakios_usb_glue *hakios_usb_glue_exynos9810(void) { return NULL; } 
 #endif
 
 #ifndef HAKIOS_UFS
+bool hakios_p124_ufs_safe(void);
+bool hakios_p124_ufs_safe(void) { return false; }
+bool hakios_p124_ufs_busy(void);
+bool hakios_p124_ufs_busy(void) { return true; }
 void hakios_ufs_init(void) {}
 void hakios_ufs_report(__unused const char *when) {}
 bool hakios_ufs_dev(__unused dev_t dev) { return false; }
@@ -351,6 +355,8 @@ int hakios_mali_second(__unused uint64_t *busy_ns, __unused uint32_t *jobs, __un
 /* a frame given to the display (MiniIOMobileFramebuffer.cpp present()), for mali_gov_frame: no Mali, no floor */
 void hakios_mali_frame(void);
 void hakios_mali_frame(void) {}
+void hakios_p124_gpu_touch(void);
+void hakios_p124_gpu_touch(void) {}
 #endif
 
 #ifndef HAKIOS_WIFI

@@ -99,6 +99,22 @@ volatile uint64_t hakios_p12_idle_no_wfi[8];
 volatile uint64_t hakios_p12_idle_exit_count[8];
 volatile uint64_t hakios_p12_idle_unmapped;
 volatile uint32_t hakios_p12_idle_last_unknown;
+/* IRQ observations are independent of WFI return counts. A pending IRQ
+ * can arrive after a return, or several IRQs can share one return.
+ * Count only acknowledged IDs, never touch GIC MMIO in this probe. */
+volatile uint32_t hakios_p124_phys[8],hakios_p124_phys_valid[8];
+volatile uint64_t hakios_p124_irq[8][1020],hakios_p124_vtimer[8];
+volatile uint64_t hakios_p124_wfi_hist[8][5];
+volatile uint64_t hakios_p124_wfi_bounds[4];
+void hakios_p124_irq_observe(int cpu,uint32_t intid,bool timer);
+void
+hakios_p124_irq_observe(int cpu,uint32_t intid,bool timer)
+{
+    if(!__atomic_load_n(&hakios_p12_wfi_probe_enable,__ATOMIC_RELAXED) ||
+        cpu<0 || cpu>=8 || intid>=1020)return;
+    __atomic_fetch_add(&hakios_p124_irq[cpu][intid],1,__ATOMIC_RELAXED);
+    if(timer)__atomic_fetch_add(&hakios_p124_vtimer[cpu],1,__ATOMIC_RELAXED);
+}
 
 #if WITH_CLASSIC_S2R
 void sleep_token_buffer_init(void);
@@ -517,9 +533,13 @@ cpu_idle(void)
 	const bool p12_probe = __atomic_load_n(&hakios_p12_wfi_probe_enable, __ATOMIC_RELAXED) != 0;
 	const unsigned p12_id = (unsigned)cpu_data_ptr->cpu_number; /* cpu_id is an opaque PE object, not an index */
 	if (p12_probe) {
-		if (p12_id < 8)
+		if (p12_id < 8) {
 			__atomic_fetch_add(&hakios_p12_idle_enter[p12_id], 1, __ATOMIC_RELAXED);
-		else {
+            if(!__atomic_load_n(&hakios_p124_phys_valid[p12_id],__ATOMIC_RELAXED)){
+                __atomic_store_n(&hakios_p124_phys[p12_id],cpu_data_ptr->cpu_phys_id,__ATOMIC_RELAXED);
+                __atomic_store_n(&hakios_p124_phys_valid[p12_id],1,__ATOMIC_RELEASE);
+            }
+		} else {
 			__atomic_fetch_add(&hakios_p12_idle_unmapped, 1, __ATOMIC_RELAXED);
 			__atomic_store_n(&hakios_p12_idle_last_unknown, p12_id, __ATOMIC_RELAXED);
 		}
@@ -650,6 +670,10 @@ cpu_idle(void)
 			if (p12_ended >= p12_began) {
 				__atomic_fetch_add(&hakios_p12_wfi_entries[p12_id], 1, __ATOMIC_RELAXED);
 				__atomic_fetch_add(&hakios_p12_wfi_ticks[p12_id], p12_ended-p12_began, __ATOMIC_RELAXED);
+                unsigned bucket=0;
+                while(bucket<4 && p12_ended-p12_began>=
+                    __atomic_load_n(&hakios_p124_wfi_bounds[bucket],__ATOMIC_RELAXED))bucket++;
+                __atomic_fetch_add(&hakios_p124_wfi_hist[p12_id][bucket],1,__ATOMIC_RELAXED);
 			}
 		}
 

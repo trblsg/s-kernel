@@ -2436,6 +2436,20 @@ static uint64_t p123_eligible_windows, p123_bypass_windows;
 extern bool hakios_p123_input_quiet(uint64_t now);
 extern uint64_t hakios_exynos_tmu_age_ms(void);
 
+/* Touch producer only revokes leases; no fake present, no MMIO or clock
+ * write here. Normal governor restores its stock floor on the next window. */
+void hakios_p124_gpu_touch(void);
+void
+hakios_p124_gpu_touch(void)
+{
+    if(__atomic_load_n(&p123_floor_until,__ATOMIC_RELAXED) &&
+        __atomic_exchange_n(&p123_floor_until,0,__ATOMIC_ACQ_REL)){
+        __atomic_store_n(&p123_static_streak,0,__ATOMIC_RELEASE);
+        __atomic_fetch_add(&p123_bypass_windows,1,__ATOMIC_RELAXED);
+    }
+    if(__atomic_load_n(&p1231_hash_until,__ATOMIC_RELAXED))
+        __atomic_store_n(&p1231_hash_until,0,__ATOMIC_RELEASE);
+}
 static bool
 p123_floor_active(uint64_t now)
 {
@@ -2458,7 +2472,9 @@ p1231_floor_refusal(uint64_t now)
     if(hakios_display_requested_on()!=1)mask|=32;
     if(!hakios_p123_input_quiet(now))mask|=64;
     int32_t temp=hakios_exynos_tmu_zone_mc(2);
-    if(hakios_exynos_tmu_age_ms()>2000 || temp<0 || temp>=72000)mask|=128;
+    int32_t big=hakios_exynos_tmu_zone_mc(0),lit=hakios_exynos_tmu_zone_mc(1);
+    if(hakios_exynos_tmu_age_ms()>2000 || temp<0 || temp>=72000 ||
+        big<0 || big>=76000 || lit<0 || lit>=70000)mask|=128;
     return mask;
 }
 static int
@@ -2515,8 +2531,8 @@ SYSCTL_PROC(_kern_hakios,OID_AUTO,p123_floor_stats,
     NULL,0,p123_floor_stats_sysctl,"A",
     "P12.3 adaptive frame-floor evidence and monotonic display-present stamps");
 /* P12.3.1: separate checksum experiment, readback expires even with no frames.
- * 0 legacy, 1 full-range scalar 4-lane, 2 equivalent fast 4-lane.
- * No clock/rail/panel changes. Both nonzero modes expire in 30 seconds. */
+ * P12.4: 0 legacy, 2 fast 4-lane; scalar mode1 is refused (thermal stop).
+ * No clock/rail/panel changes. Fast mode expires in 30 seconds. */
 static uint32_t p1231_hash_value;
 static int
 p1231_hash_mode_sysctl(__unused struct sysctl_oid *oidp,
@@ -2531,7 +2547,7 @@ p1231_hash_mode_sysctl(__unused struct sysctl_oid *oidp,
     int v=until?(int)__atomic_load_n(&p1231_hash_value,__ATOMIC_RELAXED):0;
     int error=sysctl_io_number(req,v,sizeof(v),&v,NULL);
     if(error || req->newptr==NULL)return error;
-    if(v<0 || v>2)return EINVAL;
+    if(v!=0 && v!=2)return EINVAL;
     if(v==0){
         __atomic_store_n(&p1231_hash_until,0,__ATOMIC_RELEASE);
         return 0;
@@ -2547,7 +2563,7 @@ p1231_hash_mode_sysctl(__unused struct sysctl_oid *oidp,
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p1231_hash_mode,
     CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,
     NULL,0,p1231_hash_mode_sysctl,"I",
-    "P12.3.1 bounded IOSurface checksum A/B, 0 legacy 1 reference 2 fast");
+    "P12.4 bounded IOSurface checksum A/B, 0 legacy 2 fast");
 SYSCTL_UINT(_kern_hakios, OID_AUTO, mali_gov_frame, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gov_frame_mhz, 0,
     "the GPU's clock while frames come, MHz at least (mali_gov=1; 0: none)");
 
@@ -2726,10 +2742,7 @@ gov_window(uint64_t now, uint64_t busy)
 	}
 	/* Revoke a trial on real input, display loss or unavailable/hot TMU.
 	 * Do not wait for another host command or silently rearm on wake. */
-	if(p123_floor_active(now) &&
-	    (hakios_display_requested_on()!=1 || !hakios_p123_input_quiet(now) ||
-	    hakios_exynos_tmu_age_ms()>2000 || mc<0 || mc>=72000 ||
-	    mali_dvs || gov_frame_mhz!=450)){
+	if(p123_floor_active(now) && p1231_floor_refusal(now)){
 		__atomic_store_n(&p123_floor_until,0,__ATOMIC_RELEASE);
 		__atomic_fetch_add(&p123_bypass_windows,1,__ATOMIC_RELAXED);
 	}

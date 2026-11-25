@@ -709,6 +709,14 @@ hakios_loader_core_taken(void)
 	return state == LOADER_CORE_WANTED || state == LOADER_CORE_GONE;
 }
 
+/* Stronger than taken(): WANTED is not a completed handoff. */
+int hakios_p124_loader_gone(void);
+int
+hakios_p124_loader_gone(void)
+{
+    return loader_core_box.state == LOADER_CORE_GONE;
+}
+
 static void
 psci_smp_loader_poll(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 {
@@ -1052,6 +1060,9 @@ hakios_loader_core_taken(void)
 {
 	return 0;
 }
+
+int hakios_p124_loader_gone(void);
+int hakios_p124_loader_gone(void) { return 0; }
 
 void hakios_loader_core_take(void);
 void

@@ -16,6 +16,7 @@
 #include <sys/resource.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
+#include <string.h>
 
 #define ROUNDS  60000000ULL
 #define MOST    16
@@ -70,14 +71,19 @@ work(void *arg)
 int
 main(int argc, char **argv)
 {
-	int active = number("hw.activecpu"), threads = active < 2 ? 2 : active > MOST ? MOST : active;
+	int active, threads;
 	int where[MOST], seen = 0;
 	pthread_t thread[MOST];
 	uint64_t start, alone, together, spent;
 
-	if (argc > 1) {
-		sleep((unsigned)atoi(argv[1]));
+	/* Explicit manual benchmark only. An old rc.jobs with "240"
+	 * cannot silently stress a thermal acquisition. */
+	if (argc > 1 && strcmp(argv[1],"--benchmark") != 0) {
+		printf("cpu_test: benchmark refused; use --benchmark explicitly\n");
+		return 0;
 	}
+	active=number("hw.activecpu");
+	threads=active<2?2:active>MOST?MOST:active;
 	printf("cpu_test: hw.ncpu %d, hw.activecpu %d, hw.physicalcpu %d, hw.logicalcpu %d\n", number("hw.ncpu"),
 	    number("hw.activecpu"), number("hw.physicalcpu"), number("hw.logicalcpu"));
 	if (argc < 2) {

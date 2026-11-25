@@ -12,6 +12,7 @@ param(
  [ValidateRange(10,100)][int]$OffStableSeconds=25,
  [switch]$MicroGesture,[switch]$IncludeIdle,[switch]$WfiProbe,[switch]$WakeCheck,
  [switch]$P123,[switch]$AdaptiveFloor,[switch]$ClockCrossover,[switch]$IdleOnly,[switch]$HashCrossover,
+ [switch]$P124,[ValidateRange(0,2)][int]$CpuFloorStep=0,[ValidateRange(0,2)][int]$BoostTrial=0,[switch]$ClockCadence,[switch]$GestureDetail,
  [switch]$Execute,[switch]$LibraryOnly
 )
 Set-StrictMode -Version 2
@@ -28,7 +29,21 @@ $LibraryOnly=$script:P122SavedLibrary
 $WfiProbe=$script:P122SavedWfi
 $WakeCheck=$script:P123SavedWake
 $script:P122ModeDirty=$false
+if($P124){$P123=$true}
 $script:P123HostEnabled=[bool]$P123
+$script:P124HostEnabled=[bool]$P124
+$script:P124ClockAllowed=[bool]($P124 -and $ClockCadence)
+$script:P124CpuDirty=$false
+$script:P124ClockArmed=$false
+$script:P124ClockCuts=0L
+$script:P124HashWindows=0
+$script:P124HashStable=0
+$script:P124ExpectedHash=-1
+if(($CpuFloorStep -or $BoostTrial -or $ClockCadence -or $GestureDetail) -and -not $P124){throw 'New trial options require -P124'}
+if($BoostTrial -and -not $MicroGesture){throw '-BoostTrial requires -MicroGesture'}
+if($GestureDetail -and -not $MicroGesture){throw '-GestureDetail requires -MicroGesture'}
+if(($CpuFloorStep -or $ClockCadence) -and ($MicroGesture -or $IncludeIdle -or $WfiProbe)){throw 'Keep P12.4 quiet trials separate'}
+if(@(@($AdaptiveFloor,$ClockCrossover,$IdleOnly,$HashCrossover,($CpuFloorStep -gt 0),$ClockCadence)|Where-Object {$_}).Count -gt 1){throw 'Choose only one quiet trial'}
 $script:P123ClockAllowed=[bool]($P123 -and $ClockCrossover)
 $script:P123FloorDirty=$false
 $script:P123SourceLines=New-Object 'System.Collections.Generic.List[string]'
@@ -70,7 +85,7 @@ $script:LifeLineObserver={
  param([string]$Line,[datetime]$At)
  if($script:P122PreviousObserver){& $script:P122PreviousObserver $Line $At}
  if($script:P123HostEnabled -and $script:LifeSynced){
-    if($Line -match '^p123-(clock-class|clock-images|clock-window|ca-window|gl-window|gl):|^p1231-(clock-meta|clock-view|hash|floor|control):|^hakios-gl-(path|cost-top|g21|p0):|^ufs: (nufs: summary|native: speed)|^cpufreq_gov: (stat|state ms)'){
+    if($Line -match '^p124-(cpu|clock|hash|texture):|^hakios-gl: IOSurface textures:|^fps: cpu:|^p123-(clock-class|clock-images|clock-window|ca-window|gl-window|gl):|^p1231-(clock-meta|clock-view|hash|floor|control):|^hakios-gl-(path|cost-top|g21|p0):|^ufs: (nufs: summary|native: speed)|^cpufreq_gov: (stat|state ms)'){
         $script:P123SourceLines.Add(('{0:HH:mm:ss.fff}Z {1} {2}' -f $At,$script:P12Phase,$Line))
     }
     if($Line -match '^p123-gl-window: .*native_skipped=0 '){$script:P123GlAt=$At}
@@ -80,6 +95,19 @@ $script:LifeLineObserver={
         $script:P123ClockAt=$At
     }
     if($Line -match '^p1231-control: requested=0 observed=1 ' -and $script:P122Await -eq 0){$script:P123Control0=$true}
+    if($Line -match '^p124-clock: armed=1 '){$script:P124ClockArmed=$true}
+    if($Line -match '^p124-clock: arm_refused'){$script:P124ClockArmed=$false}
+    if($Line -match '^p124-clock: active=([01]) cuts=(\d+) '){
+        $script:P124ClockArmed=$Matches[1] -eq '1'
+        $script:P124ClockCuts=[long]$Matches[2]
+    }
+    if($Line -match '^p124-hash: mode=([02]) migrations=(\d+) verify_budget_skipped=\d+ fallback=([01]) '){
+        if([int]$Matches[1] -eq $script:P124ExpectedHash){
+            $script:P124HashWindows++
+            if([int]$Matches[2] -eq 0){$script:P124HashStable++}
+        }
+        if($Matches[3] -eq '1'){$script:P123HashFallback=$true}
+    }
     if($Line -match '^p1231-hash: applied=([012]) '){$script:P123HashApplied=[int]$Matches[1]}
     if($Line -match '^p1231-hash: window mode=([12]) fallback=([01])'){
         if([int]$Matches[1] -eq $script:P123HashApplied){$script:P123HashWindows++}
@@ -415,9 +443,93 @@ function P1231-HashTrial {
     }
     P122-Switch 0
 }
+# P12.4 uses existing serial/safety harness. No raw frequency writes.
+function P124-CpuProfile([string]$Label,[int]$Mode){
+    $script:P12Phase=$Label
+    P123-Guard
+    $before=P12-Query 'p124_cpu_stats'
+    [void](P12-Query 'p1231_ufs_stats')
+    $script:P124CpuDirty=$true
+    try{
+        [void](P12-Query 'p124_cpu_mode' "$Mode")
+        P12-Observe $Label 12 'No touch. Stock load governor and thermal ceiling retained'
+        $after=P12-Query 'p124_cpu_stats'
+        [void](P12-Query 'p1231_ufs_stats')
+        if((P122-CountField $after 'active') -ne $Mode){throw 'P12.4 CPU lease revoked; comparison incomplete'}
+        $delta=(P122-CountField $after 'effective')-(P122-CountField $before 'effective')
+        if($Mode -ne 0 -and $delta -le 0){throw 'P12.4 CPU trial had no eligible windows'}
+        Life-Say "P12.4 CPU $Label mode=$Mode effective_delta=$delta"
+    }finally{
+        [void](P12-Query 'p124_cpu_mode' '0' -Cleanup)
+        $script:P124CpuDirty=$false
+    }
+}
+function P124-ClockTrial {
+    $script:P12Phase='CLOCK_CADENCE_A0'
+    P12-Observe 'CLOCK_CADENCE_A0' 12 'No touch, Clock visible; stock baseline'
+    $script:P124ClockArmed=$false;$script:P124ClockCuts=0
+    $script:P12HiStopConfirmed=$false
+    try{
+        [void](P12-Query 'hi_cmd' '253')
+        $until=(Life-Now).AddSeconds(5)
+        while(-not $script:P124ClockArmed -and (Life-Now) -lt $until){Life-Pump;P123-Guard}
+        if(-not $script:P124ClockArmed){throw 'P12.4 exact Clock cadence arm ACK missing'}
+        P12-Observe 'CLOCK_CADENCE_B' 16 'No touch; exact Clock cadence only'
+        if(-not $script:P124ClockArmed -or $script:P124ClockCuts -le 0){throw 'P12.4 Clock trial revoked or no cuts'}
+    }finally{
+        $script:P12HiGateStopSeen=$false
+        [void](P12-Query 'hi_cmd' '201' -Cleanup)
+        $until=(Life-Now).AddSeconds(7)
+        while(-not $script:P12HiGateStopSeen -and (Life-Now) -lt $until){Life-Pump}
+        if(-not $script:P12HiGateStopSeen){throw 'P12.4 Clock STOP ACK missing'}
+        $script:P12HiStopConfirmed=$true
+    }
+    P12-Observe 'CLOCK_CADENCE_A1' 12 'Stock callback restored; no touch'
+}
+function P124-HashTrial {
+    P122-Switch 2
+    foreach($item in @(@{Name='HASH_LEGACY_A0';Mode=0},@{Name='HASH_FAST_B';Mode=2},@{Name='HASH_LEGACY_A1';Mode=0})){
+        $script:P12Phase=$item.Name+'_WARM'
+        P123-Guard
+        $script:P123HashApplied=-1;$script:P123HashFallback=$false
+        $script:P124HashWindows=0;$script:P124HashStable=0;$script:P124ExpectedHash=$item.Mode
+        $script:P123HashDirty=$true
+        try{
+            [void](P12-Query 'p1231_hash_mode' "$($item.Mode)")
+            if($item.Mode -eq 2){
+                $until=(Life-Now).AddSeconds(5)
+                while($script:P123HashApplied -ne 2 -and (Life-Now) -lt $until){Life-Pump;P123-Guard}
+                if($script:P123HashApplied -ne 2){throw 'Fast hash applied ACK missing'}
+            }
+            P12-Observe ($item.Name+'_WARM') 12 'Warm digest/cache; no comparisons yet'
+            $script:P124HashWindows=0;$script:P124HashStable=0
+            [void](P122-Snapshot ($item.Name+'_BEGIN'))
+            P12-Observe $item.Name 12 'Steady comparison; exclude straddling or migration windows'
+            [void](P122-Snapshot ($item.Name+'_END'))
+            if((P12-Query 'p1231_hash_mode') -ne "$($item.Mode)" -or $script:P123HashFallback -or $script:P124HashStable -lt 2){
+                throw 'P12.4 hash insufficient stable windows, fallback or lease revoked'
+            }
+            Life-Say "P12.4 hash $($item.Name) stable_windows=$script:P124HashStable; compare full nonstraddling windows only"
+        }finally{
+            [void](P12-Query 'p1231_hash_mode' '0' -Cleanup)
+            $script:P123HashDirty=$false
+        }
+    }
+    P122-Switch 0
+}
+function P124-IrqSnapshot([string]$Label){
+    $previous=$script:P12Phase
+    try{
+        $script:P12Phase=$Label
+        foreach($i in 0..7){
+            $sample=P12-Query "p124_irq$i"
+            if($sample -notmatch "^version=1 cpu=$i "){throw "P12.4 missing IRQ CPU$i evidence"}
+        }
+    }finally{$script:P12Phase=$previous}
+}
 function P123-Report([string]$Stem,[string]$Stop){
  $lines=New-Object 'System.Collections.Generic.List[string]'
- $lines.Add("S9 P12.3.1 SOURCE AND ADAPTIVE FLOOR STOP=$Stop mode0_deferred=$($script:P123DeferredMode0)")
+ $lines.Add("S9 P12.3.1 SOURCE AND ADAPTIVE FLOOR STOP=$Stop mode0_deferred=$($script:P123DeferredMode0) P124=$P124")
  $lines.Add('Same mach ticks across processes; windows only, NOT matched frame IDs. Shadow bind candidates do not authorize skipping.')
  $lines.Add('Adaptive trial is 30s max, lower-only frame floor; no GPU voltage, panel or CPU_OFF changes.')
  foreach($r in $script:P123FloorRows){$lines.Add($r)}
@@ -434,7 +546,8 @@ function P122-Run {
     Write-Host 'Disable independent glcost/glstage/p0hash/p0verify glprof bootargs for causal comparison.'
     Write-Host 'Optional -MicroGesture: after fresh cool start ONE gentle swipe only for 4 seconds.'
     Write-Host 'Optional -IncludeIdle -WfiProbe: manual physical POWER OFF; CPU idle diagnostics.'
-    if($P123){
+    if($P124){Write-Host 'P12.4: -CpuFloorStep 1/2, -MicroGesture -BoostTrial 1/2, -ClockCadence, -HashCrossover (legacy/fast/legacy), -IdleOnly -WfiProbe; independent scenarios'}
+    if($P123 -and -not $P124){
         Write-Host 'P12.3 PREVIEW: matched BOOT+SYSTEM; source timestamps and shadow GL; no automatic suppression.'
         Write-Host 'Choose separate -AdaptiveFloor (A/B/A, 30s kernel expiry), -ClockCrossover, -HashCrossover (reference/fast/reference), or -IdleOnly -WfiProbe.'
         Write-Host 'Without those options, collect P12.3 profile data. -MicroGesture is a separate ONE-swipe scenario; optional -WakeCheck only with idle.'
@@ -476,6 +589,16 @@ function P122-Run {
         if($hash -ne '0'){$script:P123HashDirty=$true;[void](P12-Query 'p1231_hash_mode' '0' -Cleanup);$script:P123HashDirty=$false}
         [void](P12-Query 'p1231_ufs_stats')
     }
+    if($P124){
+        $new=P12-Query 'p124_cpu_stats'
+        if($new -notmatch '^version=1 active='){throw 'P12.4 matched kernel required'}
+        $script:P124CpuDirty=$true
+        [void](P12-Query 'p124_cpu_mode' '0' -Cleanup)
+        $script:P124CpuDirty=$false
+        if($MicroGesture -or $CpuFloorStep -or $HashCrossover){
+            $script:P12StartBigC=65;$script:P12StartLittleC=64;$script:P12StartGpuC=65
+        }
+    }
     P12-CoolStart 12
     P12-QuiesceHI2
     if($P123){
@@ -498,8 +621,14 @@ function P122-Run {
         P123-FloorProfile 'FLOOR_A1' 0
     }elseif($ClockCrossover){
         P123-ClockTrial
+    }elseif($CpuFloorStep){
+        P124-CpuProfile 'LITTLE_A0' 0
+        P124-CpuProfile 'LITTLE_B' $CpuFloorStep
+        P124-CpuProfile 'LITTLE_A1' 0
+    }elseif($ClockCadence){
+        P124-ClockTrial
     }elseif($HashCrossover){
-        P1231-HashTrial
+        if($P124){P124-HashTrial}else{P1231-HashTrial}
     }elseif(-not $IdleOnly -and -not ($P123 -and $MicroGesture)){
         P122-Profile 0 'ROOT_MIN_A'
         P122-Profile 1 'ROOT_STAGE'
@@ -510,12 +639,27 @@ function P122-Run {
     if($MicroGesture){
         P12-CoolStart 12
         P12-EarlyThermalGuard
-        P122-Switch 2
+        if(-not $P124 -or $GestureDetail){P122-Switch 2}else{
+            P122-Switch 0 -FirstMinimal
+            if(-not @($script:P122GlWindows|Where-Object {$_.Mode -eq 0}).Count){throw 'No live minimal GL window; baseline not verified'}
+        }
+        if($P124 -and $BoostTrial){
+            $script:P124CpuDirty=$true
+            [void](P12-Query 'p124_cpu_mode' "$($BoostTrial+2)")
+            $script:P124BoostBefore=P12-Query 'p124_cpu_stats'
+        }
         if($P123){P1231-MicroTrial}else{
             P12-Observe 'MICRO_TOUCH' 4 'ONE gentle swipe; no repeated gestures'
             [void](P122-Snapshot 'MICRO_TOUCH_END')
         }
-        P122-Switch 0
+        if($P124 -and $BoostTrial){
+            $end=P12-Query 'p124_cpu_stats'
+            if((P122-CountField $end 'active') -ne ($BoostTrial+2)){throw 'Boost trial revoked; no valid comparison'}
+            if((P122-CountField $end 'effective') -le (P122-CountField $script:P124BoostBefore 'effective')){throw 'Boost trial had no lower floor evaluations'}
+            [void](P12-Query 'p124_cpu_mode' '0' -Cleanup)
+            $script:P124CpuDirty=$false
+        }
+        if(-not $P124 -or $GestureDetail){P122-Switch 0}
     }
     $script:P123Strict=$false
     if($IncludeIdle -or $IdleOnly){
@@ -524,10 +668,12 @@ function P122-Run {
             if($P123){
                 [void](P12-Query 'p12_wfi_stats')
                 $idleBefore=P12-Query 'p12_idle_diag'
+                if($P124){P124-IrqSnapshot 'IRQ_ON_BEGIN'}
                 P12-Observe 'WFI_ON' 12 'No touch; compare measured WFI before physical screen OFF'
                 [void](P12-Query 'p12_wfi_stats')
                 $idleOn=P12-Query 'p12_idle_diag'
                 P1231-ValidateIdle $idleBefore $idleOn
+                if($P124){P124-IrqSnapshot 'IRQ_ON_END'}
             }
         }
         if($P123){
@@ -536,6 +682,9 @@ function P122-Run {
             $script:P12GpuWakeBaseline=P122-CountField $baseline 'wake_count'
         }
         P12-ObserveIdle
+        if($P124 -and $WfiProbe){
+            if($script:LifeState -eq 'OFF'){P124-IrqSnapshot 'IRQ_OFF_END'}else{P124-IrqSnapshot 'IRQ_POST_WAKE_END'}
+        }
         if($WfiProbe){[void](P12-Query 'p12_wfi_stats');$idleEnd=P12-Query 'p12_idle_diag';if($P123){P1231-ValidateIdle $idleOn $idleEnd}}
         [void](P12-Query 'g3d_lab_stats')
     }
@@ -550,6 +699,9 @@ function P122-Run {
     Life-Say ('P12.2 STOPPED '+$errorText)
  }finally{
     if($script:P12PreflightVerified -and $null -ne $script:LifeSerial -and $script:LifeSerial.IsOpen){
+        if($script:P124CpuDirty){
+            try{[void](P12-Query 'p124_cpu_mode' '0' -Cleanup);$script:P124CpuDirty=$false}catch{Life-Say ('P12.4 CPU restore UNSURE; 30s expiry '+$_.Exception.Message)}
+        }
         if($script:P123HashDirty){
             try{[void](P12-Query 'p1231_hash_mode' '0' -Cleanup);$script:P123HashDirty=$false}catch{Life-Say ('Hash restore UNSURE; 30s deadline '+$_.Exception.Message)}
         }
@@ -567,7 +719,7 @@ function P122-Run {
         if($script:P12WfiDirty){
             try{[void](P12-Query 'p12_wfi_probe' '0' -Cleanup)}catch{Life-Say ('WFI restore UNSURE '+$_.Exception.Message)}
         }
-        if($script:P12HiDirty -and (-not $ClockCrossover -or $script:P12HiStopConfirmed)){
+        if($script:P12HiDirty -and (-not ($ClockCrossover -or $ClockCadence) -or $script:P12HiStopConfirmed)){
             try{[void](P12-Query 'hi_cmd' '0' -Cleanup)}catch{Life-Say ('HI2 mailbox restore UNSURE '+$_.Exception.Message)}
         }
     }

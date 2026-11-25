@@ -294,6 +294,15 @@ static uint64_t ramp_began;                     /* a gesture's first event, unti
 static bool ramp_raised;
 static uint64_t finger_since;                   /* since when a finger is down (0: none), for the stat line */
 static uint64_t finger_time;
+/* P12.4: independent CPU floor-only lease. 1/2 LITTLE; 3/4 boost.
+ * No voltage, core count, scheduler mask or ceiling change. */
+static uint32_t p124_cpu_mode;
+static bool p124_enabled;
+static uint64_t p124_cpu_until, p124_cpu_effective, p124_cpu_bypass;
+static uint32_t p124_cpu_reason;
+extern bool hakios_p124_ufs_safe(void);
+extern bool hakios_p124_ufs_busy(void);
+extern void hakios_p124_gpu_touch(void);
 
 /* P12.3 GPU floor trial: read-only input proof, no new input hook or
  * boost policy. Missing governor/touch evidence means NOT quiet. */
@@ -375,6 +384,9 @@ hakios_exynos_cpufreq_touch(void)
 	/* Any real touch immediately withdraws the no-finger thermal experiment. */
 	__atomic_store_n(&p12_frame_streak, 0, __ATOMIC_RELEASE);
 	before = __atomic_exchange_n(&touch_last, now, __ATOMIC_RELEASE);
+	hakios_p124_gpu_touch();
+	if(__atomic_load_n(&p124_cpu_mode,__ATOMIC_RELAXED)<=2)
+	    __atomic_store_n(&p124_cpu_until,0,__ATOMIC_RELEASE);
 	__atomic_fetch_add(&touch_count, 1, __ATOMIC_RELAXED);
 	if (!boost_on(before, boost_span, now)) {
 		__atomic_store_n(&ramp_began, now, __ATOMIC_RELEASE);
@@ -403,6 +415,9 @@ hakios_exynos_cpufreq_fingers(uint32_t down)
 	before = __atomic_exchange_n(&fingers, down, __ATOMIC_RELEASE);
 	if (down != 0) __atomic_store_n(&p12_frame_streak, 0, __ATOMIC_RELEASE);
 	if (before == 0 && down != 0) {
+		hakios_p124_gpu_touch();
+		if(__atomic_load_n(&p124_cpu_mode,__ATOMIC_RELAXED)<=2)
+		    __atomic_store_n(&p124_cpu_until,0,__ATOMIC_RELEASE);
 		if (gov_wake) {
 			hakios_mali_frame();
 		}
@@ -547,6 +562,9 @@ SYSCTL_PROC(_kern_hakios, OID_AUTO, p12_cpu_stats,
 extern volatile uint32_t hakios_p12_wfi_probe_enable;
 extern volatile uint64_t hakios_p12_wfi_entries[8];
 extern volatile uint64_t hakios_p12_wfi_ticks[8];
+extern volatile uint32_t hakios_p124_phys[8],hakios_p124_phys_valid[8];
+extern volatile uint64_t hakios_p124_irq[8][1020],hakios_p124_vtimer[8];
+extern volatile uint64_t hakios_p124_wfi_hist[8][5],hakios_p124_wfi_bounds[4];
 static int
 p12_wfi_probe_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
     __unused int arg2, struct sysctl_req *req)
@@ -555,6 +573,14 @@ p12_wfi_probe_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
     int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
     if(e || req->newptr==USER_ADDR_NULL)return e;
     if(v<0 || v>1)return EINVAL;
+    if(v){
+        const unsigned us[]={100,500,1000,10000};
+        for(unsigned i=0;i<4;i++){
+            uint64_t bound=0;
+            nanoseconds_to_absolutetime((uint64_t)us[i]*1000,&bound);
+            __atomic_store_n(&hakios_p124_wfi_bounds[i],bound,__ATOMIC_RELAXED);
+        }
+    }
     __atomic_store_n(&hakios_p12_wfi_probe_enable,(uint32_t)v,__ATOMIC_RELEASE);
     say("p12-wfi: probe=%d observational_only=1 CPU_SUSPEND=0 CPD=0 SICD=0 CPU_OFF=0\n",v);
     return 0;
@@ -627,6 +653,44 @@ SYSCTL_PROC(_kern_hakios, OID_AUTO, p12_idle_diag,
     CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN,
     NULL, 0, p12_idle_diag_sysctl, "A",
     "P12.1 CPU idle entry and early escape reason counters; read-only");
+
+/* Per-core histogram and top acknowledged IRQ IDs. No claimed 1:1 wake cause.
+ * Scan only on explicit read, not in IRQ context. */
+static int
+p124_irq_stats_sysctl(__unused struct sysctl_oid *oidp,
+    __unused void *arg1,int cpu,struct sysctl_req *req)
+{
+    if(cpu<0 || cpu>=8)return EINVAL;
+    uint64_t sgi=0,ppi=0,spi=0,top[4]={0},hist[5];
+    unsigned ids[4]={0};
+    for(unsigned id=0;id<1020;id++){
+        uint64_t n=__atomic_load_n(&hakios_p124_irq[cpu][id],__ATOMIC_RELAXED);
+        if(id<16)sgi+=n;else if(id<32)ppi+=n;else spi+=n;
+        for(unsigned j=0;j<4;j++)if(n>top[j]){
+            for(unsigned k=3;k>j;k--){top[k]=top[k-1];ids[k]=ids[k-1];}
+            top[j]=n;ids[j]=id;break;
+        }
+    }
+    for(unsigned j=0;j<5;j++)hist[j]=__atomic_load_n(&hakios_p124_wfi_hist[cpu][j],__ATOMIC_RELAXED);
+    char buf[640];
+    snprintf(buf,sizeof(buf),"version=1 cpu=%d phys_valid=%u mpidr=0x%x "
+        "sgi=%llu ppi=%llu spi=%llu vtimer=%llu top=%u:%llu,%u:%llu,%u:%llu,%u:%llu "
+        "wfi_bins_lt100_500_1000_10000_ge10000us=%llu,%llu,%llu,%llu,%llu acknowledged_not_wake_cause=1",
+        cpu,__atomic_load_n(&hakios_p124_phys_valid[cpu],__ATOMIC_ACQUIRE),
+        __atomic_load_n(&hakios_p124_phys[cpu],__ATOMIC_RELAXED),
+        (unsigned long long)sgi,(unsigned long long)ppi,(unsigned long long)spi,
+        (unsigned long long)__atomic_load_n(&hakios_p124_vtimer[cpu],__ATOMIC_RELAXED),
+        ids[0],(unsigned long long)top[0],ids[1],(unsigned long long)top[1],
+        ids[2],(unsigned long long)top[2],ids[3],(unsigned long long)top[3],
+        (unsigned long long)hist[0],(unsigned long long)hist[1],(unsigned long long)hist[2],
+        (unsigned long long)hist[3],(unsigned long long)hist[4]);
+    return SYSCTL_OUT(req,buf,strlen(buf)+1);
+}
+#define P124_IRQ_SYSCTL(N) SYSCTL_PROC(_kern_hakios,OID_AUTO,p124_irq##N, \
+    CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,N,p124_irq_stats_sysctl,"A","P12.4 per-CPU IRQ/WFI histogram")
+P124_IRQ_SYSCTL(0); P124_IRQ_SYSCTL(1); P124_IRQ_SYSCTL(2); P124_IRQ_SYSCTL(3);
+P124_IRQ_SYSCTL(4); P124_IRQ_SYSCTL(5); P124_IRQ_SYSCTL(6); P124_IRQ_SYSCTL(7);
+#undef P124_IRQ_SYSCTL
 
 /* kern.hakios.gov_policy: gov_policy=, changed while the system runs (the USB console's "sysctl kern.hakios.gov_policy=N") */
 static int
@@ -1028,6 +1092,92 @@ window_span(uint64_t now)
 	return span;
 }
 
+static bool
+p124_rate_present(struct cluster *c,uint32_t khz)
+{
+    for(unsigned i=0;i<c->n;i++)if(c->levels[i]==khz)return true;
+    return false;
+}
+static unsigned
+p124_cpu_refusal(bool arm,unsigned mode,uint64_t now)
+{
+    unsigned why=0;
+    int32_t big=hakios_exynos_tmu_zone_mc(0),lit=hakios_exynos_tmu_zone_mc(1),
+        gpu=hakios_exynos_tmu_zone_mc(2);
+    if(!p124_enabled || !gov_running || gov_policy!=2 || __atomic_load_n(&p12_cpu_mode,__ATOMIC_ACQUIRE) || clusters[0].online!=4 ||
+        clusters[1].online!=4 || hakios_cpu_exit_mask || big_cores!=SCION_BIG_CORES)why|=1;
+    if(hakios_display_requested_on()!=1)why|=2;
+    if(!s9_p124_temp_ok(arm,hakios_exynos_tmu_age_ms(),big,lit,gpu))why|=4;
+    if(arm && !hakios_p123_input_quiet(now))why|=8;
+    if(mode<=2){
+        if(clusters[0].floor!=1053000 || !p124_rate_present(&clusters[0],s9_p124_floor_request(mode)) ||
+            s9_p124_floor_request(mode)<clusters[0].dt_min ||
+            !hakios_p124_ufs_safe() || (arm && hakios_p124_ufs_busy()))why|=16;
+        if(!hakios_p123_input_quiet(now) || frames_moving(now))why|=32;
+    }else if(mode<=4){
+        if(!p124_rate_present(&clusters[0],1053000) ||
+            !p124_rate_present(&clusters[1],1261000) ||
+            !p124_rate_present(&clusters[1],1469000) ||
+            !p124_rate_present(&clusters[1],1066000))why|=64;
+    }else why|=128;
+    return why;
+}
+static unsigned
+p124_cpu_active(uint64_t now)
+{
+    uint64_t until=__atomic_load_n(&p124_cpu_until,__ATOMIC_ACQUIRE);
+    if(!until)return 0;
+    unsigned mode=__atomic_load_n(&p124_cpu_mode,__ATOMIC_RELAXED);
+    unsigned why=now>=until?256:p124_cpu_refusal(false,mode,now);
+    if(why){
+        __atomic_store_n(&p124_cpu_reason,why,__ATOMIC_RELAXED);
+        __atomic_store_n(&p124_cpu_until,0,__ATOMIC_RELEASE);
+        return 0;
+    }
+    return mode;
+}
+static int
+p124_cpu_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
+    __unused int arg2,struct sysctl_req *req)
+{
+    uint64_t now=mach_absolute_time();
+    int v=(int)p124_cpu_active(now);
+    int err=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(err || req->newptr==USER_ADDR_NULL)return err;
+    if(v<0 || v>4)return EINVAL;
+    if(!v){__atomic_store_n(&p124_cpu_until,0,__ATOMIC_RELEASE);return 0;}
+    if(p124_cpu_active(now))return EBUSY;
+    unsigned why=p124_cpu_refusal(true,(unsigned)v,now);
+    __atomic_store_n(&p124_cpu_reason,why,__ATOMIC_RELAXED);
+    if(why){say("p124-cpu: refused mode=%d reason=%u\n",v,why);return EPERM;}
+    uint64_t span=0;
+    nanoseconds_to_absolutetime(30ull*NSEC_PER_SEC,&span);
+    __atomic_store_n(&p124_cpu_mode,(uint32_t)v,__ATOMIC_RELAXED);
+    __atomic_store_n(&p124_cpu_until,now+span,__ATOMIC_RELEASE);
+    return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p124_cpu_mode,
+    CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,
+    p124_cpu_mode_sysctl,"I","P12.4 bounded lower-only CPU floor trial");
+static int
+p124_cpu_stats_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
+    __unused int arg2,struct sysctl_req *req)
+{
+    char buf[512];
+    unsigned mode=p124_cpu_active(mach_absolute_time());
+    snprintf(buf,sizeof(buf),"version=1 active=%u reason=%u effective=%llu bypass=%llu "
+        "little_floor=%u little_cur=%u big_cur=%u stock_lit_touch=%u stock_big_touch=%u stock_big_frame=%u ufs_safe=%u ufs_busy=%u",
+        mode,__atomic_load_n(&p124_cpu_reason,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p124_cpu_effective,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p124_cpu_bypass,__ATOMIC_RELAXED),
+        clusters[0].floor,clusters[0].cur,clusters[1].cur,clusters[0].scion_touch,
+        clusters[1].scion_touch,clusters[1].frame_khz,hakios_p124_ufs_safe()?1u:0u,hakios_p124_ufs_busy()?1u:0u);
+    return SYSCTL_OUT(req,buf,strlen(buf)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p124_cpu_stats,
+    CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,
+    p124_cpu_stats_sysctl,"A","P12.4 CPU lease and stock governor evidence");
+
 /* the floor the boosts on now give the cluster, a level, clamped by the ceiling now (0: no boost on) */
 static uint32_t
 boost_floor(struct cluster *c, uint64_t now)
@@ -1035,14 +1185,29 @@ boost_floor(struct cluster *c, uint64_t now)
 	uint32_t khz = 0;
 
 	if (gov_policy != 1) {
+		unsigned trial=p124_cpu_active(now);
+		bool limited=trial>=3 && c->load<70 && c->thermal==0 &&
+		    now>=__atomic_load_n(&p12_late_until,__ATOMIC_ACQUIRE);
+		if(trial>=3 && !limited)__atomic_fetch_add(&p124_cpu_bypass,1,__ATOMIC_RELAXED);
 		if (c->burst && boost_on(__atomic_load_n(&finger_edge, __ATOMIC_ACQUIRE), burst_span, now)) {
-			return ceiling_now(c);
+			uint32_t ceiling=ceiling_now(c);
+			if(limited){
+				uint32_t lower=s9_p124_boost_request(trial,ceiling,1,1,0);
+				if(lower<ceiling)__atomic_fetch_add(&p124_cpu_effective,1,__ATOMIC_RELAXED);
+				return c->levels[level_at_most(c,lower)];
+			}
+			return ceiling;
 		}
 		if (touch_held(now)) {
 			khz = c == &clusters[1] && gov_policy == 4 && pace.floor != 0 ? pace.floor : c->scion_touch;
 		}
 		if (frames_moving(now)) {
 			khz = MAX(khz, c->frame_khz);
+		}
+		if(limited && khz){
+			uint32_t lower=s9_p124_boost_request(trial,khz,c==&clusters[1],0,frames_moving(now));
+			if(lower<khz)__atomic_fetch_add(&p124_cpu_effective,1,__ATOMIC_RELAXED);
+			khz=lower;
 		}
 		return khz == 0 ? 0 : MIN(c->levels[level_at_least(c, khz)], ceiling_now(c));
 	}
@@ -1402,8 +1567,17 @@ decide_scion(struct cluster *c, uint64_t now, uint32_t window)
 				__atomic_fetch_add(&p12_scaled_windows, 1, __ATOMIC_RELAXED);
 		}
 	}
+	uint32_t floor=c->floor;
+	unsigned trial=p124_cpu_active(now);
+	if(c==&clusters[0] && trial>=1 && trial<=2){
+		if(!hakios_p124_ufs_busy()){
+		    floor=s9_p124_floor_request(trial);
+		    __atomic_fetch_add(&p124_cpu_effective,1,__ATOMIC_RELAXED);
+		}else __atomic_fetch_add(&p124_cpu_bypass,1,__ATOMIC_RELAXED);
+	}
+	/* The ordinary load governor is never capped by the trial. */
 	target = scion_rate(&c->rate, c->levels, c->n, c->cur, rated_load,
-	    MAX(c->floor, c->boost_floor), max, window);
+	    MAX(floor, c->boost_floor), max, window);
 	if (target != c->cur) {
 		set_rate(c, target, max);
 	}
@@ -1716,6 +1890,12 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 			last_log = now;
 			absolutetime_to_nanoseconds(now - start, &ns);
 			summary(ns / NSEC_PER_SEC);
+			unsigned trial=p124_cpu_active(now);
+			if(trial)say("p124-cpu: active=%u big=%u lit=%u big_boost_floor=%u lit_boost_floor=%u effective=%llu bypass=%llu load_big=%u load_lit=%u ufs_busy=%u\n",
+			    trial,clusters[1].cur,clusters[0].cur,clusters[1].boost_floor,clusters[0].boost_floor,
+			    (unsigned long long)__atomic_load_n(&p124_cpu_effective,__ATOMIC_RELAXED),
+			    (unsigned long long)__atomic_load_n(&p124_cpu_bypass,__ATOMIC_RELAXED),
+			    clusters[1].load,clusters[0].load,hakios_p124_ufs_busy()?1u:0u);
 		}
 	}
 }
@@ -1757,6 +1937,8 @@ hakios_exynos_cpufreq_gov_start(void)
 	uint32_t touch_big = 1469000, touch_lit = 1690000, frame_big = 1261000;
 	thread_t thread;
 
+	uint32_t diag=0;
+	p124_enabled=PE_parse_boot_argn("p122",&diag,sizeof(diag)) && diag==1;
 	if (!PE_parse_boot_argn("cpufreq_gov", &on, sizeof(on)) || on == 0) {
 		return false;
 	}

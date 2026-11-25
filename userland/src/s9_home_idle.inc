@@ -34,6 +34,8 @@ static struct hi_group {
 } hi_groups[HI_GROUPS];
 static unsigned hi_groups_used, hi_stage;
 static volatile uint32_t hi_gate_group;
+static uint64_t hi_p124_until,hi_p124_scene_at;
+static uint32_t hi_p124_display,hi_p124_cuts;
 static volatile uint64_t hi_gate_deadline, hi_last_input;
 static volatile bool hi_home_ready, hi_animations_absent;
 static void (*hi_original_send_event)(id,SEL,id);
@@ -75,6 +77,7 @@ static void
 hi_send_event(id self,SEL cmd,id event)
 {
     __atomic_store_n(&hi_last_input,hi_time_us(),__ATOMIC_RELEASE);
+    __atomic_store_n(&hi_p124_until,0,__ATOMIC_RELEASE); /* immediately fail open on any input */
     if(hi_p123_enabled)__atomic_store_n(&hi_p123_input_ticks,mach_absolute_time(),__ATOMIC_RELEASE);
     hi_original_send_event(self,cmd,event);
 }
@@ -148,6 +151,22 @@ hi_proxy_tick(id self,SEL cmd,id link)
                 g->last_view_us=now;
             }
         }
+    }
+    /* One explicitly armed visible Clock cadence trial, not visibility
+     * inference or a global display-link/FPS limit. Forward first callback,
+     * then at least once/second. Any unknown proof or input fails open. */
+    uint64_t trial=__atomic_load_n(&hi_p124_until,__ATOMIC_ACQUIRE);
+    uint64_t scene=__atomic_load_n(&hi_p124_scene_at,__ATOMIC_ACQUIRE);
+    uint64_t input=__atomic_load_n(&hi_last_input,__ATOMIC_ACQUIRE);
+    if(trial && now<trial && exact_clock && hi_event_hook_ok &&
+        hi_home_ready && __atomic_load_n(&hi_p124_display,__ATOMIC_ACQUIRE)==1 &&
+        scene && now>=scene && now-scene<=1500000 &&
+        input && now>=input && now-input>=3000000 &&
+        target==(id)objc_getClass("SBHClockApplicationIconImageView") &&
+        p->last_forward && now>=p->last_forward && now-p->last_forward<1000000){
+        __atomic_fetch_add(&hi_p124_cuts,1,__ATOMIC_RELAXED);
+        __atomic_fetch_add(&hi_groups[group-1].cut,1,__ATOMIC_RELAXED);
+        return;
     }
     bool verified_cut=exact_clock &&
         hi_verified_should_skip(now,__atomic_load_n(&hi_last_input,__ATOMIC_ACQUIRE),
@@ -333,6 +352,8 @@ hi_sample(void)
     hi_p10_sample_scene(windows,count,hi_time_us());
     bool ready=home && homewindows!=0 && budget!=0;
     __atomic_store_n(&hi_home_ready,ready,__ATOMIC_RELEASE);
+    __atomic_store_n(&hi_p124_scene_at,ready?hi_time_us():0,__ATOMIC_RELEASE);
+    if(!ready)__atomic_store_n(&hi_p124_until,0,__ATOMIC_RELEASE);
     __atomic_store_n(&hi_animations_absent,animations==0 && budget!=0,__ATOMIC_RELEASE);
     static unsigned tick;
     if(++tick%5!=0)return;
@@ -430,6 +451,7 @@ hi_usb_command(void)
     static bool warned;
     int command=sysctl_int("kern.hakios.hi_cmd");
     if(command<0){
+        __atomic_store_n(&hi_p124_until,0,__ATOMIC_RELEASE);
         if(!warned){warned=true;say("hi: CONTROL_FAIL mailbox_read=%d errno=%d "
             "auto_mode=%u passive_continues=1\n",command,errno,hi_auto_mode?1u:0u);}
         return;
@@ -445,9 +467,28 @@ hi_usb_command(void)
             hi_stages[hi_stage]);
         return;
     }
-    if(command==252){hi_auto_rearm();return;}
+    if(command==252){__atomic_store_n(&hi_p124_until,0,__ATOMIC_RELEASE);hi_auto_rearm();return;}
+    if(command==253){
+        uint64_t now=hi_time_us(),input=__atomic_load_n(&hi_last_input,__ATOMIC_ACQUIRE);
+        uint64_t scene=__atomic_load_n(&hi_p124_scene_at,__ATOMIC_ACQUIRE);
+        if(!hi_p123_enabled || !hi_event_hook_ok || !hi_home_ready ||
+            hi_verified_enabled || hi_p9_hidden_clock_enabled ||
+            __atomic_load_n(&hi_p10_mode,__ATOMIC_ACQUIRE) || hi_gate_group ||
+            sysctl_int("kern.hakios.hi_display_requested")!=1 ||
+            !scene || now<scene || now-scene>1500000 || !input || now<input || now-input<3000000 ||
+            (hi_auto_state!=HI_AUTO_ABORTED && hi_auto_state!=HI_AUTO_FINISHED) ||
+            __atomic_load_n(&hi_p124_until,__ATOMIC_ACQUIRE)>now){
+            say("p124-clock: arm_refused proof=0\n");return;
+        }
+        __atomic_store_n(&hi_p124_display,1,__ATOMIC_RELEASE);
+        __atomic_store_n(&hi_p124_cuts,0,__ATOMIC_RELAXED);
+        __atomic_store_n(&hi_p124_until,now+25000000,__ATOMIC_RELEASE);
+        say("p124-clock: armed=1 max_seconds=25 exact_class_timer_only=1 visible_cadence_trial=1\n");
+        return;
+    }
     if(command==300){hi_open_settings(false);return;}
     if(command==301){hi_open_settings(true);return;}
+    __atomic_store_n(&hi_p124_until,0,__ATOMIC_RELEASE);
     if(hi_auto_mode)hi_auto_cancel("manual_usb_control",true);
     if(command>=1 && command<=3)hi_mark((unsigned)command);
     else if(command>=101 && command<=148)hi_arm((unsigned)(command-100));
@@ -463,6 +504,17 @@ static void
 hi_pump(void)
 {
     hi_usb_command();
+    if(hi_p123_enabled && __atomic_load_n(&hi_p124_until,__ATOMIC_ACQUIRE)){
+        uint64_t now=hi_time_us();
+        int display=sysctl_int("kern.hakios.hi_display_requested");
+        __atomic_store_n(&hi_p124_display,display==1?1:0,__ATOMIC_RELEASE);
+        if(display!=1 || hi_verified_enabled || hi_p9_hidden_clock_enabled || hi_gate_group ||
+            __atomic_load_n(&hi_p10_mode,__ATOMIC_ACQUIRE) || now>=__atomic_load_n(&hi_p124_until,__ATOMIC_ACQUIRE))
+            __atomic_store_n(&hi_p124_until,0,__ATOMIC_RELEASE);
+        say("p124-clock: active=%u cuts=%u display=%d\n",
+            __atomic_load_n(&hi_p124_until,__ATOMIC_ACQUIRE)?1u:0u,
+            __atomic_load_n(&hi_p124_cuts,__ATOMIC_RELAXED),display);
+    }
     int lock_policy=sysctl_int("kern.hakios.hi_lock_policy");
     unsigned next_lock=lock_policy>=0 && lock_policy<=2?
         (unsigned)lock_policy:0u;

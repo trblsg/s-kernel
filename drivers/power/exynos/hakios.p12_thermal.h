@@ -30,4 +30,26 @@ s9_p12_cpu_rated_load(uint32_t raw_load, bool eligible)
     return eligible ? (uint32_t)((uint64_t)raw_load * 60 / 70) : raw_load;
 }
 
+/* P12.4 lower-only experiments. Never change a ceiling or hard thermal limit.
+ * A lower floor is valid only for exact supported levels. */
+static inline bool s9_p124_temp_ok(bool arm,uint64_t age,int32_t big,int32_t lit,int32_t gpu)
+{
+    return age<=2000 && big>=0 && lit>=0 && gpu>=0 &&
+        big<(arm?66000:76000) && lit<(arm?65000:70000) && gpu<(arm?66000:72000);
+}
+static inline unsigned s9_p124_floor_request(unsigned mode)
+{
+    return mode==1?949000u:mode==2?832000u:0u;
+}
+static inline unsigned s9_p124_boost_request(unsigned mode,unsigned original,
+    unsigned is_big,unsigned burst,unsigned moving)
+{
+    if(mode==3){
+        /* First trial isolates the initial BIG burst only. */
+        return is_big && burst && original>1469000u?1469000u:original;
+    }
+    if(mode!=4)return original;
+    unsigned cap=is_big?(burst?1261000u:(moving?1066000u:1261000u)):1053000u;
+    return original<cap?original:cap;
+}
 #endif

@@ -40,6 +40,29 @@ int main(void)
     }
     assert(s9_p12_cpu_rated_load(70,true)==60);
     assert(s9_p12_cpu_rated_load(100,true)==85);
-    puts("P12 CPU thermal stable-frame fail-open policy PASS");
+    assert(s9_p124_floor_request(0)==0);
+    assert(s9_p124_floor_request(1)==949000);
+    assert(s9_p124_floor_request(2)==832000);
+    assert(s9_p124_floor_request(3)==0 && s9_p124_floor_request(4)==0);
+    assert(s9_p124_temp_ok(true,2000,65000,64000,65000));
+    assert(!s9_p124_temp_ok(true,2001,65000,64000,65000));
+    assert(!s9_p124_temp_ok(true,1,66000,64000,65000));
+    assert(!s9_p124_temp_ok(false,1,72000,70700,69000));
+    assert(!s9_p124_temp_ok(false,1,76000,64000,65000));
+    assert(!s9_p124_temp_ok(false,1,65000,64000,72000));
+    assert(!s9_p124_temp_ok(false,1,-273000,64000,65000));
+    assert(s9_p124_boost_request(3,1794000,1,1,0)==1469000);
+    assert(s9_p124_boost_request(3,1248000,0,0,1)==1248000);
+    assert(s9_p124_boost_request(3,1469000,1,0,1)==1469000);
+    assert(s9_p124_boost_request(4,1794000,1,1,0)==1261000);
+    assert(s9_p124_boost_request(4,1469000,1,0,1)==1066000);
+    assert(s9_p124_boost_request(4,1248000,0,0,1)==1053000);
+    for(unsigned m=0;m<7;m++)
+      for(unsigned f=0;f<2000000;f+=1000)
+        for(unsigned big=0;big<2;big++)
+          for(unsigned burst=0;burst<2;burst++)
+            for(unsigned moving=0;moving<2;moving++)
+              assert(s9_p124_boost_request(m,f,big,burst,moving)<=f);
+    puts("P12/P12.4 CPU thermal lower-only fail-open policy PASS");
     return 0;
 }

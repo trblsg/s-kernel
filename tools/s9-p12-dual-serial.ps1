@@ -43,6 +43,8 @@ $script:P12HiStopConfirmed=$false
 $script:P12HiDirty=$false
 # Only the P12.3 wrapper opts in; P12/P12.2 retain the old allowlist.
 $script:P123HostEnabled=$false
+$script:P124HostEnabled=$false
+$script:P124ClockAllowed=$false
 $script:P123ClockAllowed=$false
 $script:P123Strict=$false
 $script:LifeHostOnly=$false
@@ -97,19 +99,24 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
         'p122_diag_mode','p122_gpu_stats',
         'p7_cpu_stats','p4_stats')
     if($script:P123HostEnabled){$allowed+=@('p123_floor_mode','p123_floor_stats','p1231_hash_mode','p1231_ufs_stats')}
+    if($script:P124HostEnabled){$allowed+=@('p124_cpu_mode','p124_cpu_stats')+(0..7|ForEach-Object {"p124_irq$_"})}
     if($Name -notin $allowed){throw "P12 sysctl disallowed $Name"}
+    if($script:P124HostEnabled -and $Name -eq 'p1231_hash_mode' -and $Value -eq '1'){throw 'P12.4 rejects scalar thermal trial'}
     if($Value -ne '' -and -not (
         (($Name -eq 'p12_cpu_mode' -or $Name -eq 'p12_wfi_probe') -and $Value -in @('0','1')) -or
         ($Name -eq 'hi_cmd' -and $Value -in @('0','201')) -or
         ($Name -eq 'p122_diag_mode' -and $Value -in @('0','1','2')) -or
         ($script:P123HostEnabled -and $Name -eq 'p123_floor_mode' -and $Value -in @('0','1')) -or
         ($script:P123HostEnabled -and $Name -eq 'p1231_hash_mode' -and $Value -in @('0','1','2')) -or
-        ($script:P123HostEnabled -and $script:P123ClockAllowed -and $Name -eq 'hi_cmd' -and $Value -eq '252'))){
+        ($script:P123HostEnabled -and $script:P123ClockAllowed -and $Name -eq 'hi_cmd' -and $Value -eq '252') -or
+        ($script:P124HostEnabled -and $Name -eq 'p124_cpu_mode' -and $Value -in @('0','1','2','3','4')) -or
+        ($script:P124HostEnabled -and $script:P124ClockAllowed -and $Name -eq 'hi_cmd' -and $Value -eq '253'))){
         throw 'P12.2 only permits bounded CPU/WFI/HI2 and diagnostic mode=0/1/2; no GPU/panel/voltage writes'
     }
     $restore=@('p12_cpu_mode','p12_wfi_probe','hi_cmd','p122_diag_mode')
     if($script:P123HostEnabled){$restore+=@('p123_floor_mode','p1231_hash_mode')}
-    $clockStop=($script:P123HostEnabled -and $script:P123ClockAllowed -and $Name -eq 'hi_cmd' -and $Value -eq '201')
+    if($script:P124HostEnabled){$restore+='p124_cpu_mode'}
+    $clockStop=(($script:P123ClockAllowed -or $script:P124ClockAllowed) -and $script:P123HostEnabled -and $Name -eq 'hi_cmd' -and $Value -eq '201')
     if($Cleanup -and -not $clockStop -and ($Name -notin $restore -or $Value -ne '0')){
         throw 'P12.1/P12.2 Cleanup bypass is reserved for bounded restore-to-zero writes only'
     }
@@ -123,7 +130,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
     # a thermal abort cannot skip its bounded restore-to-zero attempt.
     if($Name -eq 'p12_cpu_mode' -and $Value -eq '1'){$script:P12CpuDirty=$true}
     if($Name -eq 'p12_wfi_probe' -and $Value -eq '1'){$script:P12WfiDirty=$true}
-    if($Name -eq 'hi_cmd' -and $Value -in @('201','252')){$script:P12HiDirty=$true}
+    if($Name -eq 'hi_cmd' -and $Value -in @('201','252','253')){$script:P12HiDirty=$true}
     $bytes=[Text.Encoding]::ASCII.GetBytes($cmd+[char]13)
     $script:LifeSerial.Write($bytes,0,$bytes.Length)
     Life-Say ('P12 '+$(if($Value -eq ''){'READ '}else{'WRITE '})+$cmd)
@@ -277,6 +284,7 @@ function P12-ObserveIdle{
         Life-CheckStable $now
         Life-CheckSafety $now
         if($script:LifeState -eq 'OFF' -and ($now-$script:LifeStateSince).TotalSeconds -ge $OffStableSeconds){
+            if(-not $offStableSeen -and $script:P124HostEnabled -and $WfiProbe){P124-IrqSnapshot 'IRQ_OFF_STABLE_BEGIN'}
             $offStableSeen=$true
             if(($now-$lastProbe).TotalSeconds -ge 20){
                 $lastProbe=$now
@@ -291,6 +299,7 @@ function P12-ObserveIdle{
                 if($WfiProbe){
                     [void](P12-Query 'p12_wfi_stats')
                     if(-not $LegacyFirmware){[void](P12-Query 'p12_idle_diag')}
+                    if($script:P124HostEnabled){P124-IrqSnapshot 'IRQ_OFF_STABLE_PERIODIC'}
                 }
             }
         }
@@ -326,7 +335,7 @@ function P12-Report([string]$Stem,[string]$Reason){
     $out.Add('HI2 quiesce confirmed='+$script:P12HiStopConfirmed+'; unexpected_auto_phase='+$script:P12HiUnexpectedPhase+'; interactive_requested='+[bool]$InteractiveAB+'; wake_requested='+[bool]$WakeCheck+'; legacy_firmware='+[bool]$LegacyFirmware)
     $out.Add('G3D baseline off_count='+$script:P12GpuOffBaseline+' wake_count='+$script:P12GpuWakeBaseline+'; -WakeCheck requires fresh increments, PMU/PLL OFF then ON')
     $out.Add('P12 integrated thermal/idle hardware A/B - DO NOT CLAIM POWER OR FPS IMPROVEMENT WITHOUT SAME-GESTURE COMPARISON')
-    $out.Add('A0/B/A1 apply only CPU no-touch stable-frame adaptive mode. Manual swipe input always uses stock target.')
+    $out.Add('P12 legacy A0/B/A1 CPU no-touch. P12.4 optional floor/boost trials explicitly labeled; stock load target and thermal ceilings retained.')
     $out.Add('P12.1 WFI observation also records per-core idle entry/denied/timer/WFE/no-WFI/exit; NOT actual C2/CPD/SICD or system suspend.')
     $out.Add('CPU frame mode0/1 needs verified sysctl readback; WFI observation is NOT actual C2/CPD/SICD or system suspend.')
     $out.Add('GPU boot gate uses P9 controls unchanged, verified via independent g3d_lab_stats PMU/PLL and off_total_ms.')

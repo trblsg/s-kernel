@@ -357,6 +357,10 @@ struct eagl {
 	unsigned p122_mode_seen;
 	unsigned p1231_hash_mode;
 	uint64_t p1231_poll_us;
+	uint64_t p124_verify_at;
+	unsigned p124_verify_skipped,p124_migrations;
+	uint64_t p124_create_us,p124_remove_us,p124_create_serial,p124_remove_serial;
+	unsigned p124_create_n,p124_remove_n,p124_create_samples,p124_remove_samples;
 	struct s9_p66_bucket p66;            /* P6.6 60-frame target/damage evidence */
 	uint32_t p66_group_phase,p66_last_mode;
 	uint64_t p66_last_frame_end_us;
@@ -758,6 +762,8 @@ image_of(struct eagl *e, GLuint texture)
 static void
 image_remove(struct eagl *e, struct image *image)
 {
+	bool detail=e->p122_mode_seen==3;
+	uint64_t began=detail && s9_gl_diag_sample16_rotating(&e->p124_remove_serial)?now_us():0;
 	unsigned i = (unsigned)(image - e->images), last = e->image_count - 1;
 	bool found;
 	int at;
@@ -775,6 +781,8 @@ image_remove(struct eagl *e, struct image *image)
 		e->image_index[at] = (int32_t)i;
 	}
 	e->image_count--;
+	if(detail)e->p124_remove_n++;
+	if(began){e->p124_remove_samples++;e->p124_remove_us+=now_us()-began;}
 }
 
 static void
@@ -885,6 +893,8 @@ image_room(struct eagl *e, size_t bytes)
 static struct image *
 image_new(struct eagl *e, GLuint texture, IOSurfaceRef surface)
 {
+	bool detail=e->p122_mode_seen==3;
+	uint64_t began=detail && s9_gl_diag_sample16_rotating(&e->p124_create_serial)?now_us():0;
 	struct image *image = image_of(e, texture);
 	size_t bytes = IOSurfaceGetAllocSize(surface);
 	bool found;
@@ -914,6 +924,8 @@ image_new(struct eagl *e, GLuint texture, IOSurfaceRef surface)
 	image->bytes = bytes;
 	image->used = e->frames + 1;
 	e->image_bytes += bytes;
+	if(detail)e->p124_create_n++;
+	if(began){e->p124_create_samples++;e->p124_create_us+=now_us()-began;}
 	return image;
 }
 
@@ -1080,7 +1092,7 @@ surface_changed(struct eagl *e, struct image *image)
 	    (size_t)image->width * bytes_a_pixel(image->format, image->type);
 	const uint8_t *base = IOSurfaceGetBaseAddress(surface);
 	uint64_t sum = size, word;
-	bool hash4=p0hash_on || e->p1231_hash_mode!=0;
+	bool hash4=p0hash_on || (e->p1231_hash_mode==2 && !__atomic_load_n(&p0hash_disabled,__ATOMIC_RELAXED));
 	bool p0_force_dirty = image->p1231_hash4_sum!=hash4;
 
 	if (image->looked == e->frames + 1 || base == NULL || IOSurfaceGetPlaneCount(surface) > 0) {
@@ -1117,7 +1129,16 @@ surface_changed(struct eagl *e, struct image *image)
 		} else {
 			sum=s9_ioshash4_fast(base,size);
 			e->p0_hashes++;
-			if ((p0verify_on || e->p1231_hash_mode==2) && (++e->p0_serial % 128u)==1u) {
+			bool verify=(p0verify_on || e->p1231_hash_mode==2) && (++e->p0_serial % 128u)==1u;
+			if(verify && e->p1231_hash_mode==2){
+				/* Bound verification overhead; large surfaces are explicitly
+				 * unverified, not claimed to match. No prolonged scalar trial. */
+				uint64_t now=now_us();
+				if(size>2u*1024u*1024u || (e->p124_verify_at && now-e->p124_verify_at<2000000)){
+					verify=false;e->p124_verify_skipped++;
+				}else e->p124_verify_at=now;
+			}
+			if (verify) {
 				const uint64_t scalar=s9_ioshash4_reference(base,size);
 				e->p0_verified++;
 				if (sum != scalar) {
@@ -1165,6 +1186,7 @@ surface_changed(struct eagl *e, struct image *image)
 		image->unchanged += image->unchanged < STILL_LOOKS;
 		return false;
 	}
+	if(image->p1231_hash4_sum!=hash4)e->p124_migrations++;
 	image->sum = sum;
 	image->p1231_hash4_sum=hash4;
 	image->unchanged = 0;
@@ -1692,6 +1714,9 @@ frame_begin(struct eagl *e)
 			s9_gl_cost_reset(&e->glcost);
 			s9_g2_reset_counters(&e->g2);
 			e->p0_hashes=e->p0_scalar=e->p0_verified=e->p0_mismatch=0;
+			e->p124_migrations=e->p124_verify_skipped=0;
+			e->p124_create_n=e->p124_remove_n=e->p124_create_samples=e->p124_remove_samples=0;
+			e->p124_create_us=e->p124_remove_us=0;
 			say("p1231-hash: applied=%d context=%p\n",hashmode,(void*)e);
 		}
 		int value=0;
@@ -1708,6 +1733,8 @@ frame_begin(struct eagl *e)
 			s9_p122_frame_reset(&e->p122_window);
 			s9_gl_diag_reset_window(&e->diag);
 			s9_g2_reset_counters(&e->g2);
+			e->p124_create_n=e->p124_remove_n=e->p124_create_samples=e->p124_remove_samples=0;
+			e->p124_create_us=e->p124_remove_us=0;
 			if(mode_ok)say("p122-gl: mode=%d ack=kernel_sysctl mode0=minimal mode1=stage mode2=GL_slots cpu_clock=thread_sampled_rotating_1in16 effects=none\n",value);
 			if(!mode_ok){say("p1231-control: read_failed fallback_minimal=1\n");e->p122_mode_seen=0;}
 			if(value>0)p1231_control_start();
@@ -2339,12 +2366,21 @@ frame_end(struct eagl *e, bool finished, enum s9_p4_end_reason end_reason)
 		    e->g2.other_target_or_unit);
 	}
 	if (g2_track_on && (p122_enabled ? p122_completed_window : e->frames % 60 == 0)) s9_g2_reset_counters(&e->g2);
-	if ((p0hash_on && e->frames % 60 == 0) || (e->p1231_hash_mode && p122_completed_window)) {
+	if ((p0hash_on && e->frames % 60 == 0) || (p122_enabled && e->p122_mode_seen==3 && p122_completed_window)) {
 		say("hakios-gl-p0: up=%llu.%03llus frames=%u..%u fast=%u scalar=%u verified=%u mismatch=%u fallback=%d\n",
 		    after/1000000,(after/1000)%1000,e->frames-59,e->frames,
 		    e->p0_hashes,e->p0_scalar,e->p0_verified,e->p0_mismatch,
 		    __atomic_load_n(&p0hash_disabled,__ATOMIC_RELAXED));
 		if(e->p1231_hash_mode)say("p1231-hash: window mode=%u fallback=%d context=%p frames_end=%u\n",e->p1231_hash_mode,__atomic_load_n(&p0hash_disabled,__ATOMIC_RELAXED),(void*)e,e->frames);
+        say("p124-hash: mode=%u migrations=%u verify_budget_skipped=%u fallback=%d images=%u bytes=%llu\n",
+            e->p1231_hash_mode,e->p124_migrations,e->p124_verify_skipped,
+            __atomic_load_n(&p0hash_disabled,__ATOMIC_RELAXED),e->image_count,(unsigned long long)e->image_bytes);
+        e->p124_migrations=e->p124_verify_skipped=0;
+        say("p124-texture: create=%u remove=%u sampled_create=%u sampled_remove=%u create_wall_us=%llu remove_wall_us=%llu images=%u bytes=%llu inclusive_not_GPU_time=1\n",
+            e->p124_create_n,e->p124_remove_n,e->p124_create_samples,e->p124_remove_samples,
+            (unsigned long long)e->p124_create_us,(unsigned long long)e->p124_remove_us,e->image_count,(unsigned long long)e->image_bytes);
+        e->p124_create_n=e->p124_remove_n=e->p124_create_samples=e->p124_remove_samples=0;
+        e->p124_create_us=e->p124_remove_us=0;
 		e->p0_hashes=e->p0_scalar=e->p0_verified=e->p0_mismatch=0;
 	}
 	if (glpath_on || e->p122_mode_seen==3 || __atomic_load_n(&p67_mode_cached,__ATOMIC_RELAXED)) e->diag.flush_raw_us += e->flushing; /* already-timed real glFlush, no extra GPU calls */

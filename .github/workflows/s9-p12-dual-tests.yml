@@ -1,7 +1,7 @@
 name: S9 P12 thermal efficiency and deep-idle observability
 on:
   push:
-    branches: [s9/p12-thermal-deep-idle, s9/p12-3-source-attribution, s9/p12-3-1-thermal-attribution]
+    branches: [s9/p12-thermal-deep-idle, s9/p12-3-source-attribution, s9/p12-3-1-thermal-attribution, s9/p12-4-guarded-thermal]
   workflow_dispatch:
 permissions:
   contents: read
@@ -21,6 +21,7 @@ jobs:
           /tmp/s9-p10
           cc -std=c11 -Wall -Wextra -Werror -O2 tools/tests/test_s9_p9_clock_policy.c -o /tmp/s9-p9
           /tmp/s9-p9
+          python3 tools/tests/test_p124_gic_observer.py
       - name: Check source guards, preserving P9 panel and P7 CPU recovery safety
         run: |
           python3 - <<'PY'
@@ -62,6 +63,12 @@ jobs:
           assert 'p1231-clock-meta:' in s('userland/src/s9_hi_clock_resolve.inc')
           assert 'p1231-clock-view:' in s('userland/src/s9_hi_clock_resolve.inc')
           assert 'p1231_ufs_stats_sysctl' in s('drivers/storage/ufs/hakios.ufs.c')
+          assert 'p124_cpu_mode_sysctl' in cpu and 's9_p124_temp_ok' in thermal
+          assert 'hakios_p124_loader_gone' in s('xnu/files/psci_smp.c')
+          assert 'hakios_p124_ufs_safe' in s('drivers/storage/ufs/hakios.ufs.c')
+          assert 'hakios_p124_irq_observe' in xnu and 'p124-gic-observer.py' in s('xnu/fork.sh')
+          assert 'p124-clock: armed=1' in home and 'p124-hash:' in eagl and 'p124-texture:' in eagl
+          assert 'hakios_p124_gpu_touch' in mali and '/redwood/bin/cpu_test 240 &' not in s('userland/rc.jobs')
           assert 'GpuLabOffCount' in life
           assert 'p123_floor_mode_sysctl' in mali and 'p123_floor_stats_sysctl' in mali
           assert 's9_p123_floor_eligible' in mali and '30ull*NSEC_PER_SEC' in mali
@@ -110,6 +117,7 @@ jobs:
             'tools/tests/test-s9-p122-rootcause-serial.ps1',
             'tools/tests/test-s9-p123-source-serial.ps1',
             'tools/tests/test-s9-p1231-thermal-serial.ps1',
+            'tools/tests/test-s9-p124-thermal-serial.ps1',
             'tools/tests/test-s9-p11-lifecycle-serial.ps1',
             'tools/tests/test-s9-p10-lockscreen-source.ps1',
             'tools/tests/test-s9-p10-serial-harness.ps1',

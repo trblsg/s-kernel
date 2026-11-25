@@ -189,6 +189,7 @@ _Static_assert(__builtin_offsetof(struct loader_block, ask) == 128,
  */
 extern void hakios_loader_core_take(void);
 extern int hakios_loader_core_taken(void);
+extern int hakios_p124_loader_gone(void);
 static uint32_t ufs_loader_gone_said;
 
 static volatile struct loader_block *ufs_page;
@@ -291,6 +292,8 @@ static uint64_t ufs_write_first = UFS_WRITE_FIRST;     /* its first block a writ
 static volatile bool ufs_write_busy;            /* a write of ours has this kernel's list out: not a failure */
 static bool ufs_write_out, ufs_write_was_native;        /* the list is out for writing, and was in before */
 static uint64_t ufs_writes, ufs_write_bytes, ufs_write_errors, ufs_write_refused;
+static uint32_t p124_native_inflight;
+static uint64_t p124_read_ticks,p124_write_ticks,p124_read_n,p124_write_n;
 
 /* /dev/ufs_darwin_data: the minor number past every partition's, and the block size it is counted in */
 #define UFS_DATA_MINOR     BLOCK_MAX_PARTS
@@ -301,22 +304,48 @@ static LCK_MTX_DECLARE(ufs_data_mtx, &ufs_lck_grp);     /* one write of the data
 SYSCTL_DECL(_kern_hakios);
 /* P12.3.1: only observe ownership and I/O counters. Native switch alone
  * does not prove loader core handoff or authorize a LITTLE floor change. */
+/* Only called by the guarded CPU trial; no storage transactions or locks.
+ * A clean native driver + completed core handoff are required throughout. */
+bool hakios_p124_ufs_safe(void);
+bool
+hakios_p124_ufs_safe(void)
+{
+    return hakios_p124_loader_gone() && ufs_nufs && ufs_nufs_on &&
+        nufs_sum.step==5 && nufs_sum.selftest==1 && nufs_sum.fences==1 &&
+        !ufs_dead &&
+        __atomic_load_n(&nufs_sum.reads_loader,__ATOMIC_RELAXED)==0 &&
+        __atomic_load_n(&nufs_sum.read_errors,__ATOMIC_RELAXED)==0 &&
+        __atomic_load_n(&ufs_write_errors,__ATOMIC_RELAXED)==0 &&
+        __atomic_load_n(&nufs_sum.refused,__ATOMIC_RELAXED)==0 &&
+        __atomic_load_n(&ufs_write_refused,__ATOMIC_RELAXED)==0;
+}
+bool hakios_p124_ufs_busy(void);
+bool hakios_p124_ufs_busy(void) { return ufs_write_busy || __atomic_load_n(&p124_native_inflight,__ATOMIC_ACQUIRE)!=0; }
 static int
 p1231_ufs_stats_sysctl(__unused struct sysctl_oid *oidp,
     __unused void *arg1,__unused int arg2,struct sysctl_req *req)
 {
-    char buf[512];
+    char buf[768];
+    uint64_t rd=0,wr=0;
+    absolutetime_to_nanoseconds(__atomic_load_n(&p124_read_ticks,__ATOMIC_RELAXED),&rd);
+    absolutetime_to_nanoseconds(__atomic_load_n(&p124_write_ticks,__ATOMIC_RELAXED),&wr);
     snprintf(buf,sizeof(buf),
-        "version=1 nufs=%u switched=%u step=%u selftest=%d fences=%d dead=%u loader_core_taken=%u "
-        "native_reads=%llu loader_reads=%llu read_errors=%llu writes=%llu write_errors=%llu refused=%llu write_busy=%u",
+        "version=1 nufs=%u switched=%u step=%u selftest=%d fences=%d dead=%u loader_core_taken=%u loader_gone=%u floor_safe=%u "
+        "native_reads=%llu loader_reads=%llu read_errors=%llu writes=%llu write_errors=%llu refused=%llu write_busy=%u "
+        "native_inflight=%u native_read_calls=%llu native_read_wall_us=%llu native_write_calls=%llu native_write_wall_us=%llu write_refused=%llu",
         ufs_nufs?1u:0u,ufs_nufs_on?1u:0u,nufs_sum.step,nufs_sum.selftest,nufs_sum.fences,
         ufs_dead?1u:0u,hakios_loader_core_taken()?1u:0u,
+        hakios_p124_loader_gone()?1u:0u,hakios_p124_ufs_safe()?1u:0u,
         (unsigned long long)__atomic_load_n(&nufs_sum.reads_native,__ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&nufs_sum.reads_loader,__ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&nufs_sum.read_errors,__ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&ufs_writes,__ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&ufs_write_errors,__ATOMIC_RELAXED),
-        (unsigned long long)__atomic_load_n(&nufs_sum.refused,__ATOMIC_RELAXED),ufs_write_busy?1u:0u);
+        (unsigned long long)__atomic_load_n(&nufs_sum.refused,__ATOMIC_RELAXED),ufs_write_busy?1u:0u,
+        __atomic_load_n(&p124_native_inflight,__ATOMIC_ACQUIRE),
+        (unsigned long long)__atomic_load_n(&p124_read_n,__ATOMIC_RELAXED),(unsigned long long)(rd/1000),
+        (unsigned long long)__atomic_load_n(&p124_write_n,__ATOMIC_RELAXED),(unsigned long long)(wr/1000),
+        (unsigned long long)__atomic_load_n(&ufs_write_refused,__ATOMIC_RELAXED));
     return SYSCTL_OUT(req,buf,strlen(buf)+1);
 }
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p1231_ufs_stats,
@@ -709,7 +738,12 @@ ufs_read(uint32_t part, uint64_t offset, uint8_t *dst, uint64_t len)
 	}
 	if (ufs_nufs_on) {
 		/* ufs=3: this kernel's own driver has the controller; the loader is not asked while it does */
+		__atomic_fetch_add(&p124_native_inflight,1,__ATOMIC_ACQ_REL);
+		uint64_t began=mach_absolute_time();
 		int error = ufs_lun[part] == 0xff ? ENXIO : ufs_read_native(part, offset, dst, len);
+		__atomic_fetch_add(&p124_read_ticks,mach_absolute_time()-began,__ATOMIC_RELAXED);
+		__atomic_fetch_add(&p124_read_n,1,__ATOMIC_RELAXED);
+		__atomic_fetch_sub(&p124_native_inflight,1,__ATOMIC_RELEASE);
 
 		if (error == 0) {
 			os_atomic_inc(&nufs_sum.reads_native, relaxed);
@@ -786,7 +820,12 @@ ufs_write(uint32_t op, uint32_t part, uint64_t offset, const uint8_t *src, uint6
 	lck_mtx_lock(&ufs_write_mtx);
 	if (ufs_nufs_on) {
 		/* ufs=3: through this kernel's own driver, into USERDATA's window only; never the loader's way as well */
+		__atomic_fetch_add(&p124_native_inflight,1,__ATOMIC_ACQ_REL);
+		uint64_t began=mach_absolute_time();
 		error = ufs_nufs_write(part, offset, src, len);
+		__atomic_fetch_add(&p124_write_ticks,mach_absolute_time()-began,__ATOMIC_RELAXED);
+		__atomic_fetch_add(&p124_write_n,1,__ATOMIC_RELAXED);
+		__atomic_fetch_sub(&p124_native_inflight,1,__ATOMIC_RELEASE);
 		lck_mtx_unlock(&ufs_write_mtx);
 		return error;
 	}
