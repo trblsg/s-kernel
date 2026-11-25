@@ -74,6 +74,13 @@
  */
 #include <stdarg.h>
 #include <kern/clock.h>
+#if __has_include(<kern/hakios_p125.h>)
+#include <kern/hakios_p125.h>
+#else
+#define P127_PSR 0u
+static inline unsigned hakios_p127_mode(void){return 0;}
+static inline void hakios_p127_metric(unsigned group,unsigned index,uint64_t value){(void)group;(void)index;(void)value;}
+#endif
 #include <kern/thread_call.h>
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
@@ -420,20 +427,61 @@ static uint32_t psr_ms;
 static thread_call_t psr_call;
 static uint64_t psr_last_frame;
 static bool psr_masked;
+static bool p127_psr_owned;
 static void plane_off(void);            /* fb_planes (below): the lower window off at the next update */
 
 /* a frame is coming: unmask the trigger before the shadow update is requested, or that update is never taken */
 static void
 psr_wake(void)
 {
-	if (psr_ms == 0) {
-		return;
-	}
+	/* Record every submit, even when boot PSR is disabled. */
 	__atomic_store_n(&psr_last_frame, mach_absolute_time(), __ATOMIC_RELEASE);
+	if(__atomic_exchange_n(&p127_psr_owned,false,__ATOMIC_ACQ_REL)){
+		wr(decon,TRIG_CONTROL,rd(decon,TRIG_CONTROL)&~HW_TRIG_MASKED);
+		__asm__ volatile ("dsb sy" ::: "memory");
+		if(rd(decon,TRIG_CONTROL)&HW_TRIG_MASKED)hakios_p127_metric(2,3,1);
+		else hakios_p127_metric(2,1,1);
+	}
 	if (__atomic_exchange_n(&psr_masked, false, __ATOMIC_ACQ_REL)) {
 		wr(decon, TRIG_CONTROL, rd(decon, TRIG_CONTROL) & ~HW_TRIG_MASKED);
 		__asm__ volatile ("dsb sy" ::: "memory");
 	}
+}
+
+/* Governor calls this at its existing 1s tick, not a new timer.
+ * Only use VGF0 command-mode path; do not overlap boot PSR. Never mask
+ * an already masked trigger we do not own. Frame path unmask is above. */
+void
+hakios_p127_psr_poll(void)
+{
+    if(probed<=0 || mode!=2 || psr_ms)return;
+    if(!(hakios_p127_mode()&P127_PSR)){
+        if(__atomic_load_n(&p127_psr_owned,__ATOMIC_ACQUIRE))psr_wake();
+        return;
+    }
+    if(__atomic_load_n(&p127_psr_owned,__ATOMIC_ACQUIRE))return;
+    uint64_t stamp=__atomic_load_n(&psr_last_frame,__ATOMIC_ACQUIRE),now=mach_absolute_time(),ns=0;
+    if(!stamp || now<stamp){hakios_p127_metric(2,2,1);return;}
+    absolutetime_to_nanoseconds(now-stamp,&ns);
+    if(ns<100ULL*NSEC_PER_MSEC || rd(decon,SHADOW_REQ)!=0 ||
+        (rd(decon,TRIG_CONTROL)&HW_TRIG_MASKED)){hakios_p127_metric(2,2,1);return;}
+    __atomic_store_n(&p127_psr_owned,true,__ATOMIC_RELEASE);
+    wr(decon,TRIG_CONTROL,rd(decon,TRIG_CONTROL)|HW_TRIG_MASKED);
+    __asm__ volatile ("dsb sy" ::: "memory");
+    if(!(rd(decon,TRIG_CONTROL)&HW_TRIG_MASKED)){
+        hakios_p127_metric(2,3,1);psr_wake();return;
+    }
+    if(!__atomic_load_n(&p127_psr_owned,__ATOMIC_ACQUIRE) ||
+       !(hakios_p127_mode()&P127_PSR) || rd(decon,SHADOW_REQ)!=0 ||
+       __atomic_load_n(&psr_last_frame,__ATOMIC_ACQUIRE)!=stamp){
+        /* A submit may have cleared ownership before our MMIO write.
+         * Always unmask our just-written bit in that race. */
+        __atomic_store_n(&p127_psr_owned,false,__ATOMIC_RELEASE);
+        wr(decon,TRIG_CONTROL,rd(decon,TRIG_CONTROL)&~HW_TRIG_MASKED);
+        __asm__ volatile ("dsb sy" ::: "memory");
+        hakios_p127_metric(2,2,1);return;
+    }
+    hakios_p127_metric(2,0,1);
 }
 
 static void
@@ -1010,6 +1058,7 @@ hakios_scanout_attach(int want, const uint64_t *phys, unsigned count, uint32_t w
 	if (want == 2 && attach_vgf0(phys[shown], width, height, rowbytes) == 0) {
 		scan_rowbytes = shown_rowbytes = rowbytes;
 		say("exynos_dpu: VGF0 scales %ux%u to the panel; flips between %u buffers\n", width, height, count);
+		psr_last_frame=mach_absolute_time();
 		if (PE_parse_boot_argn("fb_psr", &psr_ms, sizeof(psr_ms)) && psr_ms >= 50 && psr_ms <= 5000) {
 			psr_last_frame = mach_absolute_time();
 			psr_call = thread_call_allocate(psr_tick, NULL);

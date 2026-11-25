@@ -85,6 +85,10 @@ if [ "$(cat freebsd/.release 2>/dev/null)" != "$FREEBSD $FREEBSD_SHA256 $PATCHES
 	echo "$FREEBSD $FREEBSD_SHA256 $PATCHES" > freebsd/.release
 fi
 S=$B/freebsd/sys
+# The pinned FreeBSD header declares a mutable clock. Every brcmfmac
+# translation unit must instead read monotonic jiffies, including the
+# header's inline get_jiffies_64(). Reject source drift, not stale clocks.
+python3 "$ROOT/tools/p127-jiffies-header.py" "$S/compat/linuxkpi/common/include/linux/jiffies.h" || exit 1
 if [ ! -d gen ]; then
 	mkdir gen
 	(
@@ -119,7 +123,7 @@ CFLAGS="-mkernel -mgeneral-regs-only -fno-builtin -fno-common -ffreestanding -fn
 	-I$S/compat/linuxkpi/common/include -I$S/compat/linuxkpi/dummy/include
 	-include $S/compat/linuxkpi/common/include/linux/kconfig.h -DLINUXKPI_VERSION=70000"
 D=src/brcm80211
-DFLAGS="-I$D/brcmfmac -I$D/include -include $W/brcmfmac/lx_prelude.h -I$W/brcmfmac
+DFLAGS="-DLX_P127_JIFFIES=1 -I$D/brcmfmac -I$D/include -include $W/brcmfmac/lx_prelude.h -I$W/brcmfmac
 	-DCONFIG_BRCMFMAC_PCIE -DCONFIG_BRCMFMAC_PROTO_MSGBUF -DCONFIG_BRCMDBG -DDEBUG -DCONFIG_DMI -DKBUILD_MODNAME=\"brcmfmac\""
 source "$ROOT/xnu-env.sh"
 [ -f "$XNU_SRC/bsd/sys/hakios.lx.h" ] || { echo "mk-brcmfmac.sh: the kernel tree has no bsd/sys/hakios.lx.h" >&2; exit 1; }

@@ -306,6 +306,7 @@ static int32_t p1241_initial_big,p1241_initial_lit,p1241_initial_gpu;
 extern bool hakios_p124_ufs_safe(void);
 extern bool hakios_p124_ufs_busy(void);
 extern void hakios_p124_gpu_touch(void);
+extern void hakios_p127_psr_poll(void);
 
 /* P12.3 GPU floor trial: read-only input proof, no new input hook or
  * boost policy. Missing governor/touch evidence means NOT quiet. */
@@ -388,6 +389,7 @@ hakios_exynos_cpufreq_touch(void)
 	__atomic_store_n(&p12_frame_streak, 0, __ATOMIC_RELEASE);
 	before = __atomic_exchange_n(&touch_last, now, __ATOMIC_RELEASE);
 	hakios_p124_gpu_touch();
+	hakios_p127_stop(7);
 	if(__atomic_load_n(&p124_cpu_mode,__ATOMIC_RELAXED)<=2)
 	    __atomic_store_n(&p124_cpu_until,0,__ATOMIC_RELEASE);
 	__atomic_fetch_add(&touch_count, 1, __ATOMIC_RELAXED);
@@ -1607,6 +1609,11 @@ decide_scion(struct cluster *c, uint64_t now, uint32_t window)
 		    __atomic_fetch_add(&p124_cpu_effective,1,__ATOMIC_RELAXED);
 		}else __atomic_fetch_add(&p124_cpu_bypass,1,__ATOMIC_RELAXED);
 	}
+	unsigned p127=hakios_p127_mode();
+	if(c==&clusters[0] && P127_FLOOR(p127)){
+	    if(p127_floor_safe(p127)){floor=p127_floor_khz(p127);hakios_p127_metric(3,0,1);}
+	    else hakios_p127_metric(3,1,1);
+	}
 	/* The ordinary load governor is never capped by the trial. */
 	target = scion_rate(&c->rate, c->levels, c->n, c->cur, rated_load,
 	    MAX(floor, c->boost_floor), max, window);
@@ -1916,6 +1923,9 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 			ocp_poll();
 			p125_guard(); /* only revokes read-only probe, no DVFS override */
 			p126_guard(); /* bounded driver trials, never changes CPU/GPU policy */
+			p127_guard();
+			hakios_p127_psr_poll();
+			p127_bus_poll(now);
 		}
 		decide(&clusters[0], now, (uint32_t)span_ms);
 		decide(&clusters[1], now, (uint32_t)span_ms);

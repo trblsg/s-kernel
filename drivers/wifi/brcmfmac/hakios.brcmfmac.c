@@ -522,6 +522,7 @@ static struct {
 	volatile bool attached;
 	bool running;
 	uint32_t pending;
+	bool watchdog;
 	thread_t thread;
 	uint64_t latched_not_a;                 /* times the latch held something besides INTA */
 } line;
@@ -539,9 +540,10 @@ static void
 line_runs(__unused void *parameter, __unused wait_result_t result)
 {
 	for (;;) {
+		uint32_t event;
 		for (;;) {
 			assert_wait((event_t)&line.pending, THREAD_UNINT);
-			if (os_atomic_xchg(&line.pending, 0, acquire) != 0) {
+			if ((event=os_atomic_xchg(&line.pending, 0, acquire)) != 0) {
 				clear_wait(current_thread(), THREAD_AWAKENED);
 				break;
 			}
@@ -553,6 +555,7 @@ line_runs(__unused void *parameter, __unused wait_result_t result)
 			continue;
 		}
 		line.running = true;
+		line.watchdog=event==2;
 		lck_mtx_unlock(&line_lock);
 		if (hakios_exynos_pcie_intx_ack() & ~1u) {
 			line.latched_not_a++;
@@ -560,6 +563,7 @@ line_runs(__unused void *parameter, __unused wait_result_t result)
 		line.function(line.argument);
 		lck_mtx_lock(&line_lock);
 		line.running = false;
+		line.watchdog=false;
 		lck_mtx_unlock(&line_lock);
 		thread_wakeup((event_t)&line.running);
 	}
@@ -614,6 +618,24 @@ lx_os_irq_line_enable(void)
 	}
 }
 
+/* Watchdog uses the SAME serialized handler as INTx. Never call the
+ * brcmfmac mailbox handler concurrently from the polling thread. */
+void
+lx_os_irq_line_watchdog(void)
+{
+    lck_mtx_lock(&line_lock);
+    if(line.attached && !line.running && os_atomic_load(&line.pending,acquire)==0){
+        gic_v3_spi_mask(INTX_INTID);
+        /* A real IRQ already pending wins over the diagnostic check. */
+        if(os_atomic_cmpxchg(&line.pending,0,2,release))thread_wakeup((event_t)&line.pending);
+    }
+    lck_mtx_unlock(&line_lock);
+}
+int
+lx_os_irq_line_is_watchdog(void)
+{
+    return current_thread()==line.thread && line.watchdog;
+}
 void
 lx_os_irq_line_detach(void)
 {
@@ -621,10 +643,13 @@ lx_os_irq_line_detach(void)
 		return;
 	}
 	hakios_exynos_pcie_say_dma("the interrupt let go");
+	lck_mtx_lock(&line_lock);
+	line.attached = false;
+	lck_mtx_unlock(&line_lock);
 	hakios_exynos_pcie_intx(false);
 	gic_v3_spi_detach(INTX_INTID);
 	lck_mtx_lock(&line_lock);
-	line.attached = false;
+	os_atomic_store(&line.pending,0,release);
 	while (line.running && current_thread() != line.thread) {
 		lck_mtx_sleep(&line_lock, LCK_SLEEP_DEFAULT, (event_t)&line.running, THREAD_UNINT);
 	}

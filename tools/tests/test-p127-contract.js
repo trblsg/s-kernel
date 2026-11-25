@@ -1,0 +1,32 @@
+'use strict';
+// Source and model checks, not an XNU compile or a device test.
+const fs=require('fs'), path=require('path'), a=require('assert');
+const read=f=>fs.readFileSync(path.join(__dirname,'../..',f),'utf8');
+const has=(s,...v)=>v.forEach(x=>a(s.includes(x),x));
+const h=read('xnu/files/hakios_p125.h'), c=read('xnu/files/hakios_p125_impl.h'), sys=read('drivers/power/exynos/hakios.p125_sysctl.h');
+has(h,'P127_MASK 1023u','P127_FG_SLOTS 64');
+has(c,'hakios_p127_stop(4)','hakios_p127_offline_aggregate','hakios_p127_wfi_ticks','(seq-1)%P127_FG_SLOTS','if(!hakios_p127_mode() || !hakios_p125_active())return');
+has(sys,'120ULL:420ULL','360ULL:180ULL','extras&(extras-1)','extras && P127_FLOOR(v)','{100,500,1000,2000,3500,10000}','949000,832000,715000,598000,455000','!hakios_p124_ufs_safe() || hakios_p124_ufs_busy()','p127_bus_poll','hakios_acpm_dvfs_get','p127_fg_page_sysctl');
+a(!sys.includes('hakios_acpm_dvfs_set'));
+const bt=read('drivers/bluetooth/bcm4361/hakios.bcm4361_bt.c');
+has(bt,'P127_BT_INTID (32u+422u)','UMCON_AFC','UFSTAT_RX_FULL','p127_bt_fallback','p127_bt_uintm','p127_bt_ucon','clock_interval_to_deadline(8,NSEC_PER_MSEC','sleep_ms(1)');
+const handler=bt.split('p127_bt_arrived(__unused')[1].split('static void')[0];
+a(!handler.includes('rd(uart')&&!handler.includes('wr(uart'));
+const ab=read('drivers/audio/abox/hakios.exynos_abox.c');
+has(ab,'sink_head==sink_tail && !amp_running && !hp_on && !hp_want','!hakios_audio_input_wanted()','dma==&bypass_dma','RDMA_PROGRESS,0,DMA_STOP_US','p127_abox_resume()','area_kept=true;return false','delay_for_interval(POLL_MS, NSEC_PER_MSEC)');
+const wifi=read('wifi/lx/brcmfmac/lx_pci.c'),lx=read('wifi/lx/src/lx_base.c');
+has(wifi,'lx_os_irq_line_watchdog()','lx_os_irq_line_detach()','watchdog && r!=IRQ_NONE','lx_pause_ms(20)');
+has(lx,'lx_os_jiffies_now(void)','p127_ticker_event','wait=100','burst>=32','ticks_to_ns(wait)');
+a.equal((lx.match(/p127_ticker_changed\(\);/g)||[]).length,4);
+has(read('tools/mk-brcmfmac.sh'),'p127-jiffies-header.py','-DLX_P127_JIFFIES=1');
+has(read('tools/p127-jiffies-header.py'),'#define jiffies (lx_os_jiffies_now())','src.count(old) != 1');
+has(read('drivers/display/dpu/hakios.exynos_dpu.c'),'p127_psr_poll','P127_PSR');
+has(read('drivers/usb/hakios.dwc3.c'),'P127_USB','hakios_p127_metric');
+const valid=m=>{const floor=(m>>4)&7,extra=m&~0x71;return m===0||!!(m&1)&&m<=1023&&floor<=5&&!(extra&(extra-1))&&!(extra&&floor)};
+for(const m of [0,1,3,5,9,17,33,49,65,81,129,257,513])a(valid(m));
+for(const m of [2,7,15,97,131,273,1023,1025])a(!valid(m));
+for(const m of [1,3,513,81]){const end=123456789n&~1023n,word=end|BigInt(m);a.equal(word&1023n,BigInt(m));a.equal(word&~1023n,end);}
+const bounds=[100,500,1000,2000,3500,10000],bin=x=>bounds.filter(y=>x>=y).length;
+bounds.forEach((b,i)=>{a.equal(bin(b-1),i);a.equal(bin(b),i+1)});
+for(let seq=1;seq<=128;seq++)a.equal(Math.floor(((seq-1)%64)/4),Math.floor((seq-1)/4)%16);
+console.log('P12.7 source contracts, lease, WFI bins, gauge wrap PASS (not native compile)');

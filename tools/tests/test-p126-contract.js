@@ -8,7 +8,7 @@ const sys=get('drivers/power/exynos/hakios.p125_sysctl.h');
 assert(h.includes('#define P126_MASK 63u'));
 assert(sys.includes('120ULL*NSEC_PER_SEC'));
 assert(sys.includes('__atomic_compare_exchange_n(&hakios_p126_lease'));
-assert(impl.includes('if(on)hakios_p126_stop(4)'));
+assert(impl.includes('if(on){hakios_p126_stop(4);hakios_p127_stop(4);}'));
 assert(sys.includes('if(p125_thermal_reason())return EPERM'));
 const hap=get('drivers/power/max77705/hakios.max77705.c');
 assert(hap.indexOf('assert_wait_deadline((event_t)&heard_us')<hap.indexOf('uint64_t latest=__atomic_load_n(&heard_us'));

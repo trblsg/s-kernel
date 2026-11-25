@@ -35,6 +35,9 @@ static struct {
 	irq_handler_t handler, thread;
 	void *argument;
 	bool line;				/* INTx (brcmfmac=5) */
+	volatile bool exp_line,exp_fault;
+	void *volatile exp_self;
+	unsigned exp_empty,exp_irqs;
 	volatile bool polling;			/* the thread is wanted ... */
 	volatile bool polls;			/* ... and runs */
 	void *volatile poll_self;		/* (lx_os_thread_self() of that thread) */
@@ -214,6 +217,11 @@ _lkpi_pci_enable_msi_range(struct pci_dev *pdev, int minvec, int maxvec)
 	return (-ENOTSUP);			/* (none on this root complex: INTx it is) */
 }
 
+/* Paired kernel ABI, used only in the bounded P12.7 trial. */
+extern void lx_os_irq_line_watchdog(void);
+extern int lx_os_irq_line_is_watchdog(void);
+static void line_fired(void *argument);
+
 static void
 poller(void *argument)
 {
@@ -223,6 +231,33 @@ poller(void *argument)
 	lp.poll_self = lx_os_thread_self();
 	lp.polls = true;
 	while (lp.polling) {
+		bool wanted=lx_os_option("p127_intx")!=0;
+		if(!wanted && !lp.exp_line)lp.exp_fault=false;
+		if(lp.exp_line && (!wanted || lp.exp_fault)){
+			/* Stop all line callbacks before touching the mailbox here. */
+			lx_os_irq_line_detach();
+			lp.exp_line=false;
+			(void)lx_os_option("p127_intx_detach");
+		}
+		if(wanted && !lp.exp_fault && !lp.exp_line && lx_brcmf_reached(5)){
+			lp.exp_line=true;lp.exp_empty=0;__atomic_store_n(&lp.exp_irqs,0,__ATOMIC_RELAXED);
+			if(lx_os_irq_line_attach(line_fired,NULL)==0){
+				(void)lx_os_option("p127_intx_attach");
+				lx_os_irq_line_enable();
+			}else{
+				lp.exp_line=false;lp.exp_fault=true;
+				(void)lx_os_option("p127_intx_fallback");
+			}
+		}
+		if(lp.exp_line){
+			/* 20ms watchdog detects missed interrupts while quiet; a
+			 * nonempty check or empty IRQ storm latches stock fallback. */
+			lx_pause_ms(20);
+			if(__atomic_exchange_n(&lp.exp_irqs,0,__ATOMIC_RELAXED)>100){lp.exp_fault=true;(void)lx_os_option("p127_intx_fallback");}
+			if(lp.polling && !lp.exp_fault && lx_os_option("p127_intx"))
+				lx_os_irq_line_watchdog();
+			continue;
+		}
 		irqreturn_t r = lp.handler(LX_PCI_IRQ, lp.argument);
 
 		lp.looks++;
@@ -234,6 +269,7 @@ poller(void *argument)
 		}
 		lx_pause_ms(ms);
 	}
+	if(lp.exp_line){lx_os_irq_line_detach();lp.exp_line=false;(void)lx_os_option("p127_intx_detach");}
 	lx_os_lock();
 	lp.polls = false;
 	lx_os_wakeup(&lp.polls);
@@ -244,7 +280,18 @@ poller(void *argument)
 static void
 line_fired(void *argument)
 {
+	bool experimental=lp.exp_line;
+	if(experimental && !lp.polling)return;
+	if(experimental)lp.exp_self=lx_os_thread_self();
+	bool watchdog=experimental && lx_os_irq_line_is_watchdog();
 	irqreturn_t r = lp.handler(LX_PCI_IRQ, lp.argument);
+	if(experimental){
+		(void)lx_os_option(watchdog?"p127_intx_watchdog":"p127_intx_irq");
+		if(!watchdog && __atomic_fetch_add(&lp.exp_irqs,1,__ATOMIC_RELAXED)>=100){lp.exp_fault=true;(void)lx_os_option("p127_intx_fallback");}
+		if((watchdog && r!=IRQ_NONE) || (!watchdog && r==IRQ_NONE && ++lp.exp_empty>=8)){
+			lp.exp_fault=true;(void)lx_os_option("p127_intx_fallback");
+		}else if(!watchdog && r!=IRQ_NONE)lp.exp_empty=0;
+	}
 
 	lp.looks++;
 	if (r == IRQ_WAKE_THREAD && lp.thread != NULL) {
@@ -253,9 +300,8 @@ line_fired(void *argument)
 	} else if (r == IRQ_HANDLED) {
 		lp.handled++;
 	}
-	if (lp.line) {
-		lx_os_irq_line_enable();
-	}
+	if(experimental)lp.exp_self=NULL;
+	if(lp.line || (lp.exp_line && lp.polling && !lp.exp_fault))lx_os_irq_line_enable();
 }
 
 int
@@ -291,10 +337,12 @@ lkpi_request_irq(struct device *dev, unsigned int irq, irq_handler_t handler, ir
 		lx_os_pci_say_dma("the interrupt looked at (INTx not attached)");
 	}
 	lp.polling = true;
+	lp.polls=true; /* publish before starting to close the free/start race */
+	lp.exp_fault=false;
 	lx_tell("lx: pci: %s's interrupt handler is called by a thread every brcmfmac_poll_ms (INTx from brcmfmac=5)\n",
 	    name);
 	if (lx_os_thread("brcmfmac-irq", poller, NULL) != 0) {
-		lp.polling = false;
+		lp.polling = false;lp.polls=false;
 		return (-ENOMEM);
 	}
 	return (0);
@@ -314,7 +362,7 @@ lkpi_free_irq(unsigned int irq, void *arg)
 		return;
 	}
 	lp.polling = false;
-	if (lx_os_thread_self() == lp.poll_self) {
+	if (lx_os_thread_self() == lp.poll_self || lx_os_thread_self()==lp.exp_self) {
 		return;				/* (from inside a handler: the thread ends when it returns) */
 	}
 	lx_os_lock();

@@ -155,9 +155,15 @@
 #include <kern/hakios_p125.h>
 #else
 static inline unsigned hakios_p126_audio_get(void){return 0;}
+#define P127_ABOX 0u
+static uint32_t hakios_p127_audio_event;
+static inline unsigned hakios_p127_mode(void){return 0;}
+static inline void hakios_p127_audio_wake(void){}
+static inline void hakios_p127_metric(unsigned group,unsigned index,uint64_t value){(void)group;(void)index;(void)value;}
 static inline void hakios_p126_diag_add(unsigned index,uint64_t count){(void)index;(void)count;}
 #endif
 #include <kern/thread.h>
+#include <kern/sched_prim.h>
 #include <libkern/libkern.h>
 #include <libkern/OSAtomic.h>
 #include <mach/mach_time.h>
@@ -1021,6 +1027,7 @@ abox_sink(const int16_t *frames, uint32_t count)
 	}
 	OSMemoryBarrier();
 	sink_head = head + taken;
+	if(taken)hakios_p127_audio_wake();
 	sink_frames += taken;
 	sink_lost += count - taken;
 	if (peak > SILENCE) {
@@ -1139,6 +1146,7 @@ static uint32_t clock_writes[3];        /* PLL_CON0, DIV AUDIF, DIV UAIF1 as lef
 /* the microphone for iOS and the headphones, followed from step 8's loop (their section is after the capture's) */
 static void follow_input(void);
 static void follow_headphones(void);
+static volatile uint32_t hp_want;
 static volatile bool hp_on;                     /* iOS's sound goes to UAIF0 (the codec, the headphones), not to UAIF1 */
 static uint32_t mic_for_ios;                    /* abox_mic: /dev/hakios-mic, fed through WDMA1 while iOS listens */
 static uint32_t boot_tone;                      /* abox_tone: with abox=8, step 7's tone at boot too */
@@ -1222,6 +1230,31 @@ stream_stop(void)
  * The feeder: RDMA0's position every 2 ms, and each period it has finished refilled from `source` (step 7: the tone
  * until `tone_until_us`, silence after; step 8: what iOS wrote). Step 7 returns at `until_us`; step 8 never returns.
  */
+/* Only the existing AP bypass path. Keep the ring allocated and shared
+ * ABOX clocks/power untouched. The HAL hint is necessary but not sufficient.
+ * Real writes, capture and routing requests immediately disqualify idle. */
+static bool
+p127_abox_quiet(void)
+{
+    uint64_t now=now_us(),sounded=last_sound_us;
+    return (hakios_p127_mode()&P127_ABOX) && hakios_p126_audio_get()==1 &&
+        sink_head==sink_tail && !amp_running && !hp_on && !hp_want &&
+        !hakios_audio_input_wanted() && (!sounded || (now>=sounded && now-sounded>QUIET_STOP_US));
+}
+static bool
+p127_abox_resume(void)
+{
+    /* No ring writes until stop was acknowledged. Re-prime silence,
+     * not the software queue: samples arriving during idle stay queued. */
+    for(uint32_t p=0;p<PERIODS;p++)fill_period(p,SILENT);
+    if(!dma->prepare(area_pa,RING_BYTES,PERIOD_BYTES))return false;
+    uaif1_enable(true);
+    if(!(rd(&abox,ABOX_UAIF_CTRL0(1))&UAIF_SPK_ENABLE))return false;
+    if(!dma->start() || !(rd(&abox,R0(RDMA_CTRL0))&RDMA_ENABLE))return false;
+    hakios_p127_metric(1,1,1);
+    return true;
+}
+
 static bool
 stream_run(uint64_t tone_until_us, uint64_t until_us)
 {
@@ -1229,6 +1262,7 @@ stream_run(uint64_t tone_until_us, uint64_t until_us)
 	uint64_t read_bytes = 0, read_at_report = 0, refilled = 0, outside = 0;
 	uint32_t next_fill = 0, last_pos = 0, reports = 0;
 	bool moved = false, by_clock = false, muted = false, said_outside = false;
+	bool p127_failed=false;
 
 	for (;;) {
 		uint64_t now = now_us();
@@ -1323,6 +1357,47 @@ stream_run(uint64_t tone_until_us, uint64_t until_us)
 				amps_stop();
 			}
 		}
+
+        /* At least 3s of silence and no live route. Keep 2ms stock
+         * cadence when active. Stop/resume is serialized on this worker. */
+        if(steps>=8 && !p127_failed && !by_clock && moved && dma==&bypass_dma &&
+           p127_abox_quiet()){
+            if(!dma->stop()){
+                hakios_p127_metric(1,3,1);p127_failed=true;
+                /* Do not reuse or free a ring whose stop is ambiguous. */
+                if(!(rd(&abox,R0(RDMA_CTRL0))&RDMA_ENABLE)){area_kept=true;return false;}
+            }else{
+                uint64_t stopped_us=0;
+                if(!wait_bits(&abox,R0(RDMA_STATUS),RDMA_PROGRESS,0,DMA_STOP_US,&stopped_us)){
+                    hakios_p127_metric(1,3,1);area_kept=true;return false;
+                }
+                hakios_p127_metric(1,0,1);
+                spin_us(FIFO_FLUSH_US);
+                uaif1_enable(false);
+                if(rd(&abox,ABOX_UAIF_CTRL0(1))&UAIF_SPK_ENABLE){
+                    hakios_p127_metric(1,3,1);p127_failed=true;
+                }
+                while(!p127_failed && p127_abox_quiet()){
+                    uint32_t seq=__atomic_load_n(&hakios_p127_audio_event,__ATOMIC_ACQUIRE);
+                    uint64_t deadline=0;
+                    clock_interval_to_deadline(10,NSEC_PER_MSEC,&deadline);
+                    if(assert_wait_deadline((event_t)&hakios_p127_audio_event,THREAD_UNINT,deadline)==THREAD_WAITING){
+                        if(!p127_abox_quiet() || seq!=__atomic_load_n(&hakios_p127_audio_event,__ATOMIC_ACQUIRE))
+                            (void)clear_wait(current_thread(),THREAD_AWAKENED);
+                        else hakios_p127_metric(1,2,1);
+                        (void)thread_block(THREAD_CONTINUE_NULL);
+                    }
+                }
+                if(!p127_abox_resume()){
+                    hakios_p127_metric(1,3,1);area_kept=true;return false;
+                }
+                /* Reset position baseline after hardware restart. */
+                next_fill=last_pos=0;outside=0;said_outside=false;
+                moved=false;by_clock=false;start=last_report=now_us();
+                read_at_report=read_bytes;
+                continue;
+            }
+        }
 
 		/* what is going on: every second in step 7; in step 8 every 5 s while the amplifiers are on, and the first 4 */
 		if (now - last_report >= (steps < 8 ? 1000000u : 5000000u) && (steps < 8 || amp_running != NULL || reports < 4)) {
@@ -1857,7 +1932,6 @@ follow_input(void)
  * INFERRED: that one SIF may feed two UAIFs at once (the route is a field per UAIF; Samsung's DAPM routes
  * "UAIF0 SPK" and "UAIF1 SPK" each with its own mux) ; the headphones test is what settles it.
  */
-static volatile uint32_t hp_want;
 static uint32_t hp_route_was;
 
 bool
@@ -1867,6 +1941,7 @@ hakios_abox_headphones(bool on)
 		return false;           /* no stream for iOS: nothing to route */
 	}
 	hp_want = on;
+	hakios_p127_audio_wake();
 	for (int i = 0; i < 100 && hp_on != on; i++) {
 		delay_for_interval(2, NSEC_PER_MSEC);
 	}

@@ -231,7 +231,28 @@ linux_synchronize_rcu(unsigned type)
 
 /* A thousand ticks a second, counted by a thread that also runs the timers that have come due. */
 int hz = 1000;
+ #ifdef LX_P127_JIFFIES
+static unsigned long long p127_epoch;
+static char p127_ticker_event;
+unsigned long
+lx_os_jiffies_now(void)
+{
+    unsigned long long began=__atomic_load_n(&p127_epoch,__ATOMIC_ACQUIRE);
+    unsigned long long now=lx_os_nanoseconds();
+    return began && now>=began?(unsigned long)((now-began)/1000000ull):0;
+}
+static void
+p127_ticker_changed(void)
+{
+    /* Called under lx_lock; same lock protects all deadline mutations. */
+    if(lx_os_option("p127_ticker")){
+        (void)lx_os_option("p127_ticker_wake");lx_os_wakeup(&p127_ticker_event);
+    }
+}
+ #else
 unsigned long jiffies;
+static void p127_ticker_changed(void){}
+ #endif
 uint64_t lkpi_msec2hz_rem = 1, lkpi_msec2hz_div = 1, lkpi_msec2hz_max = 0x7fffffff;
 
 static unsigned long long
@@ -251,6 +272,11 @@ static void
 ticker(void *argument)
 {
 	unsigned long long began = lx_os_nanoseconds();
+#ifdef LX_P127_JIFFIES
+	unsigned long long zero=0;
+	(void)__atomic_compare_exchange_n(&p127_epoch,&zero,began,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);
+	unsigned burst=0;
+#endif
 
 	for (;;) {
 		struct timer_list *due = NULL;
@@ -258,22 +284,46 @@ ticker(void *argument)
 		struct workqueue_struct *queue = NULL;
 
 		lx_os_lock();
+#ifdef LX_P127_JIFFIES
+		bool tickless=lx_os_option("p127_ticker")!=0;
+		if(tickless){
+			unsigned long now=jiffies,wait=100; /* bounded rollback */
+			for(unsigned i=0;i<nitems(armed);i++)if(armed[i]){
+				long delta=(long)(armed[i]->expires-now);
+				if(delta<=0){wait=0;break;}
+				if((unsigned long)delta<wait)wait=(unsigned long)delta;
+			}
+			for(unsigned i=0;i<nitems(later);i++)if(later[i].work){
+				long delta=(long)(later[i].when-now);
+				if(delta<=0){wait=0;break;}
+				if((unsigned long)delta<wait)wait=(unsigned long)delta;
+			}
+			if(!wait && burst>=32)wait=1; /* prevent unbounded immediate callback loop */
+			if(wait){(void)lx_os_option("p127_ticker_wait");lx_os_sleep(&p127_ticker_event,ticks_to_ns(wait));burst=0;}
+			else burst++;
+		}else{lx_os_sleep(&p127_ticker_event,2*1000000ull);burst=0;}
+#else
 		lx_os_sleep(&jiffies, 2 * 1000000ull);
 		jiffies = (unsigned long)((lx_os_nanoseconds() - began) / 1000000ull);
+#endif
+		unsigned long now=jiffies;
 		for (unsigned i = 0; i < nitems(armed) && due == NULL; i++) {
-			if (armed[i] != NULL && (long)(jiffies - armed[i]->expires) >= 0) {
+			if (armed[i] != NULL && (long)(now - armed[i]->expires) >= 0) {
 				due = armed[i];
 				armed[i] = NULL;
 			}
 		}
 		for (unsigned i = 0; i < nitems(later) && work == NULL; i++) {
-			if (later[i].work != NULL && (long)(jiffies - later[i].when) >= 0) {
+			if (later[i].work != NULL && (long)(now - later[i].when) >= 0) {
 				work = later[i].work;
 				queue = later[i].queue;
 				later[i].work = NULL;
 			}
 		}
 		lx_os_unlock();
+		#ifdef LX_P127_JIFFIES
+		if(tickless && (due || work))(void)lx_os_option("p127_ticker_due");
+		#endif
 		/* (a timer that a part of the driver not built yet would have given its function has none) */
 		if (due != NULL && due->function_415 != NULL) {
 			due->function_415(due);
@@ -314,6 +364,7 @@ linux_queue_delayed_work_on(int cpu, struct workqueue_struct *wq, struct delayed
 		later[slot].work = dwork;
 		later[slot].queue = wq;
 		later[slot].when = jiffies + delay;
+		p127_ticker_changed();
 	}
 	lx_os_unlock();
 	if (slot < 0) {
@@ -332,6 +383,7 @@ linux_cancel_delayed_work(struct delayed_work *dwork)
 	for (unsigned i = 0; i < nitems(later); i++) {
 		if (later[i].work == dwork) {
 			later[i].work = NULL;
+			p127_ticker_changed();
 			waited = true;
 		}
 	}
@@ -349,6 +401,7 @@ timer_delete_sync(struct timer_list *timer)
 	for (unsigned i = 0; i < nitems(armed); i++) {
 		if (armed[i] == timer) {
 			armed[i] = NULL;
+			p127_ticker_changed();
 			was = 1;
 		}
 	}
@@ -389,6 +442,7 @@ mod_timer(struct timer_list *timer, unsigned long expires)
 	timer->expires = expires;
 	if (slot >= 0) {
 		armed[slot] = timer;
+		p127_ticker_changed();
 	}
 	lx_os_unlock();
 	if (slot < 0) {

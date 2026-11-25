@@ -26,6 +26,8 @@ jobs:
           python3 tools/tests/test_p125_timer_observer.py
           node tools/tests/test-p125-symbol-map.js
           node tools/tests/test-p126-contract.js
+          node tools/tests/test-p127-contract.js
+          python3 tools/tests/test_p127_jiffies_header.py
       - name: Check source guards, preserving P9 panel and P7 CPU recovery safety
         run: |
           python3 - <<'PY'
@@ -128,6 +130,7 @@ jobs:
             'tools/tests/test-s9-p1241-suite.ps1',
             'tools/tests/test-s9-p125-timer-serial.ps1',
             'tools/tests/test-s9-p126-driver-trials.ps1',
+            'tools/tests/test-s9-p127-energy-trials.ps1',
             'tools/tests/test-s9-p11-lifecycle-serial.ps1',
             'tools/tests/test-s9-p10-lockscreen-source.ps1',
             'tools/tests/test-s9-p10-serial-harness.ps1',

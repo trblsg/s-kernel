@@ -342,6 +342,9 @@ static int stage;                       /* how far the bring-up got: 0 none ... 
 #include <kern/hakios_p125.h>
 #else
 static inline void hakios_p125_usb_event(unsigned connected){(void)connected;}
+#define P127_USB 0u
+static inline unsigned hakios_p127_mode(void){return 0;}
+static inline void hakios_p127_metric(unsigned group,unsigned index,uint64_t value){(void)group;(void)index;(void)value;}
 #endif
 static bool started, connected, high_speed;
 static uint32_t busy;                   /* the poll, or the way back to the loader, has the controller */
@@ -2155,8 +2158,13 @@ again:
     if(connected && !link_stopped && shot.phase==SHOT_OFF &&
        ring_head==ring_tail && hakios_display_requested_on()==0) {
         uint32_t off=__atomic_load_n(&p9_usb_off_ms,__ATOMIC_ACQUIRE);
+        if(hakios_p127_mode()&P127_USB)off=8;
         if(off>next_ms)next_ms=off;
     }
+	if(hakios_p127_mode()){
+	    hakios_p127_metric(0,!connected?2:next_ms==8?1:next_ms==poll_ms?0:4,1);
+	    if(connected && (hakios_p127_mode()&P127_USB) && next_ms<8)hakios_p127_metric(0,3,1);
+	}
 	clock_interval_to_deadline(next_ms, NSEC_PER_MSEC, &deadline);
 	thread_call_enter_delayed(call, deadline);
 }

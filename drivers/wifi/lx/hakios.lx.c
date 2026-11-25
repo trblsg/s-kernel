@@ -392,6 +392,20 @@ lx_os_option(const char *name)
 		if(hakios_p126_active(P126_WIFI_WORK)){hakios_p126_hit(1);return 1;}
 		return 0;
 	}
+#if __has_include(<kern/hakios_p125.h>)
+	if(strcmp(name,"p127_ticker")==0)return (hakios_p127_mode()&P127_TICKER)!=0;
+	if(strcmp(name,"p127_ticker_wait")==0){hakios_p127_metric(6,0,1);return 0;}
+	if(strcmp(name,"p127_ticker_due")==0){hakios_p127_metric(6,1,1);return 0;}
+	if(strcmp(name,"p127_ticker_wake")==0){hakios_p127_metric(6,2,1);return 0;}
+	if(strcmp(name,"p127_intx")==0)return (hakios_p127_mode()&P127_WIFI)!=0;
+	if(strcmp(name,"p127_intx_attach")==0){hakios_p127_metric(4,0,1);return 0;}
+	if(strcmp(name,"p127_intx_irq")==0){hakios_p127_metric(4,1,1);return 0;}
+	if(strcmp(name,"p127_intx_watchdog")==0){hakios_p127_metric(4,2,1);return 0;}
+	if(strcmp(name,"p127_intx_fallback")==0){hakios_p127_metric(4,3,1);return 0;}
+	if(strcmp(name,"p127_intx_detach")==0){hakios_p127_metric(4,4,1);return 0;}
+#else
+	if(strncmp(name,"p127_intx",9)==0 || strncmp(name,"p127_ticker",11)==0)return 0;
+#endif
 	return hakios_wifi_option(name);
 }
 

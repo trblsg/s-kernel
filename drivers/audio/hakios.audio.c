@@ -461,6 +461,9 @@ static int
 input_open(__unused dev_t dev, __unused int flags, __unused int type, __unused struct proc *p)
 {
 	in_open = 1;
+#if __has_include(<kern/hakios_p125.h>)
+	hakios_p127_audio_wake();
+#endif
 	return 0;
 }
 
@@ -469,6 +472,9 @@ static int
 input_close(__unused dev_t dev, __unused int flags, __unused int type, __unused struct proc *p)
 {
 	in_open = 0;
+#if __has_include(<kern/hakios_p125.h>)
+	hakios_p127_audio_wake();
+#endif
 	return 0;
 }
 

@@ -18,9 +18,65 @@ uint32_t hakios_p126_reason;
 uint64_t hakios_p126_hits[6];
 uint64_t hakios_p126_diag[9];
 uint32_t hakios_p126_audio_state;
+uint64_t hakios_p127_lease;
+uint32_t hakios_p127_reason,hakios_p127_offline_aggregate;
+uint64_t hakios_p127_wfi_n[8][7],hakios_p127_wfi_ticks[8][7],hakios_p127_bounds[6];
+uint64_t hakios_p127_usb[5],hakios_p127_abox[4],hakios_p127_psr[4],hakios_p127_floor[2];
+uint64_t hakios_p127_irq[8][3],hakios_p127_wifi[5],hakios_p127_bt[6],hakios_p127_ticker[3];
+uint32_t hakios_p127_audio_event;
+struct p127_fg_row hakios_p127_fg_rows[P127_FG_SLOTS];
+uint64_t hakios_p127_fg_seq;
+void hakios_p127_fg_record(int32_t ua,int32_t avg_ua,uint32_t uv,unsigned external,unsigned charger,unsigned qh)
+{
+    if(!hakios_p127_mode() || !hakios_p125_active())return;
+    uint64_t seq=__atomic_load_n(&hakios_p127_fg_seq,__ATOMIC_RELAXED)+1;
+    struct p127_fg_row *r=&hakios_p127_fg_rows[(seq-1)%P127_FG_SLOTS];
+    __atomic_store_n(&r->seq,0,__ATOMIC_RELEASE);
+    r->ticks=mach_absolute_time();r->ua=ua;r->avg_ua=avg_ua;r->uv=uv;
+    r->external=external;r->charger=charger;r->qh=qh;
+    __atomic_store_n(&r->seq,seq,__ATOMIC_RELEASE);
+    __atomic_store_n(&hakios_p127_fg_seq,seq,__ATOMIC_RELEASE);
+}
+void hakios_p127_audio_wake(void){
+    if(hakios_p127_mode()&P127_ABOX){
+        __atomic_fetch_add(&hakios_p127_audio_event,1,__ATOMIC_RELEASE);
+        thread_wakeup((event_t)&hakios_p127_audio_event);
+    }
+}
+unsigned hakios_p127_mode(void)
+{
+    uint64_t v=__atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE);
+    return v && mach_absolute_time()<(v&~(uint64_t)P127_MASK)?(unsigned)(v&P127_MASK):0;
+}
+void hakios_p127_stop(unsigned reason)
+{
+    uint64_t v=__atomic_exchange_n(&hakios_p127_lease,0,__ATOMIC_ACQ_REL);
+    if(v)__atomic_store_n(&hakios_p127_reason,reason,__ATOMIC_RELEASE);
+}
+void hakios_p127_wfi(unsigned cpu,uint64_t ticks)
+{
+    if(cpu>=8 || !hakios_p127_mode() || !hakios_p125_active())return;
+    unsigned b=0;
+    while(b<6 && ticks>=__atomic_load_n(&hakios_p127_bounds[b],__ATOMIC_RELAXED))b++;
+    __atomic_fetch_add(&hakios_p127_wfi_n[cpu][b],1,__ATOMIC_RELAXED);
+    __atomic_fetch_add(&hakios_p127_wfi_ticks[cpu][b],ticks,__ATOMIC_RELAXED);
+}
+void hakios_p127_metric(unsigned group,unsigned index,uint64_t value)
+{
+    uint64_t *v=0;
+    if(group==0 && index<5)v=&hakios_p127_usb[index];
+    if(group==1 && index<4)v=&hakios_p127_abox[index];
+    if(group==2 && index<4)v=&hakios_p127_psr[index];
+    if(group==3 && index<2)v=&hakios_p127_floor[index];
+    if(group==4 && index<5)v=&hakios_p127_wifi[index];
+    if(group==5 && index<6)v=&hakios_p127_bt[index];
+    if(group==6 && index<3)v=&hakios_p127_ticker[index];
+    if(v)__atomic_fetch_add(v,value,__ATOMIC_RELAXED);
+}
 unsigned hakios_p126_active(unsigned bit)
 {
     uint64_t lease=__atomic_load_n(&hakios_p126_lease,__ATOMIC_ACQUIRE);
+    if((hakios_p127_mode()&P127_BASE) && (bit&15u))return bit&15u;
     if(!(lease&bit))return 0;
     return mach_absolute_time()<(lease&~(uint64_t)P126_MASK) ? (unsigned)(lease&bit):0;
 }
@@ -33,7 +89,7 @@ void hakios_p126_diag_add(unsigned index,uint64_t count)
     if(index<9 && (__atomic_load_n(&hakios_p125_lease,__ATOMIC_RELAXED) || __atomic_load_n(&hakios_p126_lease,__ATOMIC_RELAXED)))
         __atomic_fetch_add(&hakios_p126_diag[index],count,__ATOMIC_RELAXED);
 }
-void hakios_p126_audio_set(unsigned state){__atomic_store_n(&hakios_p126_audio_state,state,__ATOMIC_RELEASE);}
+void hakios_p126_audio_set(unsigned state){__atomic_store_n(&hakios_p126_audio_state,state,__ATOMIC_RELEASE);hakios_p127_audio_wake();}
 unsigned hakios_p126_audio_get(void){return __atomic_load_n(&hakios_p126_audio_state,__ATOMIC_ACQUIRE);}
 void hakios_p126_stop(unsigned reason)
 {
@@ -49,7 +105,7 @@ hakios_p125_active(void)
     if((v&3u)==3u){
         if(!__atomic_load_n(&hakios_p125_usb_down_at,__ATOMIC_ACQUIRE) ||
             __atomic_load_n(&hakios_p125_usb_up_at,__ATOMIC_ACQUIRE))return 0;
-        return 2;
+        return __atomic_load_n(&hakios_p127_offline_aggregate,__ATOMIC_ACQUIRE)?1:2;
     }
     return (unsigned)(v&3u);
 }
@@ -72,7 +128,7 @@ void hakios_p125_usb_event(unsigned connected)
 }
 void hakios_p125_display_event(unsigned on)
 {
-    if(on)hakios_p126_stop(4);
+    if(on){hakios_p126_stop(4);hakios_p127_stop(4);}
     if(on && (__atomic_load_n(&hakios_p125_lease,__ATOMIC_ACQUIRE)&3u))
         __atomic_fetch_add(&hakios_p125_display_events,1,__ATOMIC_RELAXED);
 }

@@ -122,8 +122,12 @@
 #include <kern/hakios_p125.h>
 #else
 static inline void hakios_p126_diag_add(unsigned index,uint64_t count){(void)index;(void)count;}
+#define P127_BT 0u
+static inline unsigned hakios_p127_mode(void){return 0;}
+static inline void hakios_p127_metric(unsigned group,unsigned index,uint64_t value){(void)group;(void)index;(void)value;}
 #endif
 #include <kern/thread.h>
+#include <kern/sched_prim.h>
 #include <libkern/OSAtomic.h>
 #include <libkern/libkern.h>
 #include <mach/mach_time.h>
@@ -147,6 +151,10 @@ static inline void hakios_p126_diag_add(unsigned index,uint64_t count){(void)ind
 #include <sys/hakios.log.h>
 #include <sys/hakios.xnu.h>
 
+extern kern_return_t gic_v3_spi_attach(uint32_t intid, bool edge, void (*handler)(void *,uint32_t), void *context);
+extern void gic_v3_spi_mask(uint32_t intid);
+extern void gic_v3_spi_unmask(uint32_t intid);
+extern void gic_v3_spi_detach(uint32_t intid);
 extern void HakiosBTNodeStart(const uint8_t *hci_address, uint32_t speed);
 extern const uint8_t *hakios_image_file(const char *dir, const char *name, uint64_t *size, int *disk_out);
 
@@ -193,6 +201,12 @@ static const struct { uint16_t off; const char *name; } uart_gates[] = {
 #define UINTP                   0x30
 #define UINTSP                  0x34
 #define UINTM                   0x38
+/* starlte_eur_open_26.dts uart@10840000 interrupts=<0 422 0>;
+ * Samsung serial_s3c.h: RXD bit0, ERROR bit1, RX timeout bit7,
+ * RX level bit8, RX error irq enable bit6. TX stays masked. */
+#define P127_BT_INTID (32u+422u)
+#define P127_BT_RX_BITS 3u
+#define P127_BT_RX_UCON ((1u<<6)|(1u<<7)|(1u<<8))
 #define USI_CON                 0xC4
 #define USI_OPTION              0xC8
 #define  USI_CLKREQ_ON          (1u << 1)
@@ -1165,11 +1179,104 @@ static struct tty *bt_tty;
 static volatile bool pump_running;
 static volatile SInt32 kctl_owns;       /* 1 while a com.apple.uart.bluetooth client has the UART (below) */
 static void kctl_pump(int *in);
+static uint32_t p127_bt_event,p127_bt_irq_pending,p127_bt_attached;
+static bool p127_bt_fault;
+static uint32_t p127_bt_ucon,p127_bt_uintm,p127_bt_errors,p127_bt_empty;
+
+static void
+p127_bt_wake(void)
+{
+    if(!__atomic_load_n(&p127_bt_attached,__ATOMIC_ACQUIRE))return;
+    __atomic_fetch_add(&p127_bt_event,1,__ATOMIC_RELEASE);
+    hakios_p127_metric(5,5,1);
+    thread_wakeup((event_t)&p127_bt_event);
+}
+static void
+p127_bt_arrived(__unused void *ctx,uint32_t intid)
+{
+    gic_v3_spi_mask(intid);
+    __atomic_store_n(&p127_bt_irq_pending,1,__ATOMIC_RELEASE);
+    __atomic_fetch_add(&p127_bt_event,1,__ATOMIC_RELEASE);
+    hakios_p127_metric(5,1,1);
+    thread_wakeup((event_t)&p127_bt_event);
+}
+static void
+p127_bt_detach(void)
+{
+    if(!__atomic_exchange_n(&p127_bt_attached,0,__ATOMIC_ACQ_REL))return;
+    gic_v3_spi_mask(P127_BT_INTID);
+    wr(uart,UINTM,p127_bt_uintm);
+    wr(uart,UCON,p127_bt_ucon);
+    gic_v3_spi_detach(P127_BT_INTID);
+    __atomic_store_n(&p127_bt_irq_pending,0,__ATOMIC_RELEASE);
+    hakios_p127_metric(5,4,1);
+}
+static bool
+p127_bt_attach(void)
+{
+    if(!(rd(uart,UMCON)&UMCON_AFC) || (rd(uart,UINTM)&15u)!=15u ||
+       (rd(uart,UCON)&15u)!=UCON_CPU_MODES)return false;
+    p127_bt_ucon=rd(uart,UCON);p127_bt_uintm=rd(uart,UINTM);
+    if(gic_v3_spi_attach(P127_BT_INTID,false,p127_bt_arrived,NULL)!=KERN_SUCCESS)return false;
+    gic_v3_spi_mask(P127_BT_INTID);
+    __atomic_store_n(&p127_bt_attached,1,__ATOMIC_RELEASE);
+    p127_bt_errors=rx_errors;p127_bt_empty=0;
+    wr(uart,UINTP,P127_BT_RX_BITS);
+    wr(uart,UINTSP,P127_BT_RX_BITS);
+    wr(uart,UCON,p127_bt_ucon|P127_BT_RX_UCON);
+    wr(uart,UINTM,p127_bt_uintm&~P127_BT_RX_BITS);
+    hakios_p127_metric(5,0,1);
+    if((rd(uart,UINTM)&15u)!=12u || (rd(uart,UCON)&P127_BT_RX_UCON)!=P127_BT_RX_UCON){
+        p127_bt_detach();return false;
+    }
+    return true;
+}
+static void
+p127_bt_fallback(void)
+{
+    p127_bt_fault=true;hakios_p127_metric(5,3,1);p127_bt_detach();
+}
+static bool
+p127_bt_rx_ready(void)
+{
+    return (rd(uart,UFSTAT)&(UFSTAT_RX_COUNT|UFSTAT_RX_FULL))!=0;
+}
+static void
+p127_bt_idle(struct tty *tp)
+{
+    if(!__atomic_load_n(&p127_bt_attached,__ATOMIC_ACQUIRE)){sleep_ms(1);return;}
+    if(p127_bt_rx_ready()){p127_bt_fallback();sleep_ms(1);return;}
+    if(__atomic_load_n(&p127_bt_irq_pending,__ATOMIC_ACQUIRE) && ++p127_bt_empty>=8){p127_bt_fallback();sleep_ms(1);return;}
+    uint32_t seq=__atomic_load_n(&p127_bt_event,__ATOMIC_ACQUIRE);
+    uint64_t until=0;clock_interval_to_deadline(8,NSEC_PER_MSEC,&until);
+    if(assert_wait_deadline((event_t)&p127_bt_event,THREAD_UNINT,until)!=THREAD_WAITING)return;
+    /* UART pending W1C, never consume bytes in IRQ context. Recheck
+     * FIFO and TX queue after registering the wait and before blocking. */
+    gic_v3_spi_mask(P127_BT_INTID);
+    __atomic_store_n(&p127_bt_irq_pending,0,__ATOMIC_RELEASE);
+    wr(uart,UINTP,P127_BT_RX_BITS);
+    wr(uart,UINTSP,P127_BT_RX_BITS);
+    gic_v3_spi_unmask(P127_BT_INTID);
+    tty_lock(tp);
+    bool tx=ISSET(tp->t_state,TS_ISOPEN) && tp->t_outq.c_cc!=0;
+    tty_unlock(tp);
+    if(tx || p127_bt_rx_ready() || !(hakios_p127_mode()&P127_BT) ||
+       seq!=__atomic_load_n(&p127_bt_event,__ATOMIC_ACQUIRE))
+        (void)clear_wait(current_thread(),THREAD_AWAKENED);
+    wait_result_t w=thread_block(THREAD_CONTINUE_NULL);
+    if(w==THREAD_TIMED_OUT){
+        hakios_p127_metric(5,2,1);
+        if(p127_bt_rx_ready() && !__atomic_load_n(&p127_bt_irq_pending,__ATOMIC_ACQUIRE))p127_bt_fallback();
+    }
+    /* A real IRQ keeps the SPI masked until the pump drains RX. */
+    if(__atomic_load_n(&p127_bt_attached,__ATOMIC_ACQUIRE))gic_v3_spi_mask(P127_BT_INTID);
+}
 
 static void
 bt_tty_start(__unused struct tty *tp)
 {
-	/* the pump takes t_outq within a millisecond */
+	/* Existing tty lock is not acquired by the wake path. */
+	p127_bt_wake();
 }
 
 static int
@@ -1195,6 +1302,14 @@ bt_tty_pump(__unused void *arg, __unused wait_result_t w)
 		int out = 0, in = 0, c;
 
 		tty_lock(tp);
+		bool owner=ISSET(tp->t_state,TS_ISOPEN) || kctl_owns;
+		tty_unlock(tp);
+		bool wanted=(hakios_p127_mode()&P127_BT)!=0;
+		if(!wanted)p127_bt_fault=false;
+		if(__atomic_load_n(&p127_bt_attached,__ATOMIC_ACQUIRE) && (!wanted || !owner))p127_bt_detach();
+		if(wanted && owner && !p127_bt_fault && !__atomic_load_n(&p127_bt_attached,__ATOMIC_ACQUIRE) && !p127_bt_attach())p127_bt_fallback();
+		if(__atomic_load_n(&p127_bt_attached,__ATOMIC_ACQUIRE) && (!(rd(uart,UMCON)&UMCON_AFC) || (rd(uart,UFSTAT)&UFSTAT_RX_FULL) || (rd(uart,UINTP)&2u) || rx_errors!=p127_bt_errors))p127_bt_fallback();
+		tty_lock(tp);
 		if (ISSET(tp->t_state, TS_ISOPEN)) {
 			out = q_to_b(&tp->t_outq, buf, sizeof(buf));
 		}
@@ -1217,10 +1332,10 @@ bt_tty_pump(__unused void *arg, __unused wait_result_t w)
 		}
 		/* Read-only P12.6 evidence: no IRQ/mask/baud/FIFO changes. */
 		hakios_p126_diag_add((out==0 && in==0)?0:1,1);
-		if(in>0)hakios_p126_diag_add(2,(unsigned)in);
+		if(in>0){hakios_p126_diag_add(2,(unsigned)in);p127_bt_empty=0;}
 		if(out>0)hakios_p126_diag_add(3,(unsigned)out);
 		if (out == 0 && in == 0) {
-			sleep_ms(1);
+			p127_bt_idle(tp);
 		}
 	}
 }
@@ -1548,6 +1663,7 @@ kctl_send(__unused kern_ctl_ref ref, u_int32_t unit, __unused void *unitinfo, mb
 		}
 	}
 	mbuf_freem(m);
+	p127_bt_wake();
 	return error;
 }
 

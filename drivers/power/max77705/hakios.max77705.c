@@ -948,20 +948,25 @@ chg_wdt_kick(void)
 static void
 fg_short_say(void)
 {
-	uint16_t soc, cap, qh;
+	uint16_t soc, cap, qh,vcell;
+	uint8_t ok,dtls;
 	int16_t current, avg;
 	uint64_t ns;
 
 	if (read16(GAUGE, FG_REPSOC, &soc) || read16(GAUGE, FG_REPCAP, &cap) || read16(GAUGE, FG_CURRENT, (uint16_t *)&current) ||
-	    read16(GAUGE, FG_AVGCURRENT, (uint16_t *)&avg) || read16(GAUGE, FG_QH, &qh)) {
+	    read16(GAUGE, FG_AVGCURRENT, (uint16_t *)&avg) || read16(GAUGE, FG_QH, &qh) ||
+	    read16(GAUGE, FG_VCELL,&vcell) || read8(CHARGER,CHG_INT_OK,&ok) || read8(CHARGER,CHG_DTLS_01,&dtls)) {
 		say("max77705: fg: a read failed (%x)\n", bus.last_error);
 		return;
 	}
+ #if __has_include(<kern/hakios_p125.h>)
+	hakios_p127_fg_record((int32_t)current*3125/10,(int32_t)avg*3125/10,(uint32_t)((uint64_t)vcell*78125/1000),!!(ok&(3u<<5)),dtls&0xf,qh);
+ #endif
 	/* 312.5 uA a count for the currents; QH raw (the gauge's own coulomb count, its scale not taken as known here) */
 	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
-	say("max77705: fg: t %llu s, %u.%02u%%, %u mAh, current %d mA, avg %d mA, QH %u\n", ns / NSEC_PER_SEC,
+	say("max77705: fg: t %llu s, %u.%02u%%, %u mAh, current %d mA, avg %d mA, QH %u, voltage_uv %u, external %u, charger_state %u\n", ns / NSEC_PER_SEC,
 	    (unsigned)soc * 100 / 256 / 100, (unsigned)soc * 100 / 256 % 100, cap, (int)current * 3125 / 10000,
-	    (int)avg * 3125 / 10000, qh);
+	    (int)avg * 3125 / 10000, qh,(unsigned)((uint64_t)vcell*78125/1000),!!(ok&(3u<<5)),dtls&0xf);
 }
 
 static void

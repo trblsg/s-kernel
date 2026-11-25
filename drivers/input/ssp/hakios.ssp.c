@@ -1302,6 +1302,7 @@ tally_say(uint32_t seconds)
 	    g.turn[1] * 35 / 1000000, g.turn[2] * 35 / 1000000);
 }
 
+static uint64_t p127_shub_samples[SSP_SENSORS];
 static void
 on_sample(void *ctx, const struct shub_sample *s)
 {
@@ -1313,6 +1314,7 @@ on_sample(void *ctx, const struct shub_sample *s)
 	memcpy(last[s->sensor].data, s->data, s->size);
 	last[s->sensor].size = s->size;
 	last[s->sensor].count++;
+	if(s->sensor<SSP_SENSORS)__atomic_fetch_add(&p127_shub_samples[s->sensor],1,__ATOMIC_RELAXED);
 	last[s->sensor].hub_time = s->time;
 	last[s->sensor].at_ns = now_ns();
 	lck_mtx_unlock(&shub_lock);
@@ -1483,6 +1485,8 @@ ssp_init(void)
 	return ssp.found != 0;
 }
 
+static uint32_t p127_shub_rate[SSP_SENSORS];
+static uint64_t p127_shub_mask;
 static bool
 sensor_on(uint8_t id, uint32_t ms)
 {
@@ -1496,6 +1500,8 @@ sensor_on(uint8_t id, uint32_t ms)
 		return false;
 	}
 	ssp.enabled |= 1ull << id;
+	__atomic_store_n(&p127_shub_rate[id],ms,__ATOMIC_RELAXED);
+	__atomic_store_n(&p127_shub_mask,ssp.enabled,__ATOMIC_RELEASE);
 	return true;
 }
 
@@ -1899,6 +1905,25 @@ make_device(void)
  */
 static int selfread_ask;        /* seconds asked for (the boot-arg's, then the sysctl's) */
 SYSCTL_DECL(_kern_hakios);
+static int
+p127_shub_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unused int arg2,struct sysctl_req *req)
+{
+    char buf[350];uint64_t mask=__atomic_load_n(&p127_shub_mask,__ATOMIC_ACQUIRE);
+    int n=snprintf(buf,sizeof(buf),"version=1 enabled=%llx",(unsigned long long)mask);
+    if(n<0 || (size_t)n>=sizeof(buf))return EOVERFLOW;
+    size_t at=(size_t)n;const unsigned ids[]={0,1,4,5,7,9};
+    for(unsigned j=0;j<sizeof(ids)/sizeof(ids[0]);j++){
+        unsigned i=ids[j];
+        n=snprintf(buf+at,sizeof(buf)-at," s%u=%u/%llu",i,
+            (mask&(1ull<<i))?__atomic_load_n(&p127_shub_rate[i],__ATOMIC_RELAXED):0,
+            (unsigned long long)__atomic_load_n(&p127_shub_samples[i],__ATOMIC_RELAXED));
+        if(n<0 || (size_t)n>=sizeof(buf)-at)return EOVERFLOW;at+=(size_t)n;
+    }
+    return SYSCTL_OUT(req,buf,at+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p127_shub,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,
+    p127_shub_sysctl,"A","P12.7 sensor enabled mask, applied interval and sample counts");
+
 SYSCTL_INT(_kern_hakios, OID_AUTO, sensors_selfread, CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED, &selfread_ask, 0,
     "set to N in a run with shub_selfread=: /dev/hakios-sensors read for N seconds from inside the kernel (hakios.ssp.c)");
 
@@ -2308,6 +2333,7 @@ apply_rates(void)
 		if (ssp.enabled & (1ull << id)) {
 			shub_put32(b + 1, ms);
 			if (ssp_cmd(SSP_CHANGE_DELAY, SSP_AP2HUB_WRITE, 0, b, sizeof(b))) {
+				__atomic_store_n(&p127_shub_rate[id],ms,__ATOMIC_RELAXED);
 				say("shub: sensor %u every %u ms (asked by user space)\n", id, ms);
 				continue;
 			}
@@ -2382,6 +2408,7 @@ run(void)
 		if (gnss_req_pending) {
 			gnss_do();
 		}
+		__atomic_store_n(&p127_shub_mask,ssp.enabled,__ATOMIC_RELEASE);
 		pump(100, gnss_pending);
 		if (say_s != 0 && now_ns() - said_ns >= (uint64_t)say_s * NSEC_PER_SEC) {
 			tally_say((uint32_t)((now_ns() - said_ns) / NSEC_PER_SEC));

@@ -57,6 +57,27 @@ extern uint32_t hakios_p126_reason;
 extern uint64_t hakios_p126_hits[6];
 extern uint64_t hakios_p126_diag[9];
 extern uint32_t hakios_p126_audio_state;
+/* P12.7 independent lease, baseline P126 mask15, USB quiet, ABOX, PSR,
+ * floor selector 0..5 in bits4..6. No CPU power-state changes. */
+#define P127_BASE 1u
+#define P127_USB 2u
+#define P127_ABOX 4u
+#define P127_PSR 8u
+#define P127_WIFI 128u
+#define P127_BT 256u
+#define P127_TICKER 512u
+#define P127_MASK 1023u
+#define P127_FLOOR(M) (((M)>>4)&7u)
+extern uint64_t hakios_p127_lease;
+extern uint32_t hakios_p127_reason,hakios_p127_offline_aggregate;
+extern uint64_t hakios_p127_wfi_n[8][7],hakios_p127_wfi_ticks[8][7],hakios_p127_bounds[6];
+extern uint64_t hakios_p127_usb[5],hakios_p127_abox[4],hakios_p127_psr[4],hakios_p127_floor[2];
+extern uint64_t hakios_p127_irq[8][3],hakios_p127_wifi[5],hakios_p127_bt[6],hakios_p127_ticker[3];
+extern uint32_t hakios_p127_audio_event;
+#define P127_FG_SLOTS 64u
+struct p127_fg_row {uint64_t seq,ticks; int32_t ua,avg_ua; uint32_t uv,external,charger,qh;};
+extern struct p127_fg_row hakios_p127_fg_rows[P127_FG_SLOTS];
+extern uint64_t hakios_p127_fg_seq;
 /* Diagnostic indexes: BT idle/busy/RX/TTY TX/error, ABOX quiet/busy, SHUB quiet/busy. */
 /* 0 off, 1 aggregate, 2 detail, 3 USB-offline detail (pending until link-down).
  * Lease encodes expiry and arm mode. active() returns 0/1/2. */
@@ -87,6 +108,12 @@ void hakios_p126_stop(unsigned reason);
 void hakios_p126_diag_add(unsigned index,uint64_t count);
 void hakios_p126_audio_set(unsigned state);
 unsigned hakios_p126_audio_get(void);
+unsigned hakios_p127_mode(void);
+void hakios_p127_stop(unsigned reason);
+void hakios_p127_wfi(unsigned cpu,uint64_t ticks);
+void hakios_p127_metric(unsigned group,unsigned index,uint64_t value);
+void hakios_p127_audio_wake(void);
+void hakios_p127_fg_record(int32_t ua,int32_t avg_ua,uint32_t uv,unsigned external,unsigned charger,unsigned qh);
 #ifdef __cplusplus
 }
 #endif

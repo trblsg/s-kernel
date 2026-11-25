@@ -4,7 +4,7 @@
 param(
  [ValidatePattern('^COM[0-9]+$')][string]$Port='COM125',
  [string]$ReconnectPort='',
- [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump','DriverTrials')][string]$Scenario='Trace',
+ [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump','DriverTrials','EnergyTrials','EnergyOffline')][string]$Scenario='Trace',
  [ValidateRange(30,90)][int]$TraceSeconds=60,
  [ValidateRange(12,40)][int]$AggregateSeconds=20,
  [string]$SymbolMap='',
@@ -12,6 +12,9 @@ param(
  [ValidateRange(50,500)][int]$PagePaceMs=80,
  [ValidateRange(15,60)][int]$DriverSeconds=30,
  [string]$DriverModules='COMBINED',
+ [ValidateRange(15,300)][int]$EnergySeconds=30,
+ [string]$EnergyModules='USB,ABOX,BT,WIFI,TICKER',
+ [switch]$AllowLowerFloor,
  [switch]$Execute,[switch]$LibraryOnly
 )
 Set-StrictMode -Version 2
@@ -21,6 +24,8 @@ $script:P125Exec=$Execute;$script:P125Lib=$LibraryOnly
 $Execute=$script:P125Exec;$LibraryOnly=$script:P125Lib
 $script:P125HostEnabled=$true
 $script:P126HostEnabled=$true
+$script:P127HostEnabled=$true
+$script:P127Dirty=$false
 $script:P126Dirty=$false
 $script:P125Dirty=$false
 $script:P125Stem=''
@@ -172,7 +177,7 @@ function P125-ReadSnapshot([string]$Label,[switch]$CountsOnly){
     return $snapshot
 }
 function P125-Sub([uint64]$End,[uint64]$Begin){if($End -lt $Begin){throw 'P125 counter reset or reboot during capture'};return ($End-$Begin)}
-function P125-Delta($Before,$After,[string]$Label,[int]$Mode,[string]$Stem){
+function P125-Delta($Before,$After,[string]$Label,[int]$Mode,[string]$Stem,[switch]$OfflineAggregate){
     $st=$After.Status;$hz=[double]$st.hz
     if($hz -le 0 -or [uint64]$st.end -le [uint64]$st.start){throw 'P125 missing kernel interval; raw retained'}
     $seconds=([double]$st.end-[double]$st.start)/$hz
@@ -216,7 +221,7 @@ function P125-Delta($Before,$After,[string]$Label,[int]$Mode,[string]$Stem){
             $o[("k{0}_total" -f $kind)]=$total;$o[("k{0}_drop" -f $kind)]=$lost
             if($total -ne ($lost+$kept)){$valid=$false}
         }
-        if($Mode -ne 1 -and $o.k1_total -ne $c.callbacks){$valid=$false}
+        if($Mode -ne 1 -and -not $OfflineAggregate -and $o.k1_total -ne $c.callbacks){$valid=$false}
         $cs.Add([pscustomobject]$o)
     }
     $data|Sort-Object kind_id,@{Expression='calls';Descending=$true}|Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath "$Stem.$Label.rows.csv"
@@ -283,7 +288,7 @@ function P125-Offline {
     Life-SyncReadOnly
     if($script:LifeState -ne 'OFF'){throw 'P125 reconnected while screen ON'}
 }
-function P125-Phase([string]$Label,[int]$Mode,[int]$Seconds,[string]$Stem,$Before,[switch]$CountsOnly){
+function P125-Phase([string]$Label,[int]$Mode,[int]$Seconds,[string]$Stem,$Before,[switch]$CountsOnly,[switch]$OfflineAggregate){
     $script:P12Phase=$Label;$script:P125Dirty=$true
     [void](P12-Query 'p125_mode' "$Mode")
     $armed=P125-Status
@@ -297,7 +302,7 @@ function P125-Phase([string]$Label,[int]$Mode,[int]$Seconds,[string]$Stem,$Befor
         $diag=P12-Query 'p126_diag'
         $script:P125Report.Add("P126 DIAG $Label cumulative $diag")
     }
-    P125-Delta $Before $after $Label $Mode $Stem
+    P125-Delta $Before $after $Label $Mode $Stem -OfflineAggregate:$OfflineAggregate
     return $after
 }
 function P126-Status{
@@ -345,9 +350,155 @@ function P126-DriverTrials([string]$Stem){
         $script:P125Report.Add($line);Life-Say $line
     }
 }
+function P127-Status {
+    $s=P125-Fields (P12-Query 'p127_status')
+    foreach($k in @('version','mode','reason','lease_s','little_request','little_cur','ufs_safe','ufs_busy','floor_hits','floor_bypass')){if(-not $s.ContainsKey($k)){throw "P127 missing status $k"}}
+    if($s.version -ne '1'){throw 'P127 matched ABI required'}
+    return $s
+}
+function P127-Read {
+    $w=@{}
+    for($cpu=0;$cpu -lt 8;$cpu++){
+        $v=P125-Fields (P12-Query "p127_wfi$cpu")
+        if($v.version -ne '1' -or [int]$v.cpu -ne $cpu){throw 'P127 WFI ABI mismatch'}
+        $bins=@($v.bins.Split(',')|ForEach-Object {
+            $x=$_.Split('/');if($x.Count -ne 2){throw 'P127 WFI pair invalid'}
+            [pscustomobject]@{N=(P125-Hex $x[0]);Ticks=(P125-Hex $x[1])}
+        })
+        if($bins.Count -ne 7){throw 'P127 WFI bin count'}
+        $w[$cpu]=[pscustomobject]@{Bins=$bins;SGI=(P125-Hex $v.sgi);PPI=(P125-Hex $v.ppi);SPI=(P125-Hex $v.spi)}
+    }
+    $seq=P125-Fields (P12-Query 'p127_fg_seq')
+    if($seq.version -ne '1' -or $seq.slots -ne '64'){throw 'P127 FG ABI mismatch'}
+    return [pscustomobject]@{Wfi=$w;Seq=[uint64]$seq.seq;Status=(P127-Status);Metrics=(P125-Fields (P12-Query 'p127_metrics'));Wifi=(P125-Fields (P12-Query 'p127_wifi'));BT=(P125-Fields (P12-Query 'p127_bt'));Ticker=(P125-Fields (P12-Query 'p127_ticker'));Bus=(P12-Query 'p127_bus');Shub=(P12-Query 'p127_shub');Diag=(P12-Query 'p126_diag')}
+}
+function P127-Delta($Before,$After,$Timer,[string]$Label,[string]$Stem){
+    $hz=[double]$Timer.hz;$seconds=([double]$Timer.end-[double]$Timer.start)/$hz
+    if($seconds -le 0){throw 'P127 invalid kernel interval'}
+    $labels=@('lt100us','100_499us','500_999us','1_1.999ms','2_3.499ms','3.5_9.999ms','ge10ms')
+    $rows=@()
+    for($cpu=0;$cpu -lt 8;$cpu++){
+        $a=$After.Wfi[$cpu];$b=$Before.Wfi[$cpu]
+        $n=0.0;$t=0.0
+        for($i=0;$i -lt 7;$i++){
+            $n+=P125-Sub $a.Bins[$i].N $b.Bins[$i].N
+            $t+=P125-Sub $a.Bins[$i].Ticks $b.Bins[$i].Ticks
+        }
+        for($i=0;$i -lt 7;$i++){
+            $count=P125-Sub $a.Bins[$i].N $b.Bins[$i].N
+            $ticks=P125-Sub $a.Bins[$i].Ticks $b.Bins[$i].Ticks
+            $rows+=[pscustomobject]@{phase=$Label;cpu=$cpu;seconds=$seconds;bin=$labels[$i];count=$count;ticks=$ticks;wfi_seconds=$ticks/$hz;count_pct=$(if($n){100*$count/$n}else{0});wfi_time_pct=$(if($t){100*$ticks/$t}else{0});window_pct=100*$ticks/$hz/$seconds;sgi=(P125-Sub $a.SGI $b.SGI);ppi=(P125-Sub $a.PPI $b.PPI);spi=(P125-Sub $a.SPI $b.SPI)}
+        }
+    }
+    $rows|Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath "$Stem.$Label.wfi.csv"
+    $big=@($rows|Where-Object {$_.cpu -in 3,4,5,6})
+    $all=($big|Measure-Object count -Sum).Sum;$long=($big|Where-Object {$_.bin -in '3.5_9.999ms','ge10ms'}|Measure-Object count -Sum).Sum
+    $time=($big|Measure-Object ticks -Sum).Sum;$lt=($big|Where-Object {$_.bin -in '3.5_9.999ms','ge10ms'}|Measure-Object ticks -Sum).Sum
+    $line="P127 WFI $Label BIG_count=$all ge3.5ms_count=$long BIG_ticks=$time ge3.5ms_ticks=$lt"
+    $script:P125Report.Add($line);Life-Say $line
+    foreach($group in @('Metrics','Wifi','BT','Ticker')){
+        $m=@()
+        foreach($k in $After.$group.Keys){
+            if($k -eq 'version'){continue}
+            $m+="$k=$(P125-Sub ([uint64]$After.$group[$k]) ([uint64]$Before.$group[$k]))"
+        }
+        $script:P125Report.Add("P127 $group $Label delta $($m -join ' ')")
+    }
+    $script:P125Report.Add("P127 BUS $Label $($After.Bus)")
+    $script:P125Report.Add("P127 SHUB $Label $($After.Shub)")
+    $script:P125Report.Add("P127 DIAG $Label $($After.Diag)")
+    $num=P125-Sub $After.Seq $Before.Seq
+    if($num -gt 64){throw 'P127 gauge ring overwritten'}
+    $pages=@{};$samples=@{}
+    for($i=[uint64]($Before.Seq+1);$i -le $After.Seq;$i++){
+        $page=[int][Math]::Floor((($i-1)%64)/4)
+        $pages[$page]=$true
+    }
+    foreach($page in ($pages.Keys|Sort-Object)){
+        $line=P12-Query "p127_fg$page"
+        if($line -notmatch "^version=1 page=$page(?: |$)"){throw 'P127 gauge page mismatch'}
+        foreach($m in [regex]::Matches($line,'(?:^| )r=(\d+)/(\d+)/(-?\d+)/(-?\d+)/(\d+)/(\d+)/(\d+)/(\d+)')){
+            $seq=[uint64]$m.Groups[1].Value
+            if($seq -le $Before.Seq -or $seq -gt $After.Seq){continue}
+            if($samples.ContainsKey($seq)){throw 'P127 duplicate gauge sample'}
+            $ticks=[uint64]$m.Groups[2].Value
+            $ua=[int]$m.Groups[3].Value;$uv=[uint32]$m.Groups[5].Value
+            $samples[$seq]=[pscustomobject]@{phase=$Label;seq=$seq;ticks=$ticks;seconds_from_start=([double]$ticks-[double]$Timer.start)/$hz;in_window=($ticks -ge [uint64]$Timer.start -and $ticks -le [uint64]$Timer.end);current_ua=$ua;avg_ua=[int]$m.Groups[4].Value;voltage_uv=$uv;external=[int]$m.Groups[6].Value;charger_state=[int]$m.Groups[7].Value;qh_raw=[uint32]$m.Groups[8].Value;net_battery_w=[double]$ua*[double]$uv/1e12}
+        }
+        Start-Sleep -Milliseconds $PagePaceMs
+    }
+    if($samples.Count -ne $num){throw 'P127 gauge sequence gap'}
+    if($num){$samples.Values|Sort-Object seq|Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath "$Stem.$Label.fg.csv"}
+    $script:P125Report.Add("P127 FG $Label samples=$num; signed NET battery power, not whole-system watts when external=1")
+}
+function P127-Window([string]$Label,[int]$Mask,[int]$Seconds,[string]$Stem,$BeforeTimer,[switch]$Offline){
+    $initial=P127-Status
+    if($initial.mode -ne '0'){throw 'P127 old mode still active'}
+    $before=P127-Read
+    $script:P127Dirty=$true
+    [void](P12-Query 'p127_mode' "$Mask")
+    $armed=P127-Status
+    if([int]$armed.mode -ne $Mask -or [int]$armed.lease_s -lt ($Seconds+12)){throw 'P127 lease arm refused or too short'}
+    P125-PumpOff 2
+    $timerMode=if($Offline){3}else{1}
+    if($Offline){$script:TraceSeconds=$Seconds}
+    $afterTimer=P125-Phase $Label $timerMode $Seconds $Stem $BeforeTimer -CountsOnly -OfflineAggregate:$Offline
+    $after=P127-Read
+    if([int]$after.Status.mode -ne $Mask -or $after.Status.reason -ne '0'){throw "P127 $Label lease revoked; phase invalid"}
+    P127-Delta $before $after $afterTimer.Status $Label $Stem
+    [void](P12-Query 'p127_mode' '0' -Cleanup)
+    P125-PumpOff 2
+    $restored=P127-Status
+    if($restored.mode -ne '0'){throw 'P127 restore ACK missing'}
+    if((($Mask -shr 4) -band 7) -and [int]$restored.little_cur -lt 1053000){throw 'P127 LITTLE stock floor readback missing'}
+    $m=P125-Fields (P12-Query 'p127_metrics')
+    $w=P125-Fields (P12-Query 'p127_wifi')
+    $bt=P125-Fields (P12-Query 'p127_bt')
+    if((P125-Sub ([uint64]$bt.attach) ([uint64]$before.BT.attach)) -ne (P125-Sub ([uint64]$bt.detach) ([uint64]$before.BT.detach))){throw 'P127 UART IRQ restore counts disagree'}
+    if([uint64]$m.abox_fault -gt [uint64]$before.Metrics.abox_fault -or [uint64]$m.psr_fault -gt [uint64]$before.Metrics.psr_fault){throw 'P127 hardware transition fault; stop suite'}
+    if((P125-Sub ([uint64]$m.abox_stop) ([uint64]$before.Metrics.abox_stop)) -ne (P125-Sub ([uint64]$m.abox_resume) ([uint64]$before.Metrics.abox_resume))){throw 'P127 RDMA restore counts disagree'}
+    if((P125-Sub ([uint64]$w.attach) ([uint64]$before.Wifi.attach)) -ne (P125-Sub ([uint64]$w.detach) ([uint64]$before.Wifi.detach))){throw 'P127 INTx restore counts disagree'}
+    if((P125-Sub ([uint64]$m.psr_mask) ([uint64]$before.Metrics.psr_mask)) -gt (P125-Sub ([uint64]$m.psr_unmask) ([uint64]$before.Metrics.psr_unmask))){throw 'P127 PSR unmask not proven'}
+    $script:P127Dirty=$false
+    $script:P125Report.Add("P127 RESTORE $Label mode=0 $($restored.little_cur) kHz")
+    return [pscustomobject]@{Timer=$afterTimer;Pre=$before;Post=$after;Restored=$restored}
+}
+function P127-RunEnergy([string]$Stem){
+    $defs=@{USB=3;ABOX=5;PSR=9;WIFI=129;BT=257;TICKER=513;LITTLE949=17;LITTLE832=33;LITTLE715=49;LITTLE598=65;LITTLE455=81}
+    $selected=@($EnergyModules.Split(',')|ForEach-Object {$_.Trim().ToUpperInvariant()})
+    if($Scenario -eq 'EnergyTrials'){
+        if(@($selected|Where-Object {-not $defs.ContainsKey($_)}).Count -or @($selected|Select-Object -Unique).Count -ne $selected.Count){throw 'P127 invalid/duplicate EnergyModules'}
+        if(@($selected|Where-Object {$_ -in 'LITTLE832','LITTLE715','LITTLE598','LITTLE455'}).Count -and -not $AllowLowerFloor){throw 'P127 lower OPP needs prior step review and -AllowLowerFloor'}
+        if($EnergySeconds -gt 60 -and @($selected|Where-Object {$_ -ne 'USB'}).Count){throw 'P127 new hardware transitions limited to <=60s until functional qualification'}
+    }
+    if($Scenario -eq 'EnergyOffline' -and $EnergySeconds -lt 60){throw 'P127 offline requires 60..300s'}
+    if((P126-Status).mode -ne '0' -or (P127-Status).mode -ne '0'){throw 'P127 prior policy active'}
+    $base=P125-ReadSnapshot 'P127-BASE' -CountsOnly
+    $a=P127-Window 'P127-A0' 1 $EnergySeconds $Stem $base
+    if($Scenario -eq 'EnergyOffline'){
+        $b=P127-Window 'P127-OFFLINE-B' 1 $EnergySeconds $Stem $a.Timer -Offline
+        [void](P127-Window 'P127-OFFLINE-A1' 1 $EnergySeconds $Stem $b.Timer)
+        return
+    }
+    foreach($name in $selected){
+        $b=P127-Window "P127-$name-B" $defs[$name] $EnergySeconds $Stem $a.Timer
+        $eligible=switch($name){
+            USB {[uint64]$b.Post.Metrics.usb_8ms -gt [uint64]$b.Pre.Metrics.usb_8ms}
+            ABOX {[uint64]$b.Post.Metrics.abox_idle_wait -gt [uint64]$b.Pre.Metrics.abox_idle_wait}
+            PSR {[uint64]$b.Post.Metrics.psr_mask -gt [uint64]$b.Pre.Metrics.psr_mask}
+            BT {([uint64]$b.Post.BT.attach -gt [uint64]$b.Pre.BT.attach) -and ([uint64]$b.Post.BT.fallback -eq [uint64]$b.Pre.BT.fallback)}
+            TICKER {[uint64]$b.Post.Ticker.wait -gt [uint64]$b.Pre.Ticker.wait}
+            WIFI {([uint64]$b.Post.Wifi.attach -gt [uint64]$b.Pre.Wifi.attach) -and ([uint64]$b.Post.Wifi.fallback -eq [uint64]$b.Pre.Wifi.fallback)}
+            default {([uint64]$b.Post.Status.floor_hits -gt [uint64]$b.Pre.Status.floor_hits) -and ([int]$b.Post.Status.little_cur -eq [int]$b.Post.Status.little_request)}
+        }
+        $line="P127 MODULE $name "+$(if($eligible){'APPLIED'}else{'NO_ELIGIBLE_PATH_OR_FALLBACK'})
+        $script:P125Report.Add($line);Life-Say $line
+        $a=P127-Window "P127-$name-A1" 1 $EnergySeconds $Stem $b.Timer
+    }
+}
 function P125-Run {
     if(-not $Execute){
-        Write-Host 'P12.5 preview: -Execute to measure OFF timer source. Trace=aggregate+detail; UsbCrossover=aggregate+A0/B/A1; OfflineOnly=B; AggregateOnly=aggregate; FrozenSummary=read-only counters; FrozenDump=read-only counters and pages on fixed firmware. No automatic cooling wait. DriverTrials=selective bounded A/B/A without page dumps; default COMBINED. ResumeSnapshot=FrozenDump checkpoint.'
+        Write-Host 'P12.5 preview: -Execute to measure OFF timer source. Trace=aggregate+detail; UsbCrossover=aggregate+A0/B/A1; OfflineOnly=B; AggregateOnly=aggregate; FrozenSummary=read-only counters; FrozenDump=read-only counters and pages on fixed firmware. No automatic cooling wait. DriverTrials=selective bounded A/B/A without page dumps; default COMBINED. ResumeSnapshot=FrozenDump checkpoint. EnergyTrials=guarded P12.7 A/B/A; EnergyOffline=connected/unplug/reconnect aggregate+WFI+FG.'
         return
     }
     if($env:OS -ne 'Windows_NT'){throw 'Windows serial runner only'}
@@ -383,6 +534,10 @@ function P125-Run {
         P125-PumpOff 25
         $g=P12-Query 'g3d_lab_stats'
         if($g -notmatch ' domain=0 pll=0 ' -or $g -notmatch ' fault=0 '){throw 'P125 independent GPU OFF evidence missing'}
+        if($Scenario -in @('EnergyTrials','EnergyOffline')){
+            P127-RunEnergy $stem
+            return
+        }
         if($Scenario -eq 'DriverTrials'){
             P126-DriverTrials $stem
             return
@@ -396,6 +551,9 @@ function P125-Run {
     }catch{
         $errorText=$_.Exception.Message;Life-Say "P125 STOP $errorText"
     }finally{
+        if($script:P127Dirty -and $null -ne $script:LifeSerial -and $script:LifeSerial.IsOpen){
+            try{[void](P12-Query 'p127_mode' '0' -Cleanup);$script:P127Dirty=$false}catch{Life-Say 'P127 restore ACK missing; bounded kernel expiry'}
+        }
         if($script:P126Dirty -and $null -ne $script:LifeSerial -and $script:LifeSerial.IsOpen){
             try{[void](P12-Query 'p126_mode' '0' -Cleanup);$script:P126Dirty=$false}catch{Life-Say 'P126 cleanup ACK missing; 120s bounded kernel lease'}
         }
