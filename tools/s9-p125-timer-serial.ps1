@@ -4,7 +4,7 @@
 param(
  [ValidatePattern('^COM[0-9]+$')][string]$Port='COM125',
  [string]$ReconnectPort='',
- [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly')][string]$Scenario='Trace',
+ [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump')][string]$Scenario='Trace',
  [ValidateRange(30,90)][int]$TraceSeconds=60,
  [ValidateRange(12,40)][int]$AggregateSeconds=20,
  [string]$SymbolMap='',
@@ -17,6 +17,7 @@ $script:P125Exec=$Execute;$script:P125Lib=$LibraryOnly
 $Execute=$script:P125Exec;$LibraryOnly=$script:P125Lib
 $script:P125HostEnabled=$true
 $script:P125Dirty=$false
+$script:P125Stem=''
 $script:P125Kinds=@('unused','IRQ_CALLBACK','ENTER','WAIT_ARM','WAIT_EXPIRE','DELAYED_READY','THREAD_CALL_INVOKE','MK_ARM','MK_SEND','IOKIT_ACTION','OTHER_QUEUE_CALLBACK','ASSIGN','MK_CANCEL','CANCEL','WAIT_STALE')
 $script:P125Counters=@('irq27','queue_services','zero_cb','nonzero_cb','callbacks','other_queue','other_callbacks','scan_pause','scan_postpone','lock_skip_async_dequeue','ratelimited_break','empty','enter','reenter','local','requested_leeway_zero','effective_leeway_zero','requested_lt1ms','wait_armed','wait_stale','delayed_ready','thread_call_invoke','mk_send_attempt','table_drop','setpop','pop_lt1ms','raw_early','cancel')
 $script:P125Report=New-Object 'System.Collections.Generic.List[string]'
@@ -60,11 +61,11 @@ function P125-Symbol([uint64]$Address){
     if($off -eq 0){return $s.Name}
     return ($s.Name+'+0x'+$off.ToString('x'))
 }
-function P125-ReadSnapshot([string]$Label){
+function P125-ReadSnapshot([string]$Label,[switch]$CountsOnly){
     $script:P12Phase=$Label
     $status=P125-Status
     if($status.armed -ne '0' -or $status.active -ne '0'){throw 'P125 table read requires stopped probe'}
-    $rows=@{};$counts=@{};$coverage=@{}
+    $rows=@{};$counts=@{};$coverage=@{};$pageMasks=@{}
     for($cpu=0;$cpu -lt 8;$cpu++){
         $c=P125-Fields (P12-Query "p125_counts$cpu")
         $v=P125-Fields (P12-Query "p125_coverage$cpu")
@@ -79,11 +80,28 @@ function P125-ReadSnapshot([string]$Label){
         $masks=@($v.pages.Split(',')|ForEach-Object {P125-Hex $_})
         if($cs.Count -ne 28 -or $bs.Count -ne 5 -or $ts.Count -ne 14 -or $masks.Count -ne 4){throw 'P125 counter shape mismatch'}
         $counts[$cpu]=$cs
+        $pageMasks[$cpu]=$masks
         $coverage[$cpu]=[pscustomobject]@{Bins=$bs;Kinds=$ts;MapDrop=[uint64]$v.mapdrop}
+    }
+    $usb=@{}
+    foreach($k in @('p6_usb_ticks','p6_usb_connected_ticks','p69_usb_disconnected_ticks')){$usb[$k]=[uint64](P12-Query $k)}
+    $snapshot=[pscustomobject]@{Status=$status;Rows=$rows;Counts=$counts;Coverage=$coverage;Usb=$usb;PageMasks=$pageMasks}
+    if($script:P125Stem){
+        # Write the frozen scalar evidence before any page request. Even if
+        # COM drops later, do not lose IRQ/queue/deadline counters.
+        $snapshot|Export-Clixml -Depth 8 -LiteralPath "$script:P125Stem.$Label.frozen.clixml"
+    }
+    if($CountsOnly){return $snapshot}
+    if(-not $status.ContainsKey('page_lookup') -or $status.page_lookup -ne 'scalar'){
+        throw 'P125 unsafe legacy page resolver; use FrozenSummary or matched P12.5.1 kernel'
+    }
+    for($cpu=0;$cpu -lt 8;$cpu++){
+        $masks=$pageMasks[$cpu]
         for($bank=0;$bank -lt 4;$bank++){
             for($bit=0;$bit -lt 64;$bit++){
                 if(($masks[$bank] -band ([uint64]1 -shl $bit)) -eq 0){continue}
                 $page=$cpu*256+$bank*64+$bit
+                Life-Say "P125 frozen page CPU=$cpu page=$page"
                 [void](P12-Query 'p125_select' "$page")
                 $line=P12-Query 'p125_page'
                 if($line -notmatch "^version=1 page=$page(?:\s|$)"){throw 'P125 stale page cursor'}
@@ -103,9 +121,8 @@ function P125-ReadSnapshot([string]$Label){
             }
         }
     }
-    $usb=@{}
-    foreach($k in @('p6_usb_ticks','p6_usb_connected_ticks','p69_usb_disconnected_ticks')){$usb[$k]=[uint64](P12-Query $k)}
-    return [pscustomobject]@{Status=$status;Rows=$rows;Counts=$counts;Coverage=$coverage;Usb=$usb}
+    if($script:P125Stem){$snapshot|Export-Clixml -Depth 8 -LiteralPath "$script:P125Stem.$Label.complete.clixml"}
+    return $snapshot
 }
 function P125-Sub([uint64]$End,[uint64]$Begin){if($End -lt $Begin){throw 'P125 counter reset or reboot during capture'};return ($End-$Begin)}
 function P125-Delta($Before,$After,[string]$Label,[int]$Mode,[string]$Stem){
@@ -234,14 +251,14 @@ function P125-Phase([string]$Label,[int]$Mode,[int]$Seconds,[string]$Stem,$Befor
 }
 function P125-Run {
     if(-not $Execute){
-        Write-Host 'P12.5 preview: -Execute to measure OFF timer source. Trace=aggregate+detail; UsbCrossover=aggregate+A0/B/A1; OfflineOnly=B; AggregateOnly=aggregate. No automatic cooling wait.'
+        Write-Host 'P12.5 preview: -Execute to measure OFF timer source. Trace=aggregate+detail; UsbCrossover=aggregate+A0/B/A1; OfflineOnly=B; AggregateOnly=aggregate; FrozenSummary=read-only counters; FrozenDump=read-only counters and pages on fixed firmware. No automatic cooling wait.'
         return
     }
     if($env:OS -ne 'Windows_NT'){throw 'Windows serial runner only'}
     if([IO.Ports.SerialPort]::GetPortNames() -notcontains $Port){throw "COM port $Port unavailable"}
     if($ReconnectPort -and $ReconnectPort -notmatch '^COM[0-9]+$'){throw 'ReconnectPort must be COM number'}
     $stem=Join-Path (Get-Location).Path ('putty-S9-p125-timer-'+(Get-Date -Format 'yyyyMMdd-HHmmss'))
-    $raw=$stem+'.log';$errorText=$null
+    $raw=$stem+'.log';$errorText=$null;$script:P125Stem=$stem
     try{
         $script:LifeRaw=[IO.FileStream]::new($raw,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
         P125-Open $Port
@@ -249,6 +266,17 @@ function P125-Run {
         $s=P125-Status
         if($s.armed -ne '0'){throw 'P125 previous probe still armed; bounded expiry required'}
         P125-Symbols $SymbolMap $s.anchor
+        if($Scenario -in @('FrozenSummary','FrozenDump')){
+            # Read-only recovery: do not arm/stop probe, change policy, or
+            # require another OFF window. FrozenSummary is safe for old ABI.
+            $frozen=P125-ReadSnapshot 'RECOVERED' -CountsOnly:($Scenario -eq 'FrozenSummary')
+            $script:P125Report.Add("RECOVERED cumulative_only=1 rows=$($frozen.Rows.Count) start=$($frozen.Status.start) end=$($frozen.Status.end) reason=$($frozen.Status.reason)")
+            Life-Say 'P125 recovered frozen cumulative counters; no new trial'
+            return
+        }
+        if(-not $s.ContainsKey('page_lookup') -or $s.page_lookup -ne 'scalar'){
+            throw 'P125 legacy page resolver refused; use FrozenSummary or matched P12.5.1 kernel'
+        }
         if($script:LifeState -eq 'ON'){
             Life-Say 'P125 press POWER ONCE to turn screen OFF now; no swipe'
             $until=(Life-Now).AddSeconds(25)
@@ -274,7 +302,7 @@ function P125-Run {
         if($null -ne $script:LifeRaw){$script:LifeRaw.Dispose();$script:LifeRaw=$null}
         if(Test-Path -LiteralPath $raw){
             $script:P125Report.Add('STOP='+$(if($errorText){$errorText}else{'COMPLETE'}))
-            $script:P125Report.Add('Nested layers are not additive IRQ counts. Wall samples inclusive, not CPU time. USB link event duration not proof of physical cable or power. Names resolved only for matching live task generation; flags cumulative OR. USB poll deltas include snapshot traffic.')
+            $script:P125Report.Add('Nested layers are not additive IRQ counts. Wall samples inclusive, not CPU time. USB link event duration not proof of physical cable or power. Process names intentionally unresolved by USB readback; retain scalar PID and task generation. Flags cumulative OR. USB poll deltas include snapshot traffic.')
             $script:P125Report|Set-Content -Encoding UTF8 -LiteralPath "$stem.p125-report.txt"
             $script:P12Results|Set-Content -Encoding UTF8 -LiteralPath "$stem.p125-snapshots.txt"
             $script:LifeEvents|Set-Content -Encoding UTF8 -LiteralPath "$stem.events.txt"

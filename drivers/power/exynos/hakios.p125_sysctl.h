@@ -77,7 +77,7 @@ p125_status_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     uint64_t tps=0;
     nanoseconds_to_absolutetime(NSEC_PER_SEC,&tps);
     char buf[480];
-    snprintf(buf,sizeof(buf),"version=1 active=%u armed=%u start=%llu end=%llu now=%llu hz=%llu reason=%u down=%llu up=%llu display_on=%llu anchor=%llx slots=512 rows=2 counters=28 kinds=15 cumulative=1",
+    snprintf(buf,sizeof(buf),"version=1 active=%u armed=%u start=%llu end=%llu now=%llu hz=%llu reason=%u down=%llu up=%llu display_on=%llu anchor=%llx slots=512 rows=2 counters=28 kinds=15 cumulative=1 page_lookup=scalar",
         hakios_p125_active(),(unsigned)(__atomic_load_n(&hakios_p125_lease,__ATOMIC_ACQUIRE)&3u),
         (unsigned long long)__atomic_load_n(&hakios_p125_start,__ATOMIC_ACQUIRE),
         (unsigned long long)__atomic_load_n(&hakios_p125_end,__ATOMIC_ACQUIRE),
@@ -171,27 +171,12 @@ p125_page_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     for(unsigned i=start;i<start+2;i++){
         struct p125_row *r=&hakios_p125_rows[cpu][i];
         if(__atomic_load_n(&r->state,__ATOMIC_ACQUIRE)!=2)continue;
-        char name[24]="-";
-        /* Process resolution only on frozen sysctl read, never IRQ. Verify
-         * task generation, no guessed name for exited/reused PID. */
-        if((r->kind==P125_K_WAIT_ARM || r->kind==P125_K_WAIT_EXPIRE || r->kind==P125_K_WAIT_STALE ||
-            r->kind==P125_K_MK_ARM || r->kind==P125_K_MK_SEND || r->kind==P125_K_MK_CANCEL)
-            && r->owner && r->aux>0 && r->aux<INT32_MAX){
-            proc_t pr=proc_find((int)r->aux);
-            if(pr){
-                if(hakios_p125_task_id(proc_task(pr))==r->owner){
-                    const char *pn=proc_best_name(pr);
-                    if(pn){
-                        unsigned j=0;
-                        for(;j<sizeof(name)-1 && pn[j];j++){
-                            char c=pn[j];name[j]=(c>32 && c<127 && c!='/' && c!=',' && c!='=')?c:'_';
-                        }
-                        name[j]=0;
-                    }
-                }
-                proc_rele(pr);
-            }
-        }
+        /* P12.5.1 USB readback must never take a proc reference, wait
+         * for exec, resolve a live task, allocate, or sleep. USB OUT
+         * rearm/polling is blocked until this synchronous handler returns.
+         * Scalar PID + task generation were captured at the source.
+         * Keep the wire shape; '-' explicitly means name not resolved. */
+        const char *name="-";
 #define R125(F) ((unsigned long long)__atomic_load_n(&r->F,__ATOMIC_RELAXED))
         int n=snprintf(buf+at,sizeof(buf)-(size_t)at," r=%x/%x/%llx/%llx/%llx/%llx/%llx/%llx/%llx/%llx/%llx/%llx/%s",
             i,r->kind,(unsigned long long)r->func,(unsigned long long)r->owner,(unsigned long long)r->aux,

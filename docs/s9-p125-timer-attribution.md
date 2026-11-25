@@ -27,8 +27,16 @@ counters, bounded lookup, no eviction, no IRQ printing or allocations.
 Aggregate vs detail measures observer perturbation. Frozen cursor dumps all
 populated rows. Match the kernel symbol anchor; unknown addresses/names remain
 unknown. Stable kernel thread entry map is bounded and never reuses IDs.
-PID names are looked up only in frozen readback and require task generation
-match; exited processes remain unidentified by name.
+P12.5.1 serial readback is scalar-only (`page_lookup=scalar`): no proc_find,
+proc_task, proc reference, name lookup or sleep inside p125_page. PID/task
+generation and kernel entry symbols are retained, name '-' is unresolved;
+correlate names with independently acquired process logs, not guessed PID reuse.
+The host refuses detailed pages on older firmware. FrozenSummary reads only
+cumulative counters without starting a trial, even on legacy P12.5. FrozenDump
+reads frozen counters and populated pages on fixed firmware. Both require
+probe already stopped. Each snapshot saves a frozen.clixml checkpoint before
+page reads, and complete.clixml after all pages. These are cumulative snapshots,
+not phase deltas unless matched to a previous baseline from the same boot.
 
 IRQ queue services = zero callback services + nonzero callback services.
 Callbacks >= nonzero services; table per-kind totals = recorded + drops.
