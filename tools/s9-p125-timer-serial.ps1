@@ -301,37 +301,75 @@ function P125-PumpOff([int]$Seconds){
         if($script:LifeState -ne 'OFF'){throw 'P125 display woke; stop observation'}
     }
 }
+function P125-PortNames { return [IO.Ports.SerialPort]::GetPortNames() }
+function P125-IsReadDisconnect($Exception){
+    # PowerShell wraps SerialPort.Read() exceptions. A closed port is
+    # expected ONLY while waiting for the explicitly requested unplug.
+    for($e=$Exception;$null -ne $e;$e=$e.InnerException){
+        if($e -is [System.IO.IOException]){return $true}
+        if($e -is [System.InvalidOperationException] -and
+           ($e.Message -match '(?i)port.*(?:closed|not open)' -or
+            ($null -ne $script:LifeSerial -and -not $script:LifeSerial.IsOpen))){return $true}
+    }
+    return $false
+}
 function P125-Offline([int]$WaitSeconds=$TraceSeconds) {
+    $script:P125OfflineTransportLost=$false
     $target=if($ReconnectPort){$ReconnectPort}else{$Port}
+    $source=$Port
     Life-Say 'P125 USB OFFLINE ARMED: disconnect USB now; do NOT wake screen'
     $until=(Life-Now).AddSeconds(20)
-    while([IO.Ports.SerialPort]::GetPortNames() -contains $Port){
+    while((P125-PortNames) -contains $source){
         if((Life-Now) -ge $until){throw 'P125 disconnect not observed; stop probe'}
-        try{Life-Pump;Life-CheckSafety (Life-Now);P12-EarlyThermalGuard}
-        catch [System.IO.IOException]{break}
+        # Do not catch thermal, display or parser errors as link loss.
+        Life-CheckSafety (Life-Now);P12-EarlyThermalGuard
+        if($script:LifeState -ne 'OFF'){throw 'P125 display woke before USB disconnect'}
+        try{Life-Pump}
+        catch{
+            if(-not (P125-IsReadDisconnect $_.Exception)){throw}
+            Life-Say 'P125 serial read lost during requested unplug; verifying COM removal'
+            break
+        }
+        Life-CheckSafety (Life-Now);P12-EarlyThermalGuard
+        if($script:LifeState -ne 'OFF'){throw 'P125 display woke before USB disconnect'}
         Start-Sleep -Milliseconds 100
     }
-    $until=(Life-Now).AddSeconds(5)
-    while([IO.Ports.SerialPort]::GetPortNames() -contains $Port -and (Life-Now) -lt $until){Start-Sleep -Milliseconds 200}
-    if([IO.Ports.SerialPort]::GetPortNames() -contains $Port){throw 'P125 COM did not disappear'}
+    $until=(Life-Now).AddSeconds(10)
+    while((P125-PortNames) -contains $source -and (Life-Now) -lt $until){Start-Sleep -Milliseconds 200}
+    if((P125-PortNames) -contains $source){throw 'P125 COM did not disappear; offline interval not verified'}
     if($null -ne $script:LifeCurrentSegment){$script:LifeCurrentSegment.End=Life-Now}
     $script:LifeCurrentSegment=$null
+    $script:P125OfflineTransportLost=$true
     try{$script:LifeSerial.Dispose()}catch{}
     $script:LifeSerial=$null
     $hostWait=if($Scenario -eq 'OfflineABA'){$WaitSeconds+5}else{$WaitSeconds}
     Life-Say "P125 host COM disconnected; keep unplugged $hostWait seconds"
     $until=(Life-Now).AddSeconds($hostWait)
     while((Life-Now) -lt $until){
-        if([IO.Ports.SerialPort]::GetPortNames() -contains $target){throw 'P125 reconnected early; offline phase invalid'}
+        $ports=@(P125-PortNames)
+        if($ports -contains $source -or $ports -contains $target){throw 'P125 reconnected early; offline phase invalid'}
         Start-Sleep -Milliseconds 250
     }
     Life-Say "P125 RECONNECT USB NOW to $target; keep screen OFF"
     $until=(Life-Now).AddSeconds(25)
-    while([IO.Ports.SerialPort]::GetPortNames() -notcontains $target){
-        if((Life-Now) -ge $until){throw 'P125 reconnect timeout; kernel probe lease self-expires'}
+    # Enumeration can precede a usable device handle. Retry only
+    # opening the exact requested COM, never re-arm or resend a policy.
+    $opened=$false
+    while((Life-Now) -lt $until){
+        if((P125-PortNames) -contains $target){
+            try{P125-Open $target;$opened=$true;break}
+            catch{
+                $retry=$false
+                for($e=$_.Exception;$null -ne $e;$e=$e.InnerException){
+                    if($e -is [System.IO.IOException] -or $e -is [System.UnauthorizedAccessException]){$retry=$true;break}
+                }
+                if($null -ne $script:LifeSerial){try{$script:LifeSerial.Dispose()}catch{};$script:LifeSerial=$null}
+                if(-not $retry){throw}
+            }
+        }
         Start-Sleep -Milliseconds 250
     }
-    P125-Open $target
+    if(-not $opened){throw 'P125 reconnect timeout; kernel probe lease self-expires'}
     $script:Port=$target
     $script:LifePartial='';$script:LifeSynced=$false;$script:LifeFenceSent=$false;$script:LifeFenceEcho=$false
     $script:LifeState='UNKNOWN';$script:LifeScene='UNKNOWN'
@@ -366,6 +404,12 @@ function P12752-ReadIdle([string]$Stem,[string]$Label,$status){
     # caller decides whether to stop the A/B/A.
     return $summary
 }
+function P125-RejoinMatches($Armed,$Rejoined){
+    return ($Rejoined.anchor -eq $Armed.anchor -and $Rejoined.hz -eq $Armed.hz -and
+        [uint64]$Rejoined.now -gt [uint64]$Armed.now -and
+        [uint64]$Rejoined.start -ge [uint64]$Armed.now -and
+        $Rejoined.down -eq $Rejoined.start -and $Rejoined.down -ne '0')
+}
 function P125-Phase([string]$Label,[int]$Mode,[int]$Seconds,[string]$Stem,$Before,[switch]$CountsOnly,[switch]$OfflineAggregate){
     $script:P12Phase=$Label;$script:P125Dirty=$true
     if($P12752Idle){
@@ -377,7 +421,28 @@ function P125-Phase([string]$Label,[int]$Mode,[int]$Seconds,[string]$Stem,$Befor
     [void](P12-Query 'p125_mode' "$Mode")
     $armed=P125-Status
     if([int]$armed.armed -ne $Mode){throw 'P125 mode arm not verified'}
-    if($Mode -eq 3){P125-Offline}else{P125-PumpOff $Seconds}
+    if($Mode -eq 3){
+        $script:P125OfflineTransportLost=$false
+        try{
+            P125-Offline
+            # The live fence is not enough to prove the original kernel phase.
+            # Check the arm identity before any write on the re-opened port.
+            $rejoined=P125-Status
+            if(-not (P125-RejoinMatches $armed $rejoined)){
+                throw 'P125 reconnected kernel/phase identity mismatch; old lease bounded, raw retained'
+            }
+            $script:P125Report.Add("P125 REJOIN verified start=$($rejoined.start) down=$($rejoined.down) up=$($rejoined.up) reason=$($rejoined.reason)")
+        }catch{
+            if($script:P125OfflineTransportLost){
+                # Never send restore commands to an unverified new session.
+                # Preserve dirty flags as unconfirmed; close transport so
+                # the outer cleanup cannot write to this unknown boot.
+                if($null -ne $script:LifeSerial){try{$script:LifeSerial.Dispose()}catch{};$script:LifeSerial=$null}
+                Life-Say 'P125 offline rejoin unverified; no restore ACK, original kernel leases bounded'
+            }
+            throw
+        }
+    }else{P125-PumpOff $Seconds}
     [void](P12-Query 'p125_mode' '0' -Cleanup)
     $script:P125Dirty=$false
     P125-PumpOff 2

@@ -46,3 +46,61 @@ try{
  Check ($raw.samples -eq 1 -and $raw.processes[0] -eq 'PosterBoard' -and $raw.layout_lines -eq 1 -and $raw.memory_lines -eq 1 -and $raw.lifecycle_lines -eq 1) 'raw evidence parser'
 }finally{Remove-Item -LiteralPath $dir -Recurse -Force}
 Write-Host 'P12752 host shapes/refusals/idle identity/cutoff/raw evidence mocks PASS; no serial I/O'
+
+# Run the real P125-Offline control flow using an unopened .NET SerialPort.
+# Windows can raise a wrapped InvalidOperationException before enumeration
+# removes COM125. No physical serial handle is opened by these tests.
+function Test-OfflineTransport([string]$Case){
+    $script:fakeCase=$Case;$script:fakeAt=[datetime]::UtcNow
+    $script:fakeList=0;$script:fakeRead=0;$script:fakeOpen=0;$script:fakeFence=0
+    $script:fakeReconnect=$false;$script:fakeLost=$false
+    $script:LifeSerial=[IO.Ports.SerialPort]::new()
+    $script:LifeState='OFF';$script:LifeCurrentSegment=$null
+    $Port='COM125';$ReconnectPort='COM126';$Scenario='Idle52Offline'
+    function Life-Now {$script:fakeAt=$script:fakeAt.AddSeconds(1);return $script:fakeAt}
+    function Start-Sleep {param([int]$Milliseconds)}
+    function Life-Say([string]$Message){if($Message -match 'RECONNECT USB NOW'){$script:fakeReconnect=$true}}
+    function Life-CheckSafety([datetime]$At){if($script:fakeCase -eq 'hot'){throw 'synthetic thermal stop'}}
+    function P12-EarlyThermalGuard{}
+    function P125-PortNames{
+        $script:fakeList++
+        if($script:fakeReconnect){
+            if($script:fakeCase -ne 'timeout'){return 'COM126'}
+            return
+        }
+        if($script:fakeCase -eq 'stuck' -or $script:fakeList -le 3){return 'COM125'}
+        if($script:fakeCase -eq 'early' -and $script:fakeList -ge 7){return 'COM125'}
+    }
+    function Life-Pump{
+        $script:fakeRead++
+        if($script:fakeCase -eq 'parser'){throw 'synthetic malformed telemetry'}
+        $buf=New-Object byte[] 16
+        # Read() on a closed port raises the exact .NET exception class.
+        [void]$script:LifeSerial.Read($buf,0,$buf.Length)
+    }
+    function P125-Open([string]$Name){
+        if($Name -ne 'COM126'){throw 'wrong COM reopened'}
+        $script:fakeOpen++
+        if($script:fakeOpen -eq 1){throw [System.IO.IOException]::new('synthetic enumeration race')}
+        $script:LifeSerial=[IO.Ports.SerialPort]::new()
+    }
+    function Life-SyncReadOnly{$script:fakeFence++;$script:LifeState='OFF'}
+    try{
+        switch($Case){
+            'ok'{P125-Offline 6;Check ($script:fakeRead -eq 1 -and $script:fakeOpen -eq 2 -and $script:fakeFence -eq 1) 'offline reopen/fence failed'}
+            'hot'{Refuse {P125-Offline 6} 'thermal stop';Check ($script:fakeRead -eq 0 -and $script:fakeOpen -eq 0) 'thermal error swallowed'}
+            'parser'{Refuse {P125-Offline 6} 'malformed telemetry';Check ($script:fakeOpen -eq 0) 'parser error swallowed'}
+            'stuck'{Refuse {P125-Offline 6} 'COM did not disappear';Check ($script:fakeOpen -eq 0) 'false unplug accepted'}
+            'early'{Refuse {P125-Offline 6} 'reconnected early';Check ($script:fakeOpen -eq 0) 'early reconnect accepted'}
+            'timeout'{Refuse {P125-Offline 6} 'reconnect timeout';Check ($script:fakeOpen -eq 0) 'unrequested port opened'}
+        }
+    }finally{if($null -ne $script:LifeSerial){$script:LifeSerial.Dispose();$script:LifeSerial=$null}}
+}
+foreach($case in @('ok','hot','parser','stuck','early','timeout')){Test-OfflineTransport $case}
+$arm=@{anchor='abcd';hz='26000000';now='1000'}
+$end=@{anchor='abcd';hz='26000000';now='5000';start='1200';down='1200'}
+Check (P125-RejoinMatches $arm $end) 'valid offline rejoin rejected'
+$end.anchor='dcba';Check (-not (P125-RejoinMatches $arm $end)) 'wrong kernel accepted'
+$end.anchor='abcd';$end.start='900';$end.down='900';Check (-not (P125-RejoinMatches $arm $end)) 'old phase accepted'
+$end.start='1200';$end.down='0';Check (-not (P125-RejoinMatches $arm $end)) 'missing disconnect accepted'
+Write-Host 'P12752 real offline flow: closed Read, delayed COM removal, reopen retry, live fence, thermal/parser refusal, early/timeout and phase identity PASS (no physical serial)'
