@@ -32,6 +32,7 @@ p126_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     if(e || req->newptr==USER_ADDR_NULL)return e;
     if(v<0 || v>(int)P126_MASK)return EINVAL;
     if(!v){hakios_p126_stop(0);return 0;}
+    if(__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE))return EBUSY;
     if(__atomic_load_n(&hakios_p126_lease,__ATOMIC_ACQUIRE) || hakios_p127_mode())return EBUSY;
     if(p125_thermal_reason())return EPERM;
     uint64_t span=0;
@@ -245,7 +246,9 @@ p1273_trace_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__u
     if(error || req->newptr==USER_ADDR_NULL)return error;
     if(v!=0 && v!=1)return EINVAL;
     uint64_t now=mach_absolute_time();
+    if(__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE))return EBUSY;
     if(!v){hakios_p1273_trace_stop(0,now);return 0;}
+    if(__atomic_load_n(&hakios_p1274_trace_late,__ATOMIC_ACQUIRE))return EBUSY;
     int enabled=0;
     if(!PE_parse_boot_argn("p1273",&enabled,sizeof(enabled)) || enabled!=1 ||
        !gov_running || p125_thermal_reason())return EPERM;
@@ -385,6 +388,7 @@ static unsigned p1273_cap_guard(uint64_t now)
 {
     unsigned reason=p125_thermal_reason();
     if(reason)return reason;
+    if(__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE))return 6;
     if(!gov_running || gov_policy!=2 || clusters[0].online!=4 || clusters[1].online!=4 ||
         hakios_cpu_exit_mask || big_cores!=SCION_BIG_CORES ||
         __atomic_load_n(&p12_cpu_mode,__ATOMIC_ACQUIRE) ||
@@ -619,7 +623,8 @@ p1273_gate_idle(void)
 {
     unsigned trace=__atomic_load_n(&hakios_p1273_trace_state,__ATOMIC_ACQUIRE);
     unsigned cap=__atomic_load_n(&p1273_cap_state,__ATOMIC_ACQUIRE);
-    return !__atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE) &&
+    return !__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE) &&
+        !__atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE) &&
         !__atomic_load_n(&hakios_p126_lease,__ATOMIC_ACQUIRE) &&
         !__atomic_load_n(&hakios_p125_lease,__ATOMIC_ACQUIRE) &&
         !__atomic_load_n(&p124_cpu_until,__ATOMIC_ACQUIRE) &&
@@ -832,6 +837,7 @@ p127_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     if(e || req->newptr==USER_ADDR_NULL)return e;
     if(v<0 || v>(int)P127_MASK || P127_FLOOR(v)>5)return EINVAL;
     if(!v){hakios_p127_stop(0);return 0;}
+    if(__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE))return EBUSY;
     if(!(v&P127_BASE))return EINVAL;
     /* Only exact combined masks can pass the same-boot gate. */
     unsigned extras=(unsigned)v&~(P127_BASE|0x70u);
@@ -1193,6 +1199,7 @@ p125_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     if(e || req->newptr==USER_ADDR_NULL)return e;
     if(v<0 || v>3)return EINVAL;
     if(!v){p125_finish(0);return 0;}
+    if(__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE))return EBUSY;
     if(__atomic_load_n(&hakios_p125_lease,__ATOMIC_ACQUIRE))return EBUSY;
     if(p125_thermal_reason())return EPERM;
     const unsigned us[]={100,500,1000,10000};

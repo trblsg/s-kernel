@@ -16,6 +16,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdbool.h>
+#include "p1274_user.h"
 
 /* libproc's, which the iPhoneOS SDK does not declare (XNU's bsd/sys/proc_info.h, libsyscall/wrappers/libproc) */
 #define PROC_ALL_PIDS           1
@@ -54,6 +56,18 @@ struct sample {
 
 static struct sample last[MAX_PROCS], now[MAX_PROCS];
 static int last_count;
+/* Poll-observed lifetime, not a launchd/DAS decision or exact spawn hook.
+ * Names are mapped to stable scalar categories, never sent as free text. */
+static unsigned p1274_process_code(const char *name)
+{
+    const char *names[]={"PosterBoard","CollectionsPoster","EmojiPosterExtension","WeatherPoster",
+        "PridePosterExtension","GradientPosterExtension","PhotosPosterProvider","UnityPosterExtension",
+        "ExtragalacticPoster","healthappd","DayStreamProces","HistoricalAnaly","dasd","runningboardd",
+        "backboardd","SpringBoard","launchd","healthd","filecoordinationd","chronod","wifid","locationd"};
+    for(unsigned i=0;i<sizeof(names)/sizeof(names[0]);i++)
+        if(!strcmp(name,names[i]) || ((i==10 || i==11 || i==16) && !strncmp(name,names[i],strlen(names[i]))))return i+1;
+    return strstr(name,"Poster")?23u:0u;
+}
 
 struct share {
 	int pid;
@@ -112,10 +126,21 @@ main(int argc, char **argv)
 		}
 		if (look > 0) {
 			int n = 0;
+			const bool p1274_observe=p1274_user_mode()>=0;
 
 			for (int i = 0; i < count; i++) {
 				int found;
 				uint64_t then = time_before(now[i].pid, &found);
+				if(p1274_observe && (!found || now[i].time>then)){
+					char name[64]={0};
+					if(proc_name(now[i].pid,name,sizeof(name))>0){
+						unsigned code=p1274_process_code(name);
+						if(code && (!found || now[i].time>then))
+							(void)p1274_emit(4,code,(uint64_t)now[i].pid,
+							    now[i].time>=then?now[i].time-then:0,now[i].time,
+							    found?0:1,at-before,at);
+					}
+				}
 
 				if (now[i].time > then) {
 					shares[n].pid = now[i].pid;

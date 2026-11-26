@@ -41,6 +41,8 @@ $script:P12ReadAttempts=1
 $script:P12Journal=''
 $script:P1272HostEnabled=$false
 $script:P1273HostEnabled=$false
+$script:P1274HostEnabled=$false
+$script:P1274ProfileAllowed=$false
 $script:P1273GateAllowed=$false
 $script:P1273CombinedAllowed=$false
 $script:P1272ProbeLines=New-Object 'System.Collections.Generic.List[string]'
@@ -88,7 +90,7 @@ function P12-ReplyShape([string]$Name,[string]$Reply,[bool]$Mixed){
         p127_ticker='wait due wake'
         p127_fg_seq='seq slots'
     }
-    if($Name -match '^(?:p125_(?:mode|select)|p126_mode|p127_mode|p1272_probe_request|p1273_trace_(?:mode|select)|p1273_gpu_select|p1273_gov_select|p1273_cap_mode|p1273_offline_s|p1273_gate_(?:begin|review|ack)|p6_usb_(?:ticks|connected_ticks)|p69_usb_disconnected_ticks)$'){
+    if($Name -match '^(?:p125_(?:mode|select)|p126_mode|p127_mode|p1272_probe_request|p1273_trace_(?:mode|select)|p1273_gpu_select|p1273_gov_select|p1273_cap_mode|p1273_offline_s|p1274_profile|p1274_select|p1273_gate_(?:begin|review|ack)|p6_usb_(?:ticks|connected_ticks)|p69_usb_disconnected_ticks)$'){
         $n=[uint64]0
         return ($Reply -cmatch "^$dec$" -and [uint64]::TryParse($Reply,[ref]$n))
     }
@@ -114,6 +116,20 @@ function P12-ReplyShape([string]$Name,[string]$Reply,[bool]$Mixed){
         }
         '^p127_fg([0-9]|1[0-5])$' {
             $page=$Matches[1];return ($Reply -cmatch "^version=1 page=$page(?: r=$dec/$dec/-?$dec/-?$dec/$dec/[01]/$dec/$dec){0,4}$")
+        }
+        '^p1274_metal_log_mode$' {return ($Reply -cmatch '^(?:-1|0|2)$')}
+        '^p1274_restore$' {return ($Reply -cmatch "^version=1 state=[0-3] profile=[0-9] cores=[0-4] actual=$hex requested=$hex fast=$dec online=$dec exit=$hex display=-?[0-2]$")}
+        '^p1274_status$' {
+            return ($Reply -cmatch "^version=1 state=[012] profile=[0-9] now=$dec$" -or
+                $Reply -cmatch "^version=1 state=3 profile=[1-9] start=$dec end=$dec planned=$dec reason=$dec rows=$dec fg=$dec events=$dec drops=$dec rate_events=$dec rate_drops=$dec bigmask=$hex litmask=$hex trigger_bits=$dec burst_start=$dec burst_end=$dec measure_ok=$dec measure_bad=$dec measure_skip=$dec usb_down=$dec usb_up=$dec$")
+        }
+        '^p1274_page$' {
+            return ($Reply -cmatch "^version=1 select=$dec kind=1 at=$dec tmu_at=$dec measured_at=$dec direct=-?$dec peak=-?$dec lit=-?$dec gpu=-?$dec slope=-?$dec bp=$dec lp=$dec ba=$dec la=$dec bs=$dec ls=$dec bsp=$dec lsp=$dec bkhz=$dec lkhz=$dec bcap=$dec fast=$dec measured=$dec online=$dec recommended=$hex requested=$hex display=[012] profile=[0-9]$" -or
+                $Reply -cmatch "^version=1 select=$dec kind=2 seq=$dec at=$dec ua=-?$dec avg=-?$dec uv=$dec external=[01] charger=$dec qh=$dec$" -or
+                $Reply -cmatch "^version=1 select=$dec kind=3 at=$dec pid=$dec task=$dec tid=$dec event=[1-5] a=$dec b=$dec c=$dec d=$dec e=$dec f=$dec g=$dec$" -or
+                $Reply -cmatch "^version=1 select=$dec kind=4 present=[01] bin=$dec at=$dec tmu_at=$dec bp=$dec lp=$dec ba=$dec la=$dec bs=$dec ls=$dec bsp=$dec lsp=$dec bkhz=$dec lkhz=$dec direct=-?$dec peak=-?$dec$" -or
+                $Reply -cmatch "^version=1 select=$dec kind=5 cpu=[0-7] n=$dec ticks=$dec$" -or
+                $Reply -cmatch "^version=1 select=$dec kind=6 at=$dec began=$dec tmu_at=$dec type=[12] from=$dec to=$dec cap=$dec asked=[01] error=-?$dec mc=-?$dec$")
         }
         '^p1273_gate_status$' {return ($Reply -cmatch "^version=1 phase=[0-3] mode=$dec generation=$dec qualified=$dec missing=$dec lease=$dec expiry=$dec faults=$dec$")}
         '^p1273_gate_(active|post)$' {
@@ -220,6 +236,9 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
         $allowed+=@('p1273_floor','p1273_psr','p1273_cap_mode','p1273_cap_status','p1273_offline_s','p1273_offline_status','p1273_boot_identity','p1273_gate_status','p1273_gate_begin','p1273_gate_review','p1273_gate_ack','p1273_gate_active','p1273_gate_post','p1273_trace_mode','p1273_trace_status','p1273_trace_select','p1273_trace_page','p1273_gpu_status','p1273_gpu_select','p1273_gpu_page','p1273_gov_select','p1273_gov_page')+(0..7|ForEach-Object {"p1273_bus$_";"p1273_wfi$_";"p1273_trace_cpu$_"})
         if($Name -like 'p1273_*' -and $Name -notin @('p1273_trace_mode','p1273_trace_select','p1273_gpu_select','p1273_gov_select','p1273_cap_mode','p1273_offline_s','p1273_gate_begin','p1273_gate_review','p1273_gate_ack') -and $Value -ne ''){throw "P12.7.3 telemetry is read-only: $Name"}
     }
+    if($script:P1274HostEnabled){
+        $allowed+=@('p1274_profile','p1274_status','p1274_restore','p1274_select','p1274_page','p1274_metal_log_mode')
+    }
     if($Name -notin $allowed){throw "P12 sysctl disallowed $Name"}
     if($script:P124HostEnabled -and $Name -eq 'p1231_hash_mode' -and $Value -eq '1'){throw 'P12.4 rejects scalar thermal trial'}
     if($Value -ne '' -and -not (
@@ -230,6 +249,9 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
         ($script:P123HostEnabled -and $Name -eq 'p1231_hash_mode' -and $Value -in @('0','1','2')) -or
         ($script:P123HostEnabled -and $script:P123ClockAllowed -and $Name -eq 'hi_cmd' -and $Value -eq '252') -or
         ($script:P1272HostEnabled -and $Name -eq 'p1272_probe_request' -and $Value -in @('0','1')) -or
+        ($script:P1274HostEnabled -and $Name -eq 'p1274_profile' -and $Value -eq '0') -or
+        ($script:P1274HostEnabled -and $script:P1274ProfileAllowed -and $Name -eq 'p1274_profile' -and $Value -match '^[1-9]$') -or
+        ($script:P1274HostEnabled -and $Name -eq 'p1274_select' -and $Value -match '^\d{1,4}$' -and [int]$Value -le 5007) -or
         ($script:P1273HostEnabled -and $Name -eq 'p1273_gate_begin' -and $Value -eq '0') -or
         ($script:P1273HostEnabled -and $script:P1273GateAllowed -and $Name -eq 'p1273_gate_begin' -and $Value -in @('3','5','17','129','257','513','903','919')) -or
         ($script:P1273HostEnabled -and $script:P1273GateAllowed -and $Name -in @('p1273_gate_review','p1273_gate_ack') -and $Value -match '^[1-9]\d{0,9}$' -and [uint64]$Value -le 99999999) -or
@@ -256,6 +278,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
     if($script:P127HostEnabled){$restore+='p127_mode'}
     if($script:P1272HostEnabled){$restore+='p1272_probe_request'}
     if($script:P1273HostEnabled){$restore+=@('p1273_trace_mode','p1273_cap_mode','p1273_offline_s','p1273_gate_begin')}
+    if($script:P1274HostEnabled){$restore+='p1274_profile'}
     $clockStop=(($script:P123ClockAllowed -or $script:P124ClockAllowed) -and $script:P123HostEnabled -and $Name -eq 'hi_cmd' -and $Value -eq '201')
     if($Cleanup -and -not $clockStop -and ($Name -notin $restore -or $Value -ne '0')){
         throw 'P12.1/P12.2 Cleanup bypass is reserved for bounded restore-to-zero writes only'

@@ -28,6 +28,34 @@ uint64_t hakios_p127_irq[8][3],hakios_p127_wifi[5],hakios_p127_bt[6],hakios_p127
 uint32_t hakios_p127_audio_event;
 struct p127_fg_row hakios_p127_fg_rows[P127_FG_SLOTS];
 uint64_t hakios_p127_fg_seq;
+uint64_t hakios_p1274_deadline,hakios_p1274_fg_seq;
+uint64_t hakios_p1274_usb_down,hakios_p1274_usb_up,hakios_p1274_display_on_at;
+uint64_t hakios_p1274_wfi_n[8],hakios_p1274_wfi_ticks[8];
+uint32_t hakios_p1274_trace_late,hakios_p1274_writers;
+struct p127_fg_row hakios_p1274_fg_rows[P1274_FG_SLOTS];
+static bool p1274_live(uint64_t now) {
+    uint64_t end=__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_SEQ_CST);
+    return end && now<end;
+}
+static bool p1274_writer_enter(uint64_t now) {
+    __atomic_fetch_add(&hakios_p1274_writers,1,__ATOMIC_SEQ_CST);
+    if(p1274_live(now))return true;
+    __atomic_fetch_sub(&hakios_p1274_writers,1,__ATOMIC_SEQ_CST);return false;
+}
+static void p1274_writer_leave(void){__atomic_fetch_sub(&hakios_p1274_writers,1,__ATOMIC_SEQ_CST);}
+static void p1274_fg_record(int32_t ua,int32_t avg_ua,uint32_t uv,unsigned external,unsigned charger,unsigned qh)
+{
+    uint64_t now=mach_absolute_time();
+    if(!p1274_live(now) || !p1274_writer_enter(now))return;
+    uint64_t seq=__atomic_load_n(&hakios_p1274_fg_seq,__ATOMIC_RELAXED)+1;
+    if(seq>P1274_FG_SLOTS){p1274_writer_leave();return;} /* never overwrite, explicit coverage */
+    struct p127_fg_row *r=&hakios_p1274_fg_rows[seq-1];
+    r->ticks=now;r->ua=ua;r->avg_ua=avg_ua;r->uv=uv;
+    r->external=external;r->charger=charger;r->qh=qh;
+    __atomic_store_n(&r->seq,seq,__ATOMIC_RELEASE);
+    __atomic_store_n(&hakios_p1274_fg_seq,seq,__ATOMIC_RELEASE);
+    p1274_writer_leave();
+}
 /* The recount hook executes with interrupts disabled: one writer per CPU.
  * Freeze never waits on a writer. The reader claims frozen state and checks
  * inflight before touching plain ring storage. No pointer is retained. */
@@ -160,6 +188,7 @@ done:
 }
 void hakios_p127_fg_record(int32_t ua,int32_t avg_ua,uint32_t uv,unsigned external,unsigned charger,unsigned qh)
 {
+    p1274_fg_record(ua,avg_ua,uv,external,charger,qh);
     if(!hakios_p127_mode() || !hakios_p125_active())return;
     uint64_t seq=__atomic_load_n(&hakios_p127_fg_seq,__ATOMIC_RELAXED)+1;
     struct p127_fg_row *r=&hakios_p127_fg_rows[(seq-1)%P127_FG_SLOTS];
@@ -269,6 +298,13 @@ hakios_p125_active(void)
 void hakios_p125_usb_event(unsigned connected)
 {
     hakios_p1273_event(connected?P1273_USB_UP:P1273_USB_DOWN,1);
+    if(p1274_live(mach_absolute_time()) && p1274_writer_enter(mach_absolute_time())){
+        uint64_t zero=0,at=mach_absolute_time();
+        uint64_t *slot=connected?&hakios_p1274_usb_up:&hakios_p1274_usb_down;
+        if(!connected || __atomic_load_n(&hakios_p1274_usb_down,__ATOMIC_ACQUIRE))
+            (void)__atomic_compare_exchange_n(slot,&zero,at,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);
+        p1274_writer_leave();
+    }
     uint64_t v=__atomic_load_n(&hakios_p125_lease,__ATOMIC_ACQUIRE);
     if((v&3u)!=3u){
         /* Planned fixed capture freezes before reconnect. Retain the
@@ -308,6 +344,11 @@ void hakios_p125_usb_event(unsigned connected)
 }
 void hakios_p125_display_event(unsigned on)
 {
+    if(on && p1274_live(mach_absolute_time()) && p1274_writer_enter(mach_absolute_time())){
+        uint64_t zero=0,at=mach_absolute_time();
+        (void)__atomic_compare_exchange_n(&hakios_p1274_display_on_at,&zero,at,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);
+        p1274_writer_leave();
+    }
     if(on){hakios_p126_stop(4);hakios_p127_stop(4);}
     if(on)hakios_p1273_trace_stop(4,mach_absolute_time());
     if(on && (__atomic_load_n(&hakios_p125_lease,__ATOMIC_ACQUIRE)&3u))

@@ -115,6 +115,7 @@ static int p8_big_cap_sysctl(__unused struct sysctl_oid *oid,__unused void *a,
     if(value!=0 && value!=1469000 && value!=1586000 && value!=1690000)
         return EINVAL;
     if(value && !__atomic_load_n(&gov_running,__ATOMIC_ACQUIRE))return ENODEV;
+    if(value && __atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE))return EBUSY;
     __atomic_store_n(&p8_big_cap_khz,(uint32_t)value,__ATOMIC_RELEASE);
     say("p8: thermal_cap_big_khz=%d lower_only=1 voltage_unchanged=1\n",value);
     return 0;

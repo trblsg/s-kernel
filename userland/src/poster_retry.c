@@ -38,6 +38,7 @@
 #include <string.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
+#include "p1274_user.h"
 
 /* libproc's, which the iPhoneOS SDK does not declare (as in cputop.c) */
 #define PROC_ALL_PIDS   1
@@ -134,6 +135,7 @@ main(int argc, char **argv)
 	if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && (at = strstr(args, "poster_retry=")) != NULL) {
 		mode = atoi(at + strlen("poster_retry="));
 	}
+	(void)p1274_emit(5,mode,0,0,0,0,1,0); /* start, if lease already active */
 	if (mode == 0) {
 		printf("poster_retry: off (poster_retry=0)\n");
 		return 0;
@@ -150,6 +152,7 @@ main(int argc, char **argv)
 			continue;
 		}
 		count = posters(list, sizeof(list));
+		(void)p1274_emit(5,mode,board,count,tries,waited,count>=2?2:3,0);
 		/* Do not disturb healthy widgets just because a poster check was scheduled. */
 		if ((mode == 3 || (mode == 2 && count < 2)) && !chronod_done) {
 			int chronod = find("chronod");
@@ -158,6 +161,7 @@ main(int argc, char **argv)
 			if (chronod != 0) {
 				printf("poster_retry: chronod[%d] restarted for widget timelines (poster_retry=%d, posters=%d)\n",
 				    chronod, mode, count);
+				(void)p1274_emit(5,mode,chronod,count,tries,waited,4,0);
 				stop(chronod, "chronod");
 			}
 		} else if (mode == 2 && count >= 2) {
@@ -177,10 +181,12 @@ main(int argc, char **argv)
 		printf("poster_retry: PosterBoard[%d] has none of its posters %d s into the run (load %.2f; %d:%s): they were killed "
 		    "at launchd's 5 s check-in deadline; restarting it (%d of %d)\n", board, waited, load(), count,
 		    count ? list : " none", tries, TRIES);
+		(void)p1274_emit(5,mode,board,count,tries,waited,5,0);
 		stop(board, "PosterBoard");
 		not_before = waited + RECOVER;
 		quiet_by = not_before + QUIET_WAIT / 3;
 	}
+	(void)p1274_emit(5,mode,0,0,tries,limit,6,0);
 	printf("poster_retry: no PosterBoard within %d s; nothing done\n", limit);
 	return 0;
 }

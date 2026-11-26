@@ -60,6 +60,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "../hakios_metal_shown.h"
+#include "../p1274_user.h"
 
 #if __has_feature(objc_arc)
 #error "HakiosMetalVK.mm keeps its device by hand: build it without ARC"
@@ -224,7 +225,12 @@ openDevice(SEL why)
 
 	char from[512];
 
+	struct p1274_stage waitStage=p1274_stage_begin();
 	pthread_mutex_lock(&gLock);
+	if(waitStage.at && mach_absolute_time()-waitStage.at>0) {
+		/* One event for the opener, not every forwarding waiter. */
+		if(gState==LAZY && gDevice!=nil)p1274_stage_end(waitStage,1,1);
+	}
 	if (gState != LAZY || gDevice == nil) {
 		pthread_mutex_unlock(&gLock);
 		return;
@@ -238,17 +244,30 @@ openDevice(SEL why)
 		snprintf(gWhy, sizeof(gWhy), "this bundle's own path is not known");
 	} else {
 		strlcpy(slash + 1, OPENER, sizeof(path) - (size_t)(slash + 1 - path));
-		if ((opener = dlopen(path, RTLD_NOW | RTLD_LOCAL)) == NULL) {
+		struct p1274_stage loadStage=p1274_stage_begin();
+		opener=dlopen(path, RTLD_NOW | RTLD_LOCAL);
+		p1274_stage_end(loadStage,2,opener!=NULL);
+		if (opener == NULL) {
 			snprintf(gWhy, sizeof(gWhy), "%s", dlerror() ?: path);
-		} else if ((open = (Opener)dlsym(opener, "hakios_metal_vk_open")) == NULL) {
-			snprintf(gWhy, sizeof(gWhy), "%s has no hakios_metal_vk_open", path);
-		} else if (open(gDevice, gRegistryID, sayLine, gWhy, sizeof(gWhy))) {
+		} else {
+			struct p1274_stage symbolStage=p1274_stage_begin();
+			open=(Opener)dlsym(opener, "hakios_metal_vk_open");
+			p1274_stage_end(symbolStage,3,open!=NULL);
+			if(open==NULL){
+				snprintf(gWhy,sizeof(gWhy),"%s has no hakios_metal_vk_open",path);
+			}else{
+				struct p1274_stage runtimeStage=p1274_stage_begin();
+				bool opened=open(gDevice,gRegistryID,sayLine,gWhy,sizeof(gWhy));
+				p1274_stage_end(runtimeStage,4,opened);
+				if(opened){
 			stopForwarding();
 			gState = OPEN;
 			gPreviousPreprocessor = objc_setExceptionPreprocessor(sayException);
 			say("the device is opened, at -%s, in %llu ms: %s", sel_getName(why), nowMs() - began, gWhy);
 			pthread_mutex_unlock(&gLock);
 			return;
+				}
+			}
 		}
 	}
 	gState = FAILED;

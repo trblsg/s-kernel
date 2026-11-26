@@ -144,6 +144,18 @@ SECURITY_READ_ONLY_LATE(int)    master_cpu = 0;
 
 struct processor        PERCPU_DATA(processor);
 processor_t             processor_array[MAX_SCHED_CPUS] = { 0 };
+/* P12.7.4 read-only point sample, no scheduler lock or policy writes.
+ * Cross-core mask is diagnostic, not an atomic scheduler transaction. */
+uint32_t hakios_p1274_recommended_mask(void);
+uint32_t hakios_p1274_recommended_mask(void)
+{
+    uint32_t mask=0;
+    for(unsigned i=0;i<8 && i<MAX_SCHED_CPUS;i++){
+        processor_t p=processor_array[i];
+        if(p && p->is_recommended)mask|=1u<<i;
+    }
+    return mask;
+}
 processor_set_t         pset_array[MAX_PSETS] = { 0 };
 
 static timer_call_func_t running_timer_funcs[] = {

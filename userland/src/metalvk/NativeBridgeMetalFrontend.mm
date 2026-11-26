@@ -33,6 +33,7 @@
 #include <unistd.h>
 #include "bridge/NativeMetalObjects.h"   // Scion: tools/metal/bridge/ (the build gives -I tools/metal)
 #include "NativeBridgeMetalFrontend.h"
+#include "../p1274_user.h"
 #import <QuartzCore/CAMetalLayer.h>
 
 extern "C" void sys_dcache_flush(void *start, size_t length);
@@ -318,7 +319,9 @@ static bool p1273LogDue(std::atomic<uint64_t>& next,uint64_t now) {
  return now>=old && next.compare_exchange_strong(old,now+1000000,std::memory_order_relaxed);
 }
 static void p1273Unsupported(unsigned selector,bool baselinePrint,NSString *message,void *caller,MTLTextureDescriptor *d,bool backed) {
- const int mode=p1273LogMode();
+ const int envMode=p1273LogMode();
+ const int liveMode=envMode<0?p1274_user_mode():-1;
+ const int mode=envMode>=0?envMode:liveMode;
  if(mode<0) {if(baselinePrint)NBLOG(@"%@",message);return;}
  P1273LogStats &s=p1273LogStats[selector];
  const uint64_t start=nowUs(),n=++s.calls;
@@ -327,11 +330,18 @@ static void p1273Unsupported(unsigned selector,bool baselinePrint,NSString *mess
  const uint64_t fmtCount=++s.format[bucket];
  const bool firstFormat=fmtCount==1 && ++s.distinct<=16;
  if(baselinePrint){
-  if(mode==0 || p1273LogDue(s.nextPrint,start)){NBLOG(@"%@",message);s.printed++;}
+  if(mode==0 || (mode==1 && p1273LogDue(s.nextPrint,start))){NBLOG(@"%@",message);s.printed++;}
   else s.suppressed++;
  }
  s.elapsedUs+=nowUs()-start;
- if(n==64 || p1273LogDue(s.nextReport,start)){
+ if(n==1 || n==64 || p1273LogDue(s.nextReport,start)){
+  if(liveMode>=0){
+   uint64_t dims=((uint64_t)(uint32_t)d.width<<32)|(uint32_t)d.height;
+   uint64_t flags=((uint64_t)(uint16_t)d.textureType<<48)|((uint64_t)(uint16_t)d.storageMode<<32)|
+                  ((uint64_t)(uint16_t)d.mipmapLevelCount<<16)|(backed?1u:0u);
+   (void)p1274_emit(selector+1,n,s.printed.load(),s.suppressed.load(),s.elapsedUs.load(),fmt,dims,flags);
+  }
+  if(mode!=2){
   NBSAY(@"native-metal-p1273: mode=%d selector=%u pid=%d tid=%u ticks=%llu calls=%llu printed=%llu suppressed=%llu elapsed_us=%llu",
    mode,selector,getpid(),threadIdLow(),(unsigned long long)mach_absolute_time(),
    (unsigned long long)n,(unsigned long long)s.printed.load(),
@@ -340,13 +350,19 @@ static void p1273Unsupported(unsigned selector,bool baselinePrint,NSString *mess
    selector,getpid(),(unsigned long long)mach_absolute_time(),(unsigned long)fmt,
    (unsigned long long)fmtCount,(unsigned long long)s.distinct.load(),(unsigned long)d.width,(unsigned long)d.height,
    (unsigned long)d.textureType,(unsigned long)d.mipmapLevelCount,backed?1:0,(unsigned long)d.storageMode);
+  }
  }
- if(firstFormat)NBSAY(@"native-metal-p1273-first-format: selector=%u pid=%d format=%lu depth=%lu array=%lu samples=%lu",
+ if(firstFormat && mode!=2)NBSAY(@"native-metal-p1273-first-format: selector=%u pid=%d format=%lu depth=%lu array=%lu samples=%lu",
     selector,getpid(),(unsigned long)fmt,(unsigned long)d.depth,(unsigned long)d.arrayLength,(unsigned long)d.sampleCount);
  if(n==1){
   Dl_info at={};
-  if(dladdr(caller,&at))NBSAY(@"native-metal-p1273: selector=%u first-caller=%s+0x%llx",
-   selector,at.dli_fname?at.dli_fname:"unknown",(unsigned long long)((uintptr_t)caller-(uintptr_t)at.dli_fbase));
+  if(dladdr(caller,&at)){
+   uint64_t offset=(uintptr_t)caller-(uintptr_t)at.dli_fbase;
+   if(liveMode>=0)(void)p1274_emit(3,20+selector,0,UINT64_MAX,1,0,
+       at.dli_fname && strstr(at.dli_fname,"ImageIO")?1:0,offset);
+   if(mode!=2)NBSAY(@"native-metal-p1273: selector=%u first-caller=%s+0x%llx",
+    selector,at.dli_fname?at.dli_fname:"unknown",(unsigned long long)offset);
+  }
  }
 }
 static std::atomic<uint64_t> gSaidSurfaceTextures,gBufferPresents,gDrawablePresents,gBigLoads,gBigLoadBytes,gBigLoadUs;
@@ -2273,7 +2289,8 @@ static void p1273LayoutPlan(MTLTextureDescriptor *d,unsigned selector,bool backe
  NBFence *fence=[NBFence new];fence.handle=handle;return (id<MTLFence>)fence;
 }
 - (id<MTLCommandQueue>)newCommandQueue {
- NmbQueue *handle=nmb_queue_new(gDevice);if(!handle)return nil;
+ struct p1274_stage t=p1274_stage_begin();
+ NmbQueue *handle=nmb_queue_new(gDevice);p1274_stage_end(t,6,handle!=nullptr);if(!handle)return nil;
  NBQueue *queue=[NBQueue new];queue.handle=handle;return (id<MTLCommandQueue>)queue;
 }
 - (id<MTLHeap>)newHeapWithDescriptor:(MTLHeapDescriptor *)d {
@@ -2669,10 +2686,18 @@ static void fillBaseLimits(id object) {
 }
 
 // Scion: the runtime's device, opened once per process (the first half of what native_bridge_metal_open did).
+static thread_local struct p1274_stage p1274OpenStages[2];
+static void p1274OpenObserver(uint32_t stage,uint32_t begin,uint32_t success) {
+ if(stage<7 || stage>8)return;
+ if(begin)p1274OpenStages[stage-7]=p1274_stage_begin();
+ else p1274_stage_end(p1274OpenStages[stage-7],stage,success);
+}
 static bool openRuntimeDevice(const char *loader,const char *cache,uint64_t registryID,void (*missing)(const char *,const char *)) {
  if(gDevice)return true;
  gMissing=missing;gInFlight=[NSMutableSet set];
- gDevice=nmb_device_open(loader,cache);
+ struct p1274_stage t=p1274_stage_begin();
+ gDevice=t.at?nmb_device_open_observed(loader,cache,p1274OpenObserver):nmb_device_open(loader,cache);
+ p1274_stage_end(t,5,gDevice!=nullptr);
  if(!gDevice){NBLOG(@"native-metal: device refused: %s",nmb_last_error());return false;}
  gLoaderPath=loader;
  if(cache){gJournalPath=std::string(cache)+"/pipelines.log";gJournalBegan=nowUs();}

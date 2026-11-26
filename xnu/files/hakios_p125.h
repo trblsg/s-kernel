@@ -94,6 +94,14 @@ extern uint32_t hakios_p1273_last_stop_reason;
 struct p127_fg_row {uint64_t seq,ticks; int32_t ua,avg_ua; uint32_t uv,external,charger,qh;};
 extern struct p127_fg_row hakios_p127_fg_rows[P127_FG_SLOTS];
 extern uint64_t hakios_p127_fg_seq;
+/* Standalone bounded P12.7.4 observer: independent of P125/P127 leases.
+ * One run/boot; shared deadline checked by each producer, no rearm. */
+#define P1274_FG_SLOTS 64u
+extern uint64_t hakios_p1274_deadline,hakios_p1274_fg_seq;
+extern uint64_t hakios_p1274_usb_down,hakios_p1274_usb_up,hakios_p1274_display_on_at;
+extern uint64_t hakios_p1274_wfi_n[8],hakios_p1274_wfi_ticks[8];
+extern uint32_t hakios_p1274_trace_late,hakios_p1274_writers;
+extern struct p127_fg_row hakios_p1274_fg_rows[P1274_FG_SLOTS];
 /* P12.7.3 bounded recount trace. State 0 empty, 1 preparing, 2 active,
  * 3 freezing, 4 frozen, 5 reader owns frozen storage. No policy writes. */
 #define P1273_TRACE_BUCKETS 128u

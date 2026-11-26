@@ -170,6 +170,16 @@ pub unsafe extern "C" fn nmb_host_copies(out: *mut u64) {
 /// `loader` and `cache` are C strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nmb_device_open(loader: *const c_char, cache: *const c_char) -> *mut NmbDevice {
+    // SAFETY: same caller contract.
+    unsafe { nmb_device_open_observed(loader, cache, None) }
+}
+
+/// # Safety
+/// Same C strings as nmb_device_open. The optional callback must not unwind
+/// and is invoked synchronously on the calling thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nmb_device_open_observed(loader: *const c_char, cache: *const c_char,
+    observer: Option<extern "C" fn(u32,u32,u32)>) -> *mut NmbDevice {
     guard(std::ptr::null_mut(), || {
         if loader.is_null() || cache.is_null() {
             return Err("loader and cache are required".into());
@@ -178,7 +188,10 @@ pub unsafe extern "C" fn nmb_device_open(loader: *const c_char, cache: *const c_
         let (loader, cache) = unsafe { (CStr::from_ptr(loader), CStr::from_ptr(cache)) };
         let mut options = DeviceOptions::default();
         // Scion: `loader` is a Vulkan driver (an ICD) by path; the runtime opens this library in its place (icd.rs).
-        options.loader = Some(crate::icd::select(loader)?);
+        if let Some(f) = observer { f(7,1,0); }
+        let selected = crate::icd::select(loader);
+        if let Some(f) = observer { f(7,0,selected.is_ok() as u32); }
+        options.loader = Some(selected?);
         options.metal_level = Some(MetalLevel::NEWEST);
         options.shader_cache = metal2vulkan_runtime::ShaderCacheOptions::in_directory(cache.to_string_lossy().into_owned());
         options.messages = Some(MessageSink::new(observe_message));
@@ -199,7 +212,10 @@ pub unsafe extern "C" fn nmb_device_open(loader: *const c_char, cache: *const c_
         // degradation once (`degradations.log`).
         options.announce_each.insert(metal2vulkan_runtime::Degradation::ShadowedTexture);
         let _ = NOTICE_DIR.set(PathBuf::from(cache.to_string_lossy().into_owned()));
-        Ok(boxed(NmbDevice(Device::system_default_with(&options).map_err(e("device"))?, std::sync::OnceLock::new(), std::sync::Mutex::new(()))))
+        if let Some(f) = observer { f(8,1,0); }
+        let device = Device::system_default_with(&options);
+        if let Some(f) = observer { f(8,0,device.is_ok() as u32); }
+        Ok(boxed(NmbDevice(device.map_err(e("device"))?, std::sync::OnceLock::new(), std::sync::Mutex::new(()))))
     })
 }
 

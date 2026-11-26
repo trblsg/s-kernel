@@ -28,6 +28,9 @@ jobs:
           node tools/tests/test-p126-contract.js
           node tools/tests/test-p127-contract.js
           node tools/tests/test-p1273-contract.js
+          node tools/tests/test-p1274-contract.js
+          cc -std=c11 -Wall -Wextra -Werror -O2 tools/tests/test_s9_p1274_policy.c -o /tmp/s9-p1274-policy
+          /tmp/s9-p1274-policy
           cc -std=c11 -Wall -Wextra -Werror -O2 tools/tests/test_s9_p1273_gate.c -o /tmp/s9-p1273-gate
           /tmp/s9-p1273-gate
           cc -std=c11 -Wall -Wextra -Werror -O2 userland/tests/test_s9_texture_layout.c -o /tmp/s9-texture-layout
@@ -141,6 +144,7 @@ jobs:
             'tools/tests/test-s9-p1272-gpu-cache.ps1',
             'tools/tests/test-s9-p1273-telemetry.ps1',
             'tools/tests/test-s9-p1273-gate.ps1',
+            'tools/tests/test-s9-p1274-serial.ps1',
             'tools/tests/test-s9-p11-lifecycle-serial.ps1',
             'tools/tests/test-s9-p10-lockscreen-source.ps1',
             'tools/tests/test-s9-p10-serial-harness.ps1',
@@ -173,6 +177,8 @@ jobs:
           xcrun clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
             -fobjc-arc -fblocks -Wno-deprecated-declarations \
             -fsyntax-only userland/src/metal_test.m
+          xcrun clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=gnu11 -fsyntax-only userland/src/cputop.c userland/src/poster_retry.c
           # eagl.c depends on the generated Mesa/EAGL slot table, built
           # by userland/build.sh in the paired installer. Do not falsely
           # report a standalone syntax pass with a missing/stub table.

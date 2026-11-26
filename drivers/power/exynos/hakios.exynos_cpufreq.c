@@ -535,6 +535,7 @@ p12_cpu_mode_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
 	int e = sysctl_io_number(req, v, sizeof(v), &v, NULL);
 	if (e || req->newptr == USER_ADDR_NULL) return e;
 	if (v < 0 || v > 1) return EINVAL;
+	if(v && __atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE))return EBUSY;
 	__atomic_store_n(&p12_cpu_mode, (uint32_t)v, __ATOMIC_RELEASE);
 	__atomic_store_n(&p12_frame_streak, 0, __ATOMIC_RELEASE);
 	say("p12-cpu: mode=%d optional_target=70%% stock_target=60%% "
@@ -734,6 +735,7 @@ policy_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused in
 	if (value < 1 || value > 4) {
 		return EINVAL;
 	}
+	if(__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE))return EBUSY;
 	gov_policy = (uint32_t)value;
 	say("cpufreq_gov: policy %d now (kern.hakios.gov_policy)\n", value);
 	return 0;
@@ -968,6 +970,8 @@ big_busy(const struct cluster *c)
 	return n == 0 ? 1 : n;
 }
 
+#include "hakios.p1274_lab.h"
+
 static uint32_t
 ceiling_now(struct cluster *c)
 {
@@ -1013,6 +1017,7 @@ ceiling_now(struct cluster *c)
 		if (p8_cap != 0) max = MIN(max,p8_cap); /* P8 explicit lower-only A/B */
 	}
 	max=p1273_cap_ceiling(c,max);
+	max=p1274_ceiling(c,max);
 	return c->levels[level_at_most(c, max)];
 }
 
@@ -1180,6 +1185,7 @@ p124_cpu_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     if(err || req->newptr==USER_ADDR_NULL)return err;
     if(v<0 || v>4)return EINVAL;
     if(!v){__atomic_store_n(&p124_cpu_until,0,__ATOMIC_RELEASE);return 0;}
+    if(__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE))return EBUSY;
     if(p124_cpu_active(now))return EBUSY;
     unsigned why=p124_cpu_refusal(true,(unsigned)v,now);
     __atomic_store_n(&p124_cpu_reason,why,__ATOMIC_RELAXED);
@@ -1392,6 +1398,7 @@ set_rate(struct cluster *c, uint32_t khz, uint32_t max)
 			say("cpufreq_gov: %s: asked %u kHz: the APM did not answer (%d); the rate stays %u kHz\n", c->name, khz, e,
 			    c->cur);
 		}
+		p1274_dvfs_record(c,began,khz,max,e);
 		return;
 	}
 	if (c->changes < ANSWERS_LOGGED) {
@@ -1410,6 +1417,7 @@ set_rate(struct cluster *c, uint32_t khz, uint32_t max)
 			read_back(c, c->levels[lower]);
 		}
 	}
+	p1274_dvfs_record(c,began,khz,max,0);
 	took = mach_absolute_time() - began;
 	nums.acpm_n++;
 	nums.acpm_sum += took;
@@ -1535,10 +1543,13 @@ cores_set(uint32_t cores, uint64_t now)
 	if (cores == big_cores) {
 		return;
 	}
-	if (cores > big_cores && b->cur > scion_limit(&scion_soc, cores)) {
-		set_rate(b, scion_limit(&scion_soc, cores), scion_limit(&scion_soc, cores));
-		if (b->cur > scion_limit(&scion_soc, cores)) {
-			return;
+	if (cores > big_cores) {
+		uint32_t restore_limit=scion_limit(&scion_soc,cores);
+		if(__atomic_load_n(&p1274_state,__ATOMIC_ACQUIRE))
+			restore_limit=MIN(restore_limit,ceiling_now(b));
+		if(b->cur>restore_limit){
+			set_rate(b,restore_limit,restore_limit);
+			if(b->cur>restore_limit)return;
 		}
 	}
 	for (unsigned int i = 0; i < topology->num_cpus && i < MAX_CPUS; i++) {
@@ -1547,6 +1558,7 @@ cores_set(uint32_t cores, uint64_t now)
 		}
 	}
 	sched_perfcontrol_update_recommended_cores(mask);
+	p1274_requested(cores,mask);
 	if (cores < big_cores) {
 		few_since = now;
 	} else {
@@ -1565,8 +1577,9 @@ decide_scion(struct cluster *c, uint64_t now, uint32_t window)
 		int32_t mc = hakios_exynos_tmu_zone_now_mc(c->tmu_zone);
 
 		dev_state_update(now);
-		cores_set(gov_policy != 3 || !temp_fresh(c) || !scion_temp_ok(mc, 0) || c->thermal != 0 ? SCION_BIG_CORES :
-		    scion_cores(&park, &scion_soc, big_cores, c->core_load, clusters[0].load, c->cur, mc, window), now);
+		uint32_t stock_cores=gov_policy != 3 || !temp_fresh(c) || !scion_temp_ok(mc, 0) || c->thermal != 0 ? SCION_BIG_CORES :
+		    scion_cores(&park, &scion_soc, big_cores, c->core_load, clusters[0].load, c->cur, mc, window);
+		cores_set(p1274_cores(stock_cores,now), now);
 		if (gov_policy == 4) {
 			uint32_t late = __atomic_exchange_n(&frames_late, 0, __ATOMIC_RELAXED);
 			uint32_t on_time = __atomic_exchange_n(&frames_on_time, 0, __ATOMIC_RELAXED);
@@ -1834,7 +1847,9 @@ summary(uint64_t seconds)
 	bool touched, framed;
 
 	l->measured = measure_mhz(l);
-	b->measured = measure_mhz(b);
+	bool skip_big=p1274_skip_big_measure();
+	b->measured = skip_big?0:measure_mhz(b);
+	p1274_measure_sample(mach_absolute_time(),skip_big);
 	p1273_measured_sample(mach_absolute_time());
 	temp_text(tb, sizeof(tb), b->temp_mc);
 	temp_text(tl, sizeof(tl), l->temp_mc);
@@ -1910,7 +1925,9 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 			ramp_check(mach_absolute_time());
 		}
 		measure(now - then > 0 ? now - then : 1);
-		p1273_trace_tick(now); /* existing governor window, no additional timer */
+		p1274_tick(now); /* bounded direct TMU, recorder and lower-only OFF policy */
+		if(!__atomic_load_n(&hakios_p1274_trace_late,__ATOMIC_ACQUIRE))
+			p1273_trace_tick(now); /* existing legacy governor window */
 		p1273_cap_tick(now); /* lower-only, bounded, explicit OFF experiment */
 		p4_cpu_probe(now); /* on-demand 5s read-only, no new kernel thread */
 		p7_cpu_probe(now); /* P7 ring captures USB-disconnected samples */
@@ -1935,6 +1952,7 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 		}
 		decide(&clusters[0], now, (uint32_t)span_ms);
 		decide(&clusters[1], now, (uint32_t)span_ms);
+		if(p1274_pending_finish){unsigned reason=p1274_pending_finish;p1274_pending_finish=0;p1274_finish(reason,mach_absolute_time());}
 		ramp_check(now);
 		if (log_seconds != 0 && now - last_log >= log_every) {
 			last_log = now;

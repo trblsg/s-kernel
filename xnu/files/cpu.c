@@ -693,7 +693,8 @@ cpu_idle(void)
 		/* P12: wrap only the already existing architectural idle opcode.
 		 * Sampling is opt-in because even two timestamps cost energy. */
 		uint64_t p12_began = 0;
-		if ((p12_probe || p127_probe) && p12_id < 8)
+        uint64_t p1274_end=__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE);
+		if ((p12_probe || p127_probe || p1274_end) && p12_id < 8)
 			p12_began = mach_absolute_time();
 #if HAS_RETENTION_STATE
 		arm64_retention_wfi();
@@ -703,6 +704,13 @@ cpu_idle(void)
 		if (p12_began && p12_id < 8) {
 			uint64_t p12_ended = mach_absolute_time();
 			if (p12_ended >= p12_began) {
+                if(p1274_end && p12_began<p1274_end &&
+                    p1274_writer_enter(p12_began)){
+                    uint64_t end=p12_ended<p1274_end?p12_ended:p1274_end;
+                    __atomic_fetch_add(&hakios_p1274_wfi_n[p12_id],1,__ATOMIC_RELAXED);
+                    __atomic_fetch_add(&hakios_p1274_wfi_ticks[p12_id],end-p12_began,__ATOMIC_RELAXED);
+                    p1274_writer_leave();
+                }
 				if(p127_probe && p127_start==__atomic_load_n(&hakios_p125_start,__ATOMIC_ACQUIRE))hakios_p127_wfi(p12_id,p12_ended-p12_began);
 				if(p12_probe){
 				__atomic_fetch_add(&hakios_p12_wfi_entries[p12_id], 1, __ATOMIC_RELAXED);

@@ -38,6 +38,10 @@ const void *nmb_function_constant_air(size_t *length);
 /* loader: a library exporting vkGetInstanceProcAddr (Turnip on the tablet). cache: a writable directory for translated shaders. */
 /* Scion: loader is a Vulkan driver (ICD) by path, exporting vk_icdGetInstanceProcAddr or vkGetInstanceProcAddr; one per process (icd.rs). */
 NmbDevice *nmb_device_open(const char *loader, const char *cache);
+/* Optional synchronous same-thread stage hooks: 7 ICD select, 8 runtime
+ * Device::system_default_with. begin=1 before; begin=0 after with success. */
+typedef void (*NmbOpenObserver)(uint32_t stage, uint32_t begin, uint32_t success);
+NmbDevice *nmb_device_open_observed(const char *loader, const char *cache, NmbOpenObserver observer);
 /* Scion: the driver in use, its entry and its negotiated loader-ICD interface version, as one line; the line's length. */
 size_t nmb_icd_describe(char *out, size_t size);
 /* Scion: what the runtime's copies of no-copy buffers it could not import moved (tools/metal/m2v/0002): bytes in, bytes out,

@@ -2235,7 +2235,7 @@ mali_submit_observed(uint64_t chain, bool fragment,struct p1273_wake_info *obs)
 		obs->end=mach_absolute_time();
 		obs->success=on;
 #if P1273_GPU_TRACE
-		if(obs->attempted && on && __atomic_load_n(&hakios_p1273_trace_state,__ATOMIC_ACQUIRE)==2){
+		if(obs->attempted && on && !__atomic_load_n(&hakios_p1274_trace_late,__ATOMIC_ACQUIRE) && __atomic_load_n(&hakios_p1273_trace_state,__ATOMIC_ACQUIRE)==2){
 			uint64_t zero=0;
 			(void)__atomic_compare_exchange_n(&hakios_p1273_trace_trigger,&zero,obs->begin,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);
 		}
