@@ -1,10 +1,11 @@
 #requires -Version 5.1
 [CmdletBinding()]
 param(
- [ValidateSet('Capture','Dump','Analyze','WakeCheck','Compare')][string]$Action='Capture',
+ [ValidateSet('Capture','Dump','Analyze','WakeCheck','Compare','NextBoot')][string]$Action='Capture',
  [ValidateSet('BASE','LOG2','FAST','B1','B2','B3','R2','R1','R0')][string]$Profile='BASE',
  [ValidateSet('Connected','Offline')][string]$Power='Connected',
  [ValidateSet('Legacy','Observe','Early','Load','EarlyLoad','Coord','Lazy','Combined','CombinedLazy')][string]$Experiment='Legacy',
+ [ValidateSet('Any','Stock','Opt','StockEarly','OptEarly')][string]$BootVariant='Any',
  [ValidatePattern('^COM[0-9]+$')][string]$Port='COM125',
  [string]$ReconnectPort='', [string]$RunDir='', [string]$PriorReport='',
  [string[]]$CompareDirs=@(), [ValidateRange(16,512)][int]$MaxPages=96,
@@ -12,12 +13,13 @@ param(
 )
 Set-StrictMode -Version 2
 $ErrorActionPreference='Stop'
-$opts=@{Action=$Action;Profile=$Profile;Power=$Power;Experiment=$Experiment;Port=$Port;ReconnectPort=$ReconnectPort;RunDir=$RunDir;PriorReport=$PriorReport;CompareDirs=$CompareDirs;MaxPages=$MaxPages;AllowIntervention=[bool]$AllowIntervention;AllowOffline=[bool]$AllowOffline;ConfirmForeground=[bool]$ConfirmForeground;Execute=[bool]$Execute;LibraryOnly=[bool]$LibraryOnly}
+$opts=@{Action=$Action;Profile=$Profile;Power=$Power;Experiment=$Experiment;BootVariant=$BootVariant;Port=$Port;ReconnectPort=$ReconnectPort;RunDir=$RunDir;PriorReport=$PriorReport;CompareDirs=$CompareDirs;MaxPages=$MaxPages;AllowIntervention=[bool]$AllowIntervention;AllowOffline=[bool]$AllowOffline;ConfirmForeground=[bool]$ConfirmForeground;Execute=[bool]$Execute;LibraryOnly=[bool]$LibraryOnly}
 . (Join-Path $PSScriptRoot 's9-p125-timer-serial.ps1') -LibraryOnly -Port $Port -ReconnectPort $ReconnectPort
 $script:P1273HostEnabled=$true;$script:P1274HostEnabled=$true
 $script:P1274ProfileAllowed=$false
 $ids=@{BASE=1;LOG2=2;FAST=3;B1=4;B2=5;B3=6;R2=7;R1=8;R0=9}
 $experimentIds=@{Legacy=0;Observe=1;Early=2;Load=3;EarlyLoad=4;Coord=5;Lazy=9;Combined=8;CombinedLazy=16}
+$variantIds=@{Stock=0;Opt=1;StockEarly=2;OptEarly=3}
 $script:budget=$opts.MaxPages
 $script:dirty=$false
 $script:P12741Deadline=720
@@ -69,10 +71,42 @@ function P12741-LiveGuard{
 function P12741-RequireRevision{
  if((P12-Query 'p12741_revision') -ne '2'){throw 'P1274.1 host/firmware mismatch'}
 }
+function P12751-CheckBoot([int]$expected=-1){
+ if((P12-Query 'p12751_revision') -ne '1'){throw 'P12751 revision mismatch'}
+ $latch=[int](P12-Query 'p12751_boot_latch')
+ if($latch -lt 0 -or $latch -gt 7){throw 'P12751 PID1 latch missing; do not assume optimized driver'}
+ if($expected -ge 0 -and ($latch -band 3) -ne $expected){throw "P12751 boot variant mismatch: latch=$latch expected=$expected"}
+ return $latch
+}
+function P12751-NextBoot($meta){
+ if(-not $opts.AllowIntervention -or $opts.BootVariant -eq 'Any'){throw 'NextBoot requires explicit -BootVariant and -AllowIntervention'}
+ [void](Read-Frozen $meta)
+ [void](P12741-LiveGuard)
+ $latch=P12751-CheckBoot
+ if(($latch -band 4) -eq 0){throw 'Persistent data volume not proven; next boot selection refused'}
+ $want=$variantIds[$opts.BootVariant]
+ $script:P12751NextAllowed=$true
+ try{[void](P12-Query 'p12751_next' "$want")}finally{$script:P12751NextAllowed=$false}
+ $until=(Life-Now).AddSeconds(25);$ack=-1
+ do{
+  [void](P12741-LiveGuard)
+  $ack=[int](P12-Query 'p12751_ack')
+  if($ack -eq $want){break}
+  $pace=(Life-Now).AddSeconds(1)
+  while((Life-Now) -lt $pace){Life-Pump;Life-CheckSafety (Life-Now);P12-EarlyThermalGuard}
+ }while((Life-Now) -lt $until)
+ if($ack -ne $want){throw 'Next boot persistence not acknowledged; do not reboot assuming new variant'}
+ if((P12751-CheckBoot) -ne $latch){throw 'Unexpected live latch change'}
+ Save-Json ([pscustomobject]@{nonce=$meta.nonce;current_latch=$latch;next=$want;variant=$opts.BootVariant;ack=$ack;utc=[DateTime]::UtcNow.ToString('o')}) (Join-Path $opts.RunDir 'nextboot.json')
+ Life-Say "NEXT BOOT persisted $($opts.BootVariant). Current driver unchanged. Reboot manually only when cool."
+}
 function Read-Frozen($meta){
  if($meta.version -ne 2){throw 'P1274.1 requires revision 2 capture; use original kit for older logs'}
  P12741-RequireRevision
  [void](Check-Identity $meta)
+ if($meta.PSObject.Properties['p12751_latch'] -and [int]$meta.p12751_latch -ge 0){
+  if((P12751-CheckBoot) -ne [int]$meta.p12751_latch){throw 'P12751 frozen boot latch mismatch'}
+ }
  if($meta.PSObject.Properties['p1275_mode'] -and [int]$meta.p1275_mode){
   if((P12-Query 'p1275_revision') -ne '1' -or [int](P12-Query 'p1275_selected') -ne [int]$meta.p1275_mode){throw 'P1275 firmware/mode mismatch'}
  }
@@ -106,6 +140,7 @@ function Restore-Sample {
 }
 function Check-Prior{
  $p=$opts.Profile
+ if($opts.BootVariant -ne 'Any' -and ($opts.Experiment -eq 'Legacy' -or $p -ne 'LOG2' -or $opts.Power -ne 'Connected')){throw 'P12751 Capture needs LOG2 Connected and a P1275 experiment'}
  if($opts.Experiment -ne 'Legacy'){
   if($p -ne 'LOG2' -or $opts.Power -ne 'Connected'){throw 'P1275 experiments require LOG2 Connected'}
   if($opts.Experiment -ne 'Observe' -and -not $opts.AllowIntervention){throw 'P1275 experimental mode requires -AllowIntervention'}
@@ -122,6 +157,8 @@ function Check-Prior{
 function Capture{
  Check-Prior
  P12741-RequireRevision
+ $latch=-1
+ if($opts.BootVariant -ne 'Any'){$latch=P12751-CheckBoot $variantIds[$opts.BootVariant]}
  if($opts.Experiment -ne 'Legacy' -and (P12-Query 'p1275_revision') -ne '1'){throw 'P1275 revision mismatch'}
  $s=P125-Status;$n=P125-Fields (P12-Query 'p1273_boot_identity')
  if($s.armed -ne '0' -or $s.active -ne '0'){throw 'P125 lease active'}
@@ -137,7 +174,7 @@ function Capture{
  if($g.domain -ne '0' -or $g.pll -ne '0' -or $g.fault -ne '0'){throw 'GPU OFF proof missing'}
  $s=P125-Status
  if([double]$s.now/[double]$s.hz -ge 220){throw 'Arm too late; fresh boot required (arm before 225s)'}
- $meta=[pscustomobject]@{version=2;nonce=$n.nonce;hz=$s.hz;anchor=$s.anchor;profile=$opts.Profile;power=$opts.Power;experiment=$opts.Experiment;p1275_mode=$experimentIds[$opts.Experiment];utc=[DateTime]::UtcNow.ToString('o');arm_now=$s.now}
+ $meta=[pscustomobject]@{version=2;nonce=$n.nonce;hz=$s.hz;anchor=$s.anchor;profile=$opts.Profile;power=$opts.Power;experiment=$opts.Experiment;p1275_mode=$experimentIds[$opts.Experiment];p12751_latch=$latch;p12751_variant=$opts.BootVariant;utc=[DateTime]::UtcNow.ToString('o');arm_now=$s.now}
  Save-Json $meta (Join-Path $opts.RunDir 'capture.json')
  $script:dirty=$true;$script:P1274ProfileAllowed=$true
  try{
@@ -186,6 +223,22 @@ function Dump($meta){
   Commit-Page $cache $file $n $line
  }
  [void](Restore-Sample)
+ $p12751=$meta.PSObject.Properties['p12751_latch'] -and [int]$meta.p12751_latch -ge 0
+ if($p12751){
+  $stageInfo=P12-Query 'p12751_stage_info';$si=P125-Fields $stageInfo
+  if($si.sealed -ne '1'){throw 'P12751 pending stage completion window: cool, resume Dump on same boot'}
+  if([int]$si.count -gt 512 -or [int]$si.done -gt [int]$si.count){throw 'P12751 stage count invalid'}
+  Stable-Line (Join-Path $opts.RunDir 'p12751-stage-info.txt') $stageInfo
+  $sf=Join-Path $opts.RunDir 'p12751-stage-pages.txt';$sc=Page-Cache $sf 'p12751_stage_page' 'select'
+  function Read-P51([int]$n){
+   if($n -lt 0 -or $n -ge [int]$si.count){throw 'P12751 stage cursor outside frozen coverage'}
+   $line=Get-Page $sc $sf 'p12751_stage_select' 'p12751_stage_page' 'select' $n;$v=P125-Fields $line
+   if([uint64]$v.at -gt [uint64]$s.end -or ([uint64]$v.end -ne 0 -and ([uint64]$v.end -lt [uint64]$v.at -or [uint64]$v.end -gt ([uint64]$s.end+10*[uint64]$meta.hz))) -or (($v.ok -eq '2') -ne ($v.end -eq '0'))){throw 'P12751 stage outside boot/capture/tail'}
+   Commit-Page $sc $sf $n $line
+  }
+  $stageFocus=P12-Query 'p12751_stage_focus';Stable-Line (Join-Path $opts.RunDir 'p12751-stage-focus.txt') $stageFocus
+  foreach($hit in [regex]::Matches($stageFocus,' s=(\d+)')){Read-P51 ([int]$hit.Groups[1].Value)}
+ }
  # First batch contains immutable peak, episode headers and high-value
  # pages. Do not spend the first several batches on exhaustive owner rows.
  foreach($i in (Range-N 5100 ([int]$info.episodes))){Read-P4 $i 7}
@@ -273,8 +326,34 @@ function Dump($meta){
    }
   }
   }
-  # Obtain a single closest BIG bin before the exhaustive scalar streams.
-  if([uint64]$t.trigger){
+  function Read-OwnerFair($bandSlots){
+   $bcpus=@($order|Where-Object {($big -band ([uint64]1 -shl $_)) -ne 0})
+   $lcpus=@($order|Where-Object {($big -band ([uint64]1 -shl $_)) -eq 0})
+   $fair=@(for($i=0;$i -lt 4;$i++){$bcpus[$i];$lcpus[$i]})
+   foreach($slot in $bandSlots){
+    $masks=@{};$bins=@{}
+    for($p=0;$p -lt 8;$p++){
+     foreach($cpu in $fair){
+      $m=$cpuMasks[$cpu]
+      if(-not ($m[[int][Math]::Floor($slot/64)] -band ([uint64]1 -shl ($slot%64)))){continue}
+      if($p -gt 0 -and -not ($masks[$cpu] -band (3 -shl ($p*2)))){continue}
+      $sel=$cpu*1024+$slot*8+$p
+      $line=Get-Page $tc $tf 'p1273_trace_select' 'p1273_trace_page' 'select' $sel
+      $v=P125-Fields $line
+      if($v.generation -ne $t.generation -or $v.present -ne '1' -or ([uint64]$v.bin%128) -ne $slot){throw 'Fair trace page mismatch'}
+      if($p -eq 0){$masks[$cpu]=P125-Hex $v.mask;$bins[$cpu]=$v.bin}
+      $mask=$masks[$cpu]
+      if((P125-Hex $v.mask) -ne $mask -or $v.bin -ne $bins[$cpu] -or $mask -gt 65535){throw 'Fair trace bucket mismatch'}
+      $expected=0;foreach($i in 0,1){if($mask -band (1 -shl ($p*2+$i))){$expected++}}
+      if(([regex]::Matches($line,' r=')).Count -ne $expected){throw 'Fair trace owner coverage mismatch'}
+      Commit-Page $tc $tf $sel $line
+     }
+    }
+   }
+  }
+  # Obtain a single closest BIG bin before the exhaustive scalar streams (legacy).
+  if($p12751){Read-OwnerFair @($slots|Select-Object -First 2)}
+  elseif([uint64]$t.trigger){
    $near=@($slots|Where-Object {
     $slot=$_;$covered=$false
     foreach($cpu in $order){
@@ -284,12 +363,13 @@ function Dump($meta){
    }|Select-Object -First 1)
    if($near.Count){Read-OwnerBand $near @('BIG')}
   }
-  if($p1275){
+  if($p1275 -and -not $p12751){
    # A few nearby bins on both clusters before long scalar remainder.
    Read-OwnerBand @($slots|Select-Object -First 4) @('BIG','LITTLE')
   }
+  if($p12751){foreach($i in (Range-N 0 ([int]$si.count))){Read-P51 $i}}
   Read-ScalarRemainder
-  Read-OwnerBand $slots @('BIG','LITTLE')
+  if($p12751){Read-OwnerFair $slots}else{Read-OwnerBand $slots @('BIG','LITTLE')}
   $n=[uint64]$g.completed;$first=[Math]::Max(1,[double]$n-1023)
   for($i=[uint64]$first;$i -le $n;$i++){
    $slot=[int](($i-1)%1024)
@@ -297,7 +377,7 @@ function Dump($meta){
    if([uint64]$v.seq -ne $i -or $v.generation -ne $t.generation -or [uint64]$v.queued -gt [uint64]$v.began -or [uint64]$v.began -gt [uint64]$v.ended){throw 'GPU page mismatch'}
    Commit-Page $gc $gp $slot $line
   }
- }else{Read-ScalarRemainder}
+ }else{if($p12751){foreach($i in (Range-N 0 ([int]$si.count))){Read-P51 $i}};Read-ScalarRemainder}
  [void](Read-Frozen $meta)
  [void](Restore-Sample)
  Set-Content -Encoding UTF8 -LiteralPath (Join-Path $opts.RunDir 'dump.complete') -Value $meta.nonce
@@ -378,9 +458,29 @@ function Analyze-Run([string]$dir){
  foreach($name in $tables.Keys){
   $data=@($tables[$name]);if($data.Count){$data|ForEach-Object {[pscustomobject]$_}|Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath (Join-Path $dir ($name+'.csv'))}
  }
+ $stage51Coverage=$null;$stage51Count=$null;$stage51Done=$null;$stage51Drops=$null
+ $variant=if($m.PSObject.Properties['p12751_variant']){$m.p12751_variant}else{'Any'}
+ $stage51Info=Join-Path $dir 'p12751-stage-info.txt';$stage51Path=Join-Path $dir 'p12751-stage-pages.txt'
+ if($m.PSObject.Properties['p12751_latch'] -and [int]$m.p12751_latch -ge 0){
+  $stage51Coverage=$false
+  if(Test-Path -LiteralPath $stage51Info){
+   $si=P125-Fields (Get-Content -Raw -LiteralPath $stage51Info);$stage51Count=[int]$si.count;$stage51Done=[int]$si.done;$stage51Drops=[int]$si.drops
+   $paired=Page-Cache $stage51Path 'p12751_stage_page' 'select'
+   $pairRows=@(foreach($line in $paired.Values){$v=P125-Fields $line;[pscustomobject]@{select=$v.select;pid=$v.pid;task=$v.task;tid=$v.tid;stage=$v.stage;start_s=[double]$v.at/$hz;end_s=if([uint64]$v.end){[double]$v.end/$hz}else{$null};wall_ms=if([uint64]$v.end){1000*([double]$v.end-[double]$v.at)/$hz}else{$null};thread_cpu_ms=if([uint64]$v.cpu -ne [uint64]::MaxValue){[double]$v.cpu/1000000}else{$null};process_user_us=if($v.usage -eq '1'){$v.user}else{$null};process_system_us=if($v.usage -eq '1'){$v.sys}else{$null};minor_faults=if($v.usage -eq '1'){$v.minor}else{$null};major_faults=if($v.usage -eq '1'){$v.major}else{$null};images_before=$v.images0;images_after=$v.images1;ok=$v.ok;post_freeze=([uint64]$v.end -gt [uint64]$s.end);prearm=([uint64]$v.at -lt [uint64]$s.start)}})
+   if($pairRows.Count){$pairRows|Sort-Object start_s|Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath (Join-Path $dir 'metal-stages-p12751.csv')}
+   $stage51Coverage=($si.sealed -eq '1' -and $stage51Count -gt 0 -and $paired.Count -eq $stage51Count -and $stage51Done -eq $stage51Count -and $stage51Drops -eq 0)
+  }
+ }
  $tracePath=Join-Path $dir 'trace-pages.txt'
  if(Test-Path -LiteralPath $tracePath){
-  $owners=@(foreach($line in Get-Content -LiteralPath $tracePath){
+  $traceLines=@(Get-Content -LiteralPath $tracePath)
+  $traceCoverage=@(foreach($group in ($traceLines|ForEach-Object {P125-Fields $_}|Group-Object { [int][Math]::Floor([int]$_.select/8) })){
+   $v=$group.Group[0];$mask=P125-Hex $v.mask
+   $expected=1;for($i=1;$i -lt 8;$i++){if($mask -band (3 -shl ($i*2))){$expected++}}
+   [pscustomobject]@{cpu=[int][Math]::Floor([int]$v.select/1024);bin=[uint64]$v.bin;dropped_ticks=[uint64]$v.dropped_ticks;dropped_ms=1000*[double]$v.dropped_ticks/$hz;dropped_fragments=$v.dropped;pages=$group.Count;expected_pages=$expected;pages_complete=($group.Count -eq $expected)}
+  })
+  if($traceCoverage.Count){$traceCoverage|Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath (Join-Path $dir 'trace-coverage.csv')}
+  $owners=@(foreach($line in $traceLines){
    $f=P125-Fields $line
    $cpu=[int][Math]::Floor([int]$f.select/1024)
    foreach($hit in [regex]::Matches($line,' r=([0-9/]+)')){
@@ -401,18 +501,18 @@ function Analyze-Run([string]$dir){
  }
  $expectedEpisodeSamples=0;foreach($ep in $episodes){$expectedEpisodeSamples+=[int]$ep.samples}
  $coverage=($timeline.Count -eq [int]$s.rows -and $fg.Count -eq [int]$s.fg -and $events.Count -eq [int]$s.events -and $episodes.Count -eq [int]$info.episodes -and $epSamples.Count -eq $expectedEpisodeSamples -and [int]$info.episode_drops -eq 0 -and [int]$s.drops -eq 0 -and [int]$s.rate_drops -eq 0)
- $qualified=($complete -and $coverage -and $s.reason -eq '1' -and $rest -and $wake -and $capOK -and $null -ne $dur -and $null -ne $peak -and $peak -lt 76 -and $null -ne $guardPeakBig -and $guardPeakBig -lt 76 -and $null -ne $guardPeakLit -and $guardPeakLit -lt 70 -and $validPower)
+ $qualified=($complete -and $coverage -and ($null -eq $stage51Coverage -or $stage51Coverage) -and $s.reason -eq '1' -and $rest -and $wake -and $capOK -and $null -ne $dur -and $null -ne $peak -and $peak -lt 76 -and $null -ne $guardPeakBig -and $guardPeakBig -lt 76 -and $null -ne $guardPeakLit -and $guardPeakLit -lt 70 -and $validPower)
  $experiment=if($m.PSObject.Properties['experiment']){$m.experiment}else{'Legacy'}
- $report=[pscustomobject]@{version=2;experiment=$experiment;episodes=[int]$info.episodes;episode_drops=[int]$info.episode_drops;profile=$m.profile;power=$m.power;nonce=$m.nonce;hz=$m.hz;reason=[int]$s.reason;dump_complete=$complete;coverage=$coverage;peak_big_c=$peak;guard_peak_big_c=$guardPeakBig;guard_peak_little_c=$guardPeakLit;burst_proxy_s=$dur;layout_calls_lower_bound=$calls;event_drops=[int]$s.drops;rate_drops=[int]$s.rate_drops;qh_raw_bracket_delta=$qh;qh_bracket_seconds=$qhSeconds;net_battery_wh_250_710=$energy;power_verified=$validPower;measure_ok=[uint64]$s.measure_ok;measure_bad=[uint64]$s.measure_bad;restore_ok=$rest;foreground_operator_ok=$wake;qualified=$qualified}
+ $report=[pscustomobject]@{version=2;experiment=$experiment;boot_variant=$variant;stage51_coverage=$stage51Coverage;stage51_count=$stage51Count;stage51_done=$stage51Done;stage51_drops=$stage51Drops;episodes=[int]$info.episodes;episode_drops=[int]$info.episode_drops;profile=$m.profile;power=$m.power;nonce=$m.nonce;hz=$m.hz;reason=[int]$s.reason;dump_complete=$complete;coverage=$coverage;peak_big_c=$peak;guard_peak_big_c=$guardPeakBig;guard_peak_little_c=$guardPeakLit;burst_proxy_s=$dur;layout_calls_lower_bound=$calls;event_drops=[int]$s.drops;rate_drops=[int]$s.rate_drops;qh_raw_bracket_delta=$qh;qh_bracket_seconds=$qhSeconds;net_battery_wh_250_710=$energy;power_verified=$validPower;measure_ok=[uint64]$s.measure_ok;measure_bad=[uint64]$s.measure_bad;restore_ok=$rest;foreground_operator_ok=$wake;qualified=$qualified}
  Save-Json $report (Join-Path $dir 'summary.json')
  return $report
 }
 if($opts.LibraryOnly){return}
-if(-not $opts.Execute){Write-Host "P1274 PREVIEW $($opts.Action) $($opts.Profile) $($opts.Power) experiment=$($opts.Experiment). No serial, no files. Add -Execute.";return}
+if(-not $opts.Execute){Write-Host "P1274 PREVIEW $($opts.Action) $($opts.Profile) $($opts.Power) experiment=$($opts.Experiment) boot=$($opts.BootVariant). No serial, no files. Add -Execute.";return}
 if($opts.Action -eq 'Compare'){
  if($opts.CompareDirs.Count -ne 3){throw 'Specify -CompareDirs A0,B,A1'}
  $rs=@($opts.CompareDirs|ForEach-Object {Analyze-Run $_})
- if(@($rs.nonce|Select-Object -Unique).Count -ne 3 -or $rs[0].profile -ne $rs[2].profile -or $rs[0].experiment -ne $rs[2].experiment){throw 'A/B/A needs separate boots, matching A profiles'}
+ if(@($rs.nonce|Select-Object -Unique).Count -ne 3 -or $rs[0].profile -ne $rs[2].profile -or $rs[0].experiment -ne $rs[2].experiment -or $rs[0].boot_variant -ne $rs[2].boot_variant){throw 'A/B/A needs separate boots, matching A profiles'}
  $rs|Format-Table profile,power,reason,peak_big_c,burst_proxy_s,layout_calls_lower_bound,qh_raw_bracket_delta,net_battery_wh_250_710,power_verified,qualified -AutoSize
  Write-Host 'Descriptive only: check matched workloads, drops, censored phases, power and start temperature. No automatic causal claim.'
  return
@@ -438,6 +538,7 @@ try{
  switch($opts.Action){
   Capture {Capture}
   Dump {Dump (Load-Json (Join-Path $opts.RunDir 'capture.json'))}
+  NextBoot {P12751-NextBoot (Load-Json (Join-Path $opts.RunDir 'capture.json'))}
   WakeCheck {
    $m=Load-Json (Join-Path $opts.RunDir 'capture.json');[void](Read-Frozen $m)
    if(-not (Restore-Sample)){throw 'Policy not fully restored; do not force release; cool first'}

@@ -1,0 +1,16 @@
+'use strict';
+const fs=require('fs'),path=require('path'),assert=require('assert/strict');
+const r=p=>fs.readFileSync(path.join(__dirname,'../..',p),'utf8'),has=(s,...xs)=>xs.forEach(x=>assert(s.includes(x),x));
+const lab=r('drivers/power/exynos/hakios.p1274_lab.h'),s=r('drivers/power/exynos/hakios.p12751.h'),h=r('tools/s9-p1274-serial.ps1'),host=r('tools/s9-p12-dual-serial.ps1'),build=r('tools/mk-panvk.sh'),gen=r('tools/p12751-panvk-null.js'),lazy=r('userland/src/metalvk/HakiosMetalVK.mm'),front=r('userland/src/metalvk/NativeBridgeMetalFrontend.mm'),init=r('userland/src/init.c'),cpu=r('userland/src/cputop.c'),impl=r('xnu/files/hakios_p125_impl.h');
+has(s,'pid!=1','expected=-1','p12751_stage_start_ok','p12751_stage_end_ok','p1274_ticks_ms(10000)','P12751_STAGES 512u','P12751_BOOT_STAGE_LIMIT 320u','r->at==v[2] && r->tid==tid && r->task==task','p12751_stage_sealed','p12751_next','p12751_ack');
+has(build,'P12751_DUAL','libvulkan_panfrost_opt.dylib','p12751-panvk-null.js','flat-namespace','vk_smoke_opt');
+has(gen,'gen_weak and','-Wl,-undefined,error','SDK weak import ABI differs','generated table set differs','export ABI differs','non-target undefined imports changed','verify-pack');
+has(lazy,'S9P12751LayoutABI','MTLDeviceSPI','20F66','@encode(BOOL)','p12751_boot_mode','iosurfaceTextureAlignmentBytes');
+has(front,'p12751_stage_event','_dyld_image_count','p12751Detailed','flags|16u');
+has(init,'HakiosMetal.nextboot','p12751_boot_latch','var_kept');has(cpu,'p12751_ack','fsync','rename(','mediaserverd');
+has(h,'P12751-CheckBoot','NextBoot','Read-OwnerFair','metal-stages-p12751.csv','p12751-stage-info.txt');
+has(host,'P12751NextAllowed','p12751_stage_page','p12751_boot_latch');
+has(impl,'hakios_p12751_trace_replace','dropped_ticks');
+has(lab,'p12751_latched','hakios_p12751_trace_replace','p1274_mc>=76000 || p12741_lit_mc>=70000');
+assert(!/\b(?:CPU_OFF|CPU_SUSPEND|processor_exit|reg_write|writel|psci_cpu_off)\s*\(/.test(s+lab));
+console.log('P12751 source safety, boot latch, paired stages, dual build and host integration PASS (not native build)');

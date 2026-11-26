@@ -1,0 +1,25 @@
+'use strict';
+const assert=require('assert/strict'),fs=require('fs'),os=require('os'),path=require('path');
+const {rewrite,missingFrom,plan,once,sdkWeakRecords,verifyWeak}=require('../p12751-panvk-null.js');
+const stock={symbol_table:{weak_dynamic_lookup_names:['_panvk_v6_Foo','_vk_common_Bar'],dynamic_lookup_count:2},export_trie:{names:['_vk_icdGetInstanceProcAddr']},dyld_info:{},chained_fixups:null};
+const source='/* This file generated from vk_entrypoints_gen.py, do not edit directly. */\nconst struct vk_device_entrypoint_table panvk_v6_device_entrypoints = {\n    .Foo = panvk_v6_Foo,\n    .Keep = panvk_v6_Keep,\n    .Alias = panvk_v6_Keep,\n};\nconst struct vk_instance_entrypoint_table vk_common_instance_entrypoints = {\n    .Bar = vk_common_Bar,\n};\nvoid non_table(void) {\n    .Foo = panvk_v6_Foo,\n}\n';
+const missing=missingFrom(stock),hits=new Map(),expected=rewrite(source,missing,hits);
+assert.equal(hits.size,2);assert(expected.includes('.Foo = 0,'));assert(expected.includes('.Bar = 0,'));
+assert(expected.includes('.Keep = panvk_v6_Keep,'));assert(expected.includes('.Alias = panvk_v6_Keep,'));
+assert(expected.endsWith('    .Foo = panvk_v6_Foo,\n}\n'));
+assert.throws(()=>missingFrom({...stock,symbol_table:{...stock.symbol_table,dynamic_lookup_count:3}}));
+assert.throws(()=>missingFrom({...stock,symbol_table:{weak_dynamic_lookup_names:['_malloc'],dynamic_lookup_count:1}}));
+assert.throws(()=>missingFrom({...stock,export_trie:{names:['_panvk_v6_Foo']}}));
+const weak={dependencies:[{name:'/usr/lib/libSystem.B.dylib'}],symbol_table:{dynamic_lookup_count:0,weak_dynamic_lookup_count:0,weak_undefined_records:[{name:'_pthread_mutexattr_init',ordinal:1}]}};
+assert.deepEqual(sdkWeakRecords(weak),weak.symbol_table.weak_undefined_records);
+verifyWeak(weak,weak);
+assert.throws(()=>sdkWeakRecords({...weak,dependencies:[{name:'wrong'}]}));
+assert.throws(()=>sdkWeakRecords({...weak,symbol_table:{...weak.symbol_table,weak_undefined_records:[{name:'_malloc',ordinal:1}]}}));
+assert.throws(()=>verifyWeak(weak,{...weak,symbol_table:{...weak.symbol_table,weak_undefined_records:[]}}));
+assert.throws(()=>once('foofoo','foo','bar'));assert.throws(()=>once('foo','bar','baz'));
+const dir=fs.mkdtempSync(path.join(os.tmpdir(),'p12751-null-'));
+try{const f=path.join(dir,'vk_entrypoints.c');fs.writeFileSync(f,source);assert.equal(plan(stock,dir).expected.get('vk_entrypoints.c'),expected);
+ fs.writeFileSync(f,source.replace('    .Bar = vk_common_Bar,','    .Bar = other,'));
+ assert.throws(()=>plan(stock,dir),/provenance/);
+}finally{fs.rmSync(dir,{recursive:true,force:true});}
+console.log('P12751 generated table rewrite, alias preservation and fail-closed provenance PASS (synthetic, not native link)');

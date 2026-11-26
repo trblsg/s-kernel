@@ -124,6 +124,28 @@ nm -m $OUT/libvulkan_panfrost.dylib | grep -c 'dynamically looked up' > $OUT/wea
 # semaphore, a compute dispatch; every step says what it got (tools/vk/vk_smoke.c)
 "${SMOKE_CC[@]}" -O2 -Wall -I mesa-$VERSION/include -o $OUT/vk_smoke "$ROOT/tools/vk/vk_smoke.c" \
 	$OUT/libvulkan_panfrost.dylib -Wl,-rpath,@executable_path
+# P12751 reference link first, then a separate source/build tree. Never
+# change the stock generated tables or silently fall back after a failed gate.
+if [ "$TARGET" = ios ] && [ "${P12751_DUAL:-0}" = 1 ]; then
+    OPTSRC=mesa-$VERSION-p12751
+    OPTBUILD=build-p12751
+    # A clean opt tree avoids stale generated code / a previously patched source.
+    rm -rf "$OPTSRC" "$OPTBUILD"
+    cp -a "mesa-$VERSION" "$OPTSRC"
+    node "$ROOT/tools/p12751-panvk-null.js" prepare "$OUT/libvulkan_panfrost.dylib" "$BUILD" "$OPTSRC" "$OUT/p12751-null-plan.json"
+    meson setup "$OPTBUILD" "$OPTSRC" --cross-file cross.ini "${OPTIONS[@]}" > meson-setup-p12751.log
+    ninja -j "${JOBS:-4}" -C "$OPTBUILD" src/panfrost/vulkan/libvulkan_panfrost.dylib > ninja-p12751.log
+    llvm-strip -x -o "$OUT/libvulkan_panfrost_opt.dylib" "$OPTBUILD/src/panfrost/vulkan/libvulkan_panfrost.dylib"
+    install_name_tool -id /redwood/lib/libvulkan_panfrost_opt.dylib "$OUT/libvulkan_panfrost_opt.dylib"
+    node "$ROOT/tools/p12751-panvk-null.js" verify "$OUT/libvulkan_panfrost.dylib" "$OUT/libvulkan_panfrost_opt.dylib" "$BUILD" "$OPTBUILD" "$OUT/p12751-null-plan.json" "$OUT/p12751-verify.json"
+    # Independent decoded bind check: no flat lookup anywhere, not just nlist.
+    llvm-objdump --macho --bind --lazy-bind --weak-bind "$OUT/libvulkan_panfrost_opt.dylib" > "$OUT/p12751-opt-bind.txt"
+    if grep -q 'flat-namespace' "$OUT/p12751-opt-bind.txt"; then
+        echo 'P12751 unexpected flat namespace bind in optimized driver' >&2; exit 1
+    fi
+    "${SMOKE_CC[@]}" -O2 -Wall -I mesa-$VERSION/include -o "$OUT/vk_smoke_opt" "$ROOT/tools/vk/vk_smoke.c" \
+        "$OUT/libvulkan_panfrost_opt.dylib" -Wl,-rpath,@executable_path
+fi
 cat "${PATCHLIST[@]}" "$ROOT"/tools/mesa/hakios-drm/* | sha256sum > $OUT/built-from
 echo "mk-panvk.sh: Mesa $VERSION PanVK ($TARGET): $B/$OUT/libvulkan_panfrost.dylib, $(stat -c %s $OUT/libvulkan_panfrost.dylib) bytes," \
 	"$(grep -c '^vk_icd' $OUT/exported.txt) vk_icd* entry points, $(cat $OUT/weak-entrypoints.txt) weak entrypoints left to dyld"

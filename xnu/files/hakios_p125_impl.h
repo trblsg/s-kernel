@@ -31,7 +31,7 @@ uint64_t hakios_p127_fg_seq;
 uint64_t hakios_p1274_deadline,hakios_p1274_fg_seq;
 uint64_t hakios_p1274_usb_down,hakios_p1274_usb_up,hakios_p1274_display_on_at;
 uint64_t hakios_p1274_wfi_n[8],hakios_p1274_wfi_ticks[8];
-uint32_t hakios_p1274_trace_late,hakios_p1274_writers;
+uint32_t hakios_p1274_trace_late,hakios_p1274_writers,hakios_p12751_trace_replace;
 struct p127_fg_row hakios_p1274_fg_rows[P1274_FG_SLOTS];
 static bool p1274_live(uint64_t now) {
     uint64_t end=__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_SEQ_CST);
@@ -171,6 +171,23 @@ void hakios_p1273_recount(void *p,void *t,uint64_t end,uint64_t ticks,bool from_
                 }
                 if(b->owner[i].tid==tid && b->owner[i].task==task_id &&
                    b->owner[i].kind==kind){pos=i;break;}
+            }
+            if(pos==P1273_TRACE_OWNERS && __atomic_load_n(&hakios_p12751_trace_replace,__ATOMIC_RELAXED)){
+                /* Keep the heavy owners instead of permanently retaining
+                 * the first 16 transient threads. Evicted time is explicitly
+                 * unknown; never credit it to the replacement. Preserve idle.
+                 * Bounded 16-entry scan only on overflow. */
+                unsigned least=P1273_TRACE_OWNERS;uint64_t ticks=UINT64_MAX;
+                for(unsigned i=0;i<P1273_TRACE_OWNERS;i++){
+                    struct p1273_trace_owner *o=&b->owner[i];
+                    uint64_t total=o->user_ticks+o->system_ticks;
+                    if(o->kind!=0 && total<ticks){ticks=total;least=i;}
+                }
+                if(least<P1273_TRACE_OWNERS && (ticks<=span/32 || delta>=ticks)){
+                    struct p1273_trace_owner *o=&b->owner[least];
+                    b->dropped+=o->fragments;b->dropped_ticks+=ticks;
+                    bzero(o,sizeof(*o));o->tid=tid;o->task=task_id;o->pid=pid;o->kind=kind;pos=least;
+                }
             }
             if(pos==P1273_TRACE_OWNERS){b->dropped++;b->dropped_ticks+=delta;}
             else{

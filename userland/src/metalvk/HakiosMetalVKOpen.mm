@@ -78,14 +78,14 @@ missing(const char *cls, const char *selector)
  * directory, then /tmp and /private/var/tmp, each with m2v appended; the first that can be written.
  */
 static bool
-cacheDirectory(char *path, size_t size)
+cacheDirectory(char *path, size_t size,const char *suffix)
 {
 	char candidates[4][512] = {};
 
-	if (confstr(_CS_DARWIN_USER_CACHE_DIR, candidates[0], sizeof(candidates[0]) - 16) == 0) {
+	if (confstr(_CS_DARWIN_USER_CACHE_DIR, candidates[0], sizeof(candidates[0]) - 32) == 0) {
 		candidates[0][0] = '\0';
 	}
-	if (confstr(_CS_DARWIN_USER_TEMP_DIR, candidates[1], sizeof(candidates[1]) - 16) == 0) {
+	if (confstr(_CS_DARWIN_USER_TEMP_DIR, candidates[1], sizeof(candidates[1]) - 32) == 0) {
 		candidates[1][0] = '\0';
 	}
 	strlcpy(candidates[2], "/tmp/", sizeof(candidates[2]));
@@ -94,7 +94,7 @@ cacheDirectory(char *path, size_t size)
 		if (candidates[i][0] == '\0') {
 			continue;
 		}
-		strlcat(candidates[i], "m2v", sizeof(candidates[i]));
+		strlcat(candidates[i], suffix, sizeof(candidates[i]));
 		mkdir(candidates[i], 0700);
 		if (access(candidates[i], W_OK) == 0) {
 			strlcpy(path, candidates[i], size);
@@ -121,7 +121,8 @@ hakios_metal_vk_open(id device, uint64_t registryID, void (*logger)(const char *
 		snprintf(why, size, "no Vulkan driver at %s (HAKIOS_VK_ICD or HakiosMetal.icd name another)", driver);
 		return false;
 	}
-	if (!cacheDirectory(cache, sizeof(cache))) {
+	const char *suffix=!strcmp(driver,"/redwood/lib/libvulkan_panfrost_opt.dylib")?"m2v-p12751-opt":"m2v";
+    if (!cacheDirectory(cache, sizeof(cache),suffix)) {
 		snprintf(why, size, "no writable directory for the shader cache");
 		return false;
 	}

@@ -31,11 +31,13 @@
 #include <thread>
 #include <fcntl.h>
 #include <sys/file.h>
+#include <mach-o/dyld.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "bridge/NativeMetalObjects.h"   // Scion: tools/metal/bridge/ (the build gives -I tools/metal)
 #include "NativeBridgeMetalFrontend.h"
 #include "../p1274_user.h"
+#include "p12751_layout_abi.h"
 #import <QuartzCore/CAMetalLayer.h>
 
 extern "C" void sys_dcache_flush(void *start, size_t length);
@@ -2231,7 +2233,7 @@ static void p1273LayoutPlan(MTLTextureDescriptor *d,unsigned selector,bool backe
  }
 }
 
-@interface NBDeviceMethods : NSObject
+@interface NBDeviceMethods : NSObject <S9P12751LayoutABI>
 @end
 @implementation NBDeviceMethods
 - (NSString *)name {return gName;}
@@ -2693,11 +2695,15 @@ static thread_local struct p1274_stage p1274OpenStages[23];
 static thread_local struct p1275_usage p1275OpenUsage[23];
 static thread_local int p1275LockFd=-1;
 static thread_local bool p1275Detailed;
+static thread_local bool p12751Detailed;
+struct p12751_user_stage {uint64_t at,cpu;struct p1275_usage usage;uint32_t images;bool accepted;};
+static thread_local struct p12751_user_stage p12751Stages[23];
 static void p1275Unlock(){if(p1275LockFd>=0){close(p1275LockFd);p1275LockFd=-1;}}
 /* Read-only advisory lock on the existing root-owned ICD inode. No
  * shared writable path, no lock-file creation, no forced unlock. */
 static void p1275Coordinate(const char *loader,unsigned flags){
- if(!(flags&4u) || !loader || strcmp(loader,"/redwood/lib/libvulkan_panfrost.dylib"))return;
+ if(!(flags&4u) || !loader || (strcmp(loader,"/redwood/lib/libvulkan_panfrost.dylib") &&
+      strcmp(loader,"/redwood/lib/libvulkan_panfrost_opt.dylib")))return;
  const char *name=getprogname();if(!name)return;
  const char *const eligible[]={"PosterBoard","CollectionsPoster","PridePosterExtension","EmojiPosterExtension","GradientPosterExtension"};
  bool allowed=false;for(const char *p:eligible)if(!strcmp(name,p))allowed=true;
@@ -2719,8 +2725,36 @@ static void p1275Coordinate(const char *loader,unsigned flags){
  }
  (void)p1274_emit(6,102,outcome,mach_absolute_time()-start,0,0,start,0);
 }
+static void p12751_stage_observe(unsigned stage,bool begin,bool success){
+ if(!p12751Detailed)return;
+ auto &s=p12751Stages[stage];
+ if(begin){
+  s={};s.at=mach_absolute_time();s.cpu=p1274_thread_ns();
+  s.usage=p1275_usage_now();s.images=_dyld_image_count();
+  uint64_t v[12]={0,stage,s.at,0,0,0,0,0,s.images,0,0,0};
+  s.accepted=sysctlbyname("kern.hakios.p12751_stage_event",NULL,NULL,v,sizeof(v))==0;
+ }else if(s.at){
+  uint64_t end=mach_absolute_time(),cpu=p1274_thread_ns();
+  auto u=p1275_usage_now();uint32_t images=_dyld_image_count();
+  bool valid=s.usage.valid && u.valid && u.user>=s.usage.user && u.sys>=s.usage.sys &&
+    u.minflt>=s.usage.minflt && u.majflt>=s.usage.majflt;
+  uint64_t delta=cpu==UINT64_MAX||s.cpu==UINT64_MAX||cpu<s.cpu?UINT64_MAX:cpu-s.cpu;
+  uint64_t v[12]={1,stage,s.at,delta,valid?u.user-s.usage.user:0,valid?u.sys-s.usage.sys:0,
+    valid?u.minflt-s.usage.minflt:0,valid?u.majflt-s.usage.majflt:0,s.images,images,success?1u:0u,valid?1u:0u};
+  bool kept=s.accepted && sysctlbyname("kern.hakios.p12751_stage_event",NULL,NULL,v,sizeof(v))==0;
+  // One key completion per cold open; raw fallback is available even when
+  // sandbox denies advisory sysctl. No re-open, no polling, no synthetic calls.
+  if(stage==7 || stage==11 || stage==8)
+   NBSAY(@"P12751 stage=%u pid=%d tid=%u start=%llu end=%llu cpu_ns=%llu images=%u/%u user_us=%llu sys_us=%llu faults=%llu/%llu ok=%u valid=%u kept=%u",
+    stage,getpid(),threadIdLow(),(unsigned long long)s.at,(unsigned long long)end,(unsigned long long)delta,
+    s.images,images,(unsigned long long)v[4],(unsigned long long)v[5],(unsigned long long)v[6],(unsigned long long)v[7],
+    success?1:0,valid?1:0,kept?1:0);
+  s={};
+ }
+}
 static void p1274OpenObserver(uint32_t stage,uint32_t begin,uint32_t success) {
  if(stage<7 || stage>22 || stage==20 || stage==21)return;
+ p12751_stage_observe(stage,begin!=0,success!=0);
  if(begin){
   p1274OpenStages[stage]=p1274_stage_begin();
   p1275OpenUsage[stage]={};
@@ -2740,7 +2774,8 @@ static bool openRuntimeDevice(const char *loader,const char *cache,uint64_t regi
  struct p1274_stage t=p1274_stage_begin();
  unsigned mode=p1275_mode();unsigned flags=mode?mode-1:0;
  p1275Detailed=mode && t.at;
- if(p1275Detailed){
+ p12751Detailed=p12751_boot_mode()>=0 && (p1274_user_observing() || (p12741_user_state()<0 && clock_gettime_nsec_np(CLOCK_UPTIME_RAW)<225000000000ull));
+ if(p1275Detailed || p12751Detailed){
   p1275Coordinate(loader,flags);
   /* Recheck OFF lease after any wait. A wake/timeout must not start an
    * experimental lazy load after the relevant mode has disappeared. */
@@ -2749,7 +2784,7 @@ static bool openRuntimeDevice(const char *loader,const char *cache,uint64_t regi
   (void)p1274_emit(6,104,mode,flags,0,0,0,0);
   gDevice=nmb_device_open_observed_mode(loader,cache,p1274OpenObserver,flags|16u);
  }else gDevice=t.at?nmb_device_open_observed(loader,cache,p1274OpenObserver):nmb_device_open(loader,cache);
- p1275Unlock();p1275Detailed=false;
+ p1275Unlock();p1275Detailed=false;p12751Detailed=false;
  p1274_stage_end(t,5,gDevice!=nullptr);
  if(!gDevice){NBLOG(@"native-metal: device refused: %s",nmb_last_error());return false;}
  gLoaderPath=loader;

@@ -48,17 +48,17 @@ function audit(b){
  }
  if(sym){
   need(sym.off,sym.count*16);need(sym.str,sym.bytes);
-  const exported=[],weak_dynamic=[],dynamic=[],undef=[];
+  const exported=[],weak_dynamic=[],weak_undef=[],dynamic=[],undef=[];
   for(let i=0;i<sym.count;i++){
    const o=sym.off+i*16,typ=b[o+4],desc=b.readUInt16LE(o+6),idx=u32(o);
    if((typ&0xe0)||!(typ&1))continue;
    const n=idx<sym.bytes?cstr(sym.str+idx,sym.str+sym.bytes):null;
    if(n===null)throw Error('symbol string index out of range');
    if((typ&14)===0){
-    undef.push(n);if((desc>>>8)===0xfe){dynamic.push(n);if(desc&0x40)weak_dynamic.push(n);}
+    undef.push(n);if(desc&0x40)weak_undef.push({name:n,ordinal:desc>>>8});if((desc>>>8)===0xfe){dynamic.push(n);if(desc&0x40)weak_dynamic.push(n);}
    }else if(!(typ&0x10))exported.push(n);
   }
-  r.symbol_table={nlist_count:sym.count,defined_external_count:exported.length,undefined_external_count:undef.length,dynamic_lookup_count:dynamic.length,weak_dynamic_lookup_count:weak_dynamic.length,defined_external_names:exported.sort(),undefined_external_names:undef.sort(),dynamic_lookup_names:dynamic.sort(),weak_dynamic_lookup_names:weak_dynamic.sort()};
+  r.symbol_table={nlist_count:sym.count,defined_external_count:exported.length,undefined_external_count:undef.length,weak_undefined_count:weak_undef.length,weak_undefined_names:weak_undef.map(x=>x.name).sort(),weak_undefined_records:weak_undef.sort((a,b)=>a.name.localeCompare(b.name)),dynamic_lookup_count:dynamic.length,weak_dynamic_lookup_count:weak_dynamic.length,defined_external_names:exported.sort(),undefined_external_names:undef.sort(),dynamic_lookup_names:dynamic.sort(),weak_dynamic_lookup_names:weak_dynamic.sort()};
  }
  if(trie&&trie.len){
   const base=trie.off,end=base+trie.len,names=[];

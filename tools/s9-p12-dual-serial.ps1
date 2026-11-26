@@ -43,6 +43,7 @@ $script:P1272HostEnabled=$false
 $script:P1273HostEnabled=$false
 $script:P1274HostEnabled=$false
 $script:P1274ProfileAllowed=$false
+$script:P12751NextAllowed=$false
 $script:P1273GateAllowed=$false
 $script:P1273CombinedAllowed=$false
 $script:P1272ProbeLines=New-Object 'System.Collections.Generic.List[string]'
@@ -90,7 +91,7 @@ function P12-ReplyShape([string]$Name,[string]$Reply,[bool]$Mixed){
         p127_ticker='wait due wake'
         p127_fg_seq='seq slots'
     }
-    if($Name -match '^(?:p125_(?:mode|select)|p126_mode|p127_mode|p1272_probe_request|p1273_trace_(?:mode|select)|p1273_gpu_select|p1273_gov_select|p1273_cap_mode|p1273_offline_s|p12741_profile|p1275_profile|p1274_select|p1273_gate_(?:begin|review|ack)|p6_usb_(?:ticks|connected_ticks)|p69_usb_disconnected_ticks)$'){
+    if($Name -match '^(?:p125_(?:mode|select)|p126_mode|p127_mode|p1272_probe_request|p1273_trace_(?:mode|select)|p1273_gpu_select|p1273_gov_select|p1273_cap_mode|p1273_offline_s|p12741_profile|p1275_profile|p1274_select|p12751_stage_select|p1273_gate_(?:begin|review|ack)|p6_usb_(?:ticks|connected_ticks)|p69_usb_disconnected_ticks)$'){
         $n=[uint64]0
         return ($Reply -cmatch "^$dec$" -and [uint64]::TryParse($Reply,[ref]$n))
     }
@@ -119,6 +120,12 @@ function P12-ReplyShape([string]$Name,[string]$Reply,[bool]$Mixed){
         }
         '^p12741_revision$' {return ($Reply -ceq '2')}
         '^p1275_revision$' {return ($Reply -ceq '1')}
+        '^p12751_revision$' {return ($Reply -ceq '1')}
+        '^p12751_boot_latch$' {return ($Reply -cmatch '^(?:-1|[0-7])$')}
+        '^p12751_(?:next|ack)$' {return ($Reply -cmatch '^(?:-1|[0-3])$')}
+        '^p12751_stage_info$' {return ($Reply -cmatch "^version=1 sealed=[01] count=$dec done=$dec drops=$dec$")}
+        '^p12751_stage_focus$' {return ($Reply -cmatch '^version=1(?: s=[0-9]{1,3}){0,24}$')}
+        '^p12751_stage_page$' {return ($Reply -cmatch "^version=1 select=$dec at=$dec end=$dec pid=$dec task=$dec tid=$dec stage=$dec cpu=$dec user=$dec sys=$dec minor=$dec major=$dec images0=$dec images1=$dec ok=[012] usage=[01]$")}
         '^p1275_load_state$' {return ($Reply -cmatch '^[0-2]$')}
         '^p1275_(?:mode|selected)$' {return ($Reply -cmatch '^(?:[0-9]|1[0-6])$')}
         '^p1275_focus$' {return ($Reply -cmatch '^version=1(?: s=[0-9]{4,5}){0,48}$')}
@@ -248,7 +255,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
         if($Name -like 'p1273_*' -and $Name -notin @('p1273_trace_mode','p1273_trace_select','p1273_gpu_select','p1273_gov_select','p1273_cap_mode','p1273_offline_s','p1273_gate_begin','p1273_gate_review','p1273_gate_ack') -and $Value -ne ''){throw "P12.7.3 telemetry is read-only: $Name"}
     }
     if($script:P1274HostEnabled){
-        $allowed+=@('p12741_profile','p1274_status','p1274_restore','p1274_select','p1274_page','p1274_metal_log_mode','p12741_revision','p12741_info','p12741_guard','p1275_profile','p1275_revision','p1275_selected','p1275_mode','p1275_focus','p1275_load_state')
+        $allowed+=@('p12741_profile','p1274_status','p1274_restore','p1274_select','p1274_page','p1274_metal_log_mode','p12741_revision','p12741_info','p12741_guard','p1275_profile','p1275_revision','p1275_selected','p1275_mode','p1275_focus','p1275_load_state','p12751_revision','p12751_boot_latch','p12751_next','p12751_ack','p12751_stage_info','p12751_stage_focus','p12751_stage_select','p12751_stage_page')
     }
     if($Name -notin $allowed){throw "P12 sysctl disallowed $Name"}
     if($script:P124HostEnabled -and $Name -eq 'p1231_hash_mode' -and $Value -eq '1'){throw 'P12.4 rejects scalar thermal trial'}
@@ -264,6 +271,8 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
         ($script:P1274HostEnabled -and $script:P1274ProfileAllowed -and $Name -eq 'p1275_profile' -and $Value -match '^(?:[1-9]|1[0-6])$') -or
         ($script:P1274HostEnabled -and $script:P1274ProfileAllowed -and $Name -eq 'p12741_profile' -and $Value -match '^[1-9]$') -or
         ($script:P1274HostEnabled -and $Name -eq 'p1274_select' -and $Value -match '^\d{1,5}$' -and [int]$Value -le 14279) -or
+        ($script:P1274HostEnabled -and $Name -eq 'p12751_stage_select' -and $Value -match '^\d{1,3}$' -and [int]$Value -lt 512) -or
+        ($script:P1274HostEnabled -and $script:P12751NextAllowed -and $Name -eq 'p12751_next' -and $Value -cmatch '^[0-3]$') -or
         ($script:P1273HostEnabled -and $Name -eq 'p1273_gate_begin' -and $Value -eq '0') -or
         ($script:P1273HostEnabled -and $script:P1273GateAllowed -and $Name -eq 'p1273_gate_begin' -and $Value -in @('3','5','17','129','257','513','903','919')) -or
         ($script:P1273HostEnabled -and $script:P1273GateAllowed -and $Name -in @('p1273_gate_review','p1273_gate_ack') -and $Value -match '^[1-9]\d{0,9}$' -and [uint64]$Value -le 99999999) -or

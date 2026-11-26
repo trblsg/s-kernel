@@ -61,6 +61,7 @@
 #include <unistd.h>
 #include "../hakios_metal_shown.h"
 #include "../p1274_user.h"
+#include "p12751_layout_abi.h"
 
 #if __has_feature(objc_arc)
 #error "HakiosMetalVK.mm keeps its device by hand: build it without ARC"
@@ -134,6 +135,7 @@ enum { LAZY, OPENING, OPEN, FAILED };
 static pthread_mutex_t gLock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
 static volatile int gState = LAZY;
 static bool p1275_layout_installed;
+static void p12751_install_alignment_observer(void);
 static unsigned p1275_deferred;
 static Class gClass, gBase;             /* HakiosMetalDevice and _MTLDevice */
 static id gDevice;                      /* the process's one device object, kept */
@@ -249,7 +251,10 @@ openDevice(SEL why)
 		p1275Began=mach_absolute_time();
 		(void)p1274_emit(6,105,selectorCode,p1275_deferred,p1275m,p1275Began,0,0);
 	}
-	if(p1275_deferred && p1274_user_observing())(void)p1274_emit(6,101,p1275_deferred,0,0,0,0,0);
+	if(p1275_deferred){
+        if(p12751_user_boot())say("P12751 deferred_layout=%u later_open=%s",p1275_deferred,sel_getName(why));
+        if(p1274_user_observing())(void)p1274_emit(6,101,p1275_deferred,0,0,0,0,0);
+    }
 	callers(from, sizeof(from));
 	say("opening the device for -%s, sent from %s", sel_getName(why), from);
 	began = nowMs();
@@ -275,6 +280,7 @@ openDevice(SEL why)
 				p1274_stage_end(runtimeStage,4,opened);
 				if(opened){
 			stopForwarding();
+			if(p12751_user_boot())p12751_install_alignment_observer();
 			gState = OPEN;
 			if(p1275Began)(void)p1274_emit(6,106,selectorCode,1,mach_absolute_time()-p1275Began,p1275Began,0,0);
 			gPreviousPreprocessor = objc_setExceptionPreprocessor(sayException);
@@ -308,11 +314,18 @@ static bool p1275_layout_disabled(void){
     }();
     return disabled;
 }
+static bool p12751_early_allowed(void){
+    if(p12751_user_boot()){int mode=p12751_boot_mode();return mode>=0 && (mode&2);}
+    return (p1275_cached_flags()&1u)!=0;
+}
 static id p1275_layout_shim(id self,SEL sel,MTLTextureDescriptor *d,BOOL backed){
     pthread_mutex_lock(&gLock);
-    if(gState==LAZY && gDevice==self && (p1275_cached_flags()&1u) && p1275_layout_disabled() && !hakios_metal_is_window_server()){
+    if(gState==LAZY && gDevice==self && p12751_early_allowed() && p1275_layout_disabled() && !hakios_metal_is_window_server()){
         unsigned n=++p1275_deferred;
-        if(n==1 || n%32==0)(void)p1274_emit(6,100,n,(uint64_t)backed,0,0,0,0);
+        if(n==1 || n%32==0){
+            if(p12751_user_boot())say("P12751 layout early_nil=%u backed=%u",n,(unsigned)backed);
+            (void)p1274_emit(6,100,n,(uint64_t)backed,0,0,0,0);
+        }
         pthread_mutex_unlock(&gLock);return nil;
     }
     pthread_mutex_unlock(&gLock);
@@ -324,19 +337,81 @@ static id p1275_layout_shim(id self,SEL sel,MTLTextureDescriptor *d,BOOL backed)
         return ((id(*)(id,SEL,MTLTextureDescriptor *,BOOL))imp)(self,sel,d,backed);
     return nil;
 }
+static const char *p12751_protocol_encoding(Protocol *proto,SEL sel,unsigned depth){
+    if(!proto || depth>12)return NULL;
+    for(int required=0;required<2;required++){
+        struct objc_method_description d=protocol_getMethodDescription(proto,sel,required,YES);
+        if(d.name && d.types)return d.types;
+    }
+    unsigned n=0;Protocol *__unsafe_unretained *parents=protocol_copyProtocolList(proto,&n);
+    const char *result=NULL;
+    for(unsigned i=0;i<n && !result;i++)result=p12751_protocol_encoding(parents[i],sel,depth+1);
+    free(parents);return result;
+}
+static bool p12751_layout_abi(const char *encoding){
+    if(!encoding)return false;
+    @try{
+        NSMethodSignature *sig=[NSMethodSignature signatureWithObjCTypes:encoding];
+        if(!sig || sig.numberOfArguments!=4 || sig.methodReturnType[0]!='@' || sig.methodReturnType[1]=='?' ||
+            strcmp([sig getArgumentTypeAtIndex:0],"@") || strcmp([sig getArgumentTypeAtIndex:1],":"))return false;
+        const char *arg=[sig getArgumentTypeAtIndex:2],*flag=[sig getArgumentTypeAtIndex:3];
+        return arg[0]=='@' && arg[1]!='?' && !strcmp(flag,@encode(BOOL));
+    }@catch(NSException *e){(void)e;return false;}
+}
 static void p1275_install_layout_shim(void){
     SEL sel=sel_registerName("newTextureLayoutWithDescriptor:isHeapOrBufferBacked:");
     Method m=class_getInstanceMethod(gBase,sel);
-    if(!m || method_getNumberOfArguments(m)!=4)return;
-    char ret[16]={},arg[16]={},flag[16]={};
-    method_getReturnType(m,ret,sizeof(ret));method_getArgumentType(m,2,arg,sizeof(arg));method_getArgumentType(m,3,flag,sizeof(flag));
-    if(strcmp(ret,"@") || arg[0]!='@' || strcmp(flag,@encode(BOOL)))return;
-    /* Only replace an inherited selector already forwarded by this class.
-     * If a real implementation is present, leave its semantics untouched. */
+    const char *base=m?method_getTypeEncoding(m):NULL;
+    const char *spi=p12751_protocol_encoding(objc_getProtocol("MTLDeviceSPI"),sel,0);
+    const char *publicABI=p12751_protocol_encoding(@protocol(MTLDevice),sel,0);
+    const char *compiled=p12751_protocol_encoding(@protocol(S9P12751LayoutABI),sel,0);
+    char os[32]={0};size_t osn=sizeof(os)-1;
+    bool knownOS=sysctlbyname("kern.osversion",os,&osn,NULL,0)==0 && osn<sizeof(os) && !strcmp(os,"20F66");
+    const char *encoding=base?:spi?:publicABI;
+    const char *source=base?"_MTLDevice":spi?"MTLDeviceSPI":publicABI?"MTLDevice":"missing";
+    // No guessed encoding: fallback to the exact compiled frontend
+    // declaration only on the pinned system build and only if no system
+    // method/protocol metadata exists. Any present mismatch fails closed.
+    if(!encoding && p12751_user_boot() && knownOS){encoding=compiled;source="compiled-20F66";}
     Method forwarded=class_getInstanceMethod(gClass,sel);
-    if(!forwarded || method_getImplementation(forwarded)!=(IMP)_objc_msgForward)return;
-    class_replaceMethod(gClass,sel,(IMP)p1275_layout_shim,method_getTypeEncoding(m));
-    p1275_layout_installed=true;
+    const char *reason="installed";
+    if(p12751_user_boot() && !p12751_early_allowed())reason="boot_disabled";
+    else if(!encoding)reason="no_metadata";
+    else if(!p12751_layout_abi(encoding) || !p12751_layout_abi(compiled) || (base&&!p12751_layout_abi(base)) ||
+       (spi&&!p12751_layout_abi(spi)) || (publicABI&&!p12751_layout_abi(publicABI)))reason="abi_mismatch";
+    else if(forwarded && method_getImplementation(forwarded)!=(IMP)_objc_msgForward)reason="real_method";
+    else if(forwarded){class_replaceMethod(gClass,sel,(IMP)p1275_layout_shim,encoding);p1275_layout_installed=true;}
+    else if(class_addMethod(gClass,sel,(IMP)p1275_layout_shim,encoding))p1275_layout_installed=true;
+    else reason="add_failed";
+    if(p12751_user_boot())say("P12751 layout source=%s base=%s spi=%s public=%s compiled=%s os=%s bool=%s ABI=%u reason=%s",
+       source,base?: "-",spi?: "-",publicABI?: "-",compiled?: "-",os,@encode(BOOL),p1275_layout_installed?1:0,reason);
+}
+/* Natural-call observation only. Never manufacture an alignment answer. */
+static IMP p12751_alignment_original;
+static unsigned p12751_alignment_calls;
+static NSUInteger p12751_alignment_observer(id self,SEL sel){
+    NSUInteger value=((NSUInteger(*)(id,SEL))p12751_alignment_original)(self,sel);
+    unsigned n=__atomic_add_fetch(&p12751_alignment_calls,1,__ATOMIC_RELAXED);
+    if(n==1 || n%64==0){
+        say("P12751 alignment calls=%u value=%llu",n,(unsigned long long)value);
+        (void)p1274_emit(6,107,value,n,0,0,0,0);
+    }
+    return value;
+}
+static void p12751_install_alignment_observer(void){
+    SEL sel=sel_registerName("iosurfaceTextureAlignmentBytes");
+    Method m=class_getInstanceMethod(gClass,sel);
+    if(!m){say("P12751 alignment ABI missing");return;}
+    const char *encoding=method_getTypeEncoding(m);
+    IMP imp=method_getImplementation(m);
+    char type[16]={0};method_getReturnType(m,type,sizeof(type));
+    if(!imp || imp==(IMP)_objc_msgForward || imp==(IMP)p12751_alignment_observer ||
+       method_getNumberOfArguments(m)!=2 || strcmp(type,@encode(NSUInteger))){
+        say("P12751 alignment ABI refused encoding=%s",encoding?:"-");return;
+    }
+    p12751_alignment_original=imp;
+    class_replaceMethod(gClass,sel,(IMP)p12751_alignment_observer,encoding);
+    say("P12751 alignment observation installed encoding=%s",encoding);
 }
 
 /* whether MTLDevice or MTLDeviceSPI (or a protocol either takes in) declares SELECTOR as an instance method */
@@ -589,7 +664,7 @@ registerDevice(void)
 	forwardProtocol(@protocol(MTLDevice));
 	forwardProtocol(spi);
 	forwardBaseMethods();
-	if(p1275_user_boot())p1275_install_layout_shim();
+	if(p1275_user_boot()){@autoreleasepool {p1275_install_layout_shim();}}
 	objc_registerClassPair(gClass);
 	if(p1275_user_boot())say("P1275 typed layout shim ABI=%u",p1275_layout_installed?1:0);
 	say("the class HakiosMetalDevice is registered (Metal on Vulkan, opened at first use; %u of _MTLDevice's methods forwarded "

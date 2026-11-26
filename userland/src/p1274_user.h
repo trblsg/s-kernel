@@ -62,6 +62,28 @@ static inline int p1275_user_boot(void){
     }
     __atomic_store_n(&cached,enabled,__ATOMIC_RELEASE);return enabled;
 }
+static inline int p12751_user_boot(void){
+    if(!p1275_user_boot())return 0;
+    static int cached=-1;int old=__atomic_load_n(&cached,__ATOMIC_ACQUIRE);
+    if(old>=0)return old;
+    char args[4096]={0};size_t n=sizeof(args)-1;int enabled=0;
+    if(sysctlbyname("kern.bootargs",args,&n,NULL,0)==0 && n<sizeof(args)){
+        args[n]=0;const char *s=args;
+        while((s=strstr(s,"p12751=1"))!=NULL){
+            if((s==args || s[-1]==' ') && (s[8]==0 || s[8]==' ')){enabled=1;break;}s++;
+        }
+    }
+    __atomic_store_n(&cached,enabled,__ATOMIC_RELEASE);return enabled;
+}
+static inline int p12751_boot_mode(void){
+    if(!p12751_user_boot())return -1;
+    static int cached=-2;int old=__atomic_load_n(&cached,__ATOMIC_ACQUIRE);
+    if(old>=-1)return old;
+    int v=-1;size_t n=sizeof(v);
+    if(sysctlbyname("kern.hakios.p12751_boot_latch",&v,&n,NULL,0)!=0 || n!=sizeof(v) || v<0 || v>7)v=-1;
+    /* All callers run after PID1; absent latch conservatively stays stock. */
+    __atomic_store_n(&cached,v,__ATOMIC_RELEASE);return v;
+}
 static inline unsigned p1275_mode(void){
     if(!p1275_user_boot())return 0;
     int v=0;size_t n=sizeof(v);

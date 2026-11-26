@@ -20,6 +20,7 @@ static uint32_t p1274_state,p1274_profile_id,p1274_cancel,p1274_reason,p1274_sel
 static uint32_t p1274_fast_limit,p12741_lit_limit,p12741_guard_armed,p1274_trigger_bits,p1274_count,p1274_event_count,p1274_event_drops;
 static uint32_t p12741_peak_select;
 static uint32_t p1275_selected,p1275_load_level;
+static int p12751_latched=-1;
 static uint64_t p1275_load_since,p1275_load_quiet;
 static int32_t p12741_peak_mc=-273000,p12741_lit_mc=-273000;
 static int32_t p12741_guard_big_peak=-273000,p12741_guard_lit_peak=-273000;
@@ -198,6 +199,19 @@ static void p1275_load_tick(uint64_t now){
     unsigned old=__atomic_load_n(&p1275_load_level,__ATOMIC_ACQUIRE),level=old;
     unsigned sum=clusters[1].sum_now+clusters[0].sum_now;
     if(!p1275_load_enabled(now)){level=0;p1275_load_since=p1275_load_quiet=0;}
+    else if(__atomic_load_n(&p12751_latched,__ATOMIC_ACQUIRE)>=0 && __atomic_load_n(&p1274_state,__ATOMIC_ACQUIRE)==2){
+        /* Pre-burst envelope immediately after an explicit OFF load arm.
+         * No floor/voltage/core change. Keep both clusters below stock
+         * before the next workload becomes visible to the governor. */
+        unsigned want=(sum>=200 || p1274_rising || p1274_mc>=62000 || p12741_lit_mc>=62000)?2u:1u;
+        if(want==2){level=2;p1275_load_quiet=0;}
+        else if(level==2){
+            if(sum<100 && p1274_mc<=60000 && p12741_lit_mc<=60000){
+                if(!p1275_load_quiet)p1275_load_quiet=now;
+                if(now-p1275_load_quiet>=p1274_ticks_ms(3000))level=1;
+            }else p1275_load_quiet=0;
+        }else level=1;
+    }
     else if(sum>=200){
         p1275_load_quiet=0;
         if(!p1275_load_since)p1275_load_since=now;
@@ -479,6 +493,7 @@ static int p1274_arm_profile(int v,unsigned mode) {
     p1274_requested_mask=p1274_big_mask|p1274_lit_mask;
     p1274_start=now;p1274_planned_end=end;
     __atomic_store_n(&p1274_profile_id,(unsigned)v,__ATOMIC_RELEASE);p1274_cancel=0;p1274_reason=0;
+    __atomic_store_n(&hakios_p12751_trace_replace,mode && __atomic_load_n(&p12751_latched,__ATOMIC_ACQUIRE)>=0?1u:0u,__ATOMIC_RELEASE);
     __atomic_store_n(&hakios_p1274_trace_late,1,__ATOMIC_RELEASE);
     __atomic_store_n(&hakios_p1274_deadline,end,__ATOMIC_RELEASE);
     __atomic_store_n(&p1275_selected,mode,__ATOMIC_RELEASE);
@@ -695,4 +710,5 @@ static int p12741_guard_sysctl(__unused struct sysctl_oid *oidp,__unused void *a
     return SYSCTL_OUT(req,buf,strlen(buf)+1);
 }
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p12741_guard,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p12741_guard_sysctl,"A","P1274.1 live direct thermal guard and both caps");
+#include "hakios.p12751.h"
 #endif

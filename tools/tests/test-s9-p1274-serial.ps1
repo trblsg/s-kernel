@@ -10,6 +10,10 @@ Check (P12-ReplyShape 'p1274_status' 'version=1 state=2 profile=4 now=120000' $t
 Check (P12-ReplyShape 'p1274_metal_log_mode' '-1' $true) 'signed mode'
 Check (P12-ReplyShape 'p12741_revision' '2' $true) 'revision'
 Check (P12-ReplyShape 'p1275_revision' '1' $true) 'P1275 revision'
+Check (P12-ReplyShape 'p12751_boot_latch' '7' $true) 'P12751 boot latch'
+Check (-not (P12-ReplyShape 'p12751_boot_latch' '8' $true)) 'P12751 invalid boot latch'
+Check (P12-ReplyShape 'p12751_stage_info' 'version=1 sealed=1 count=2 done=1 drops=0' $true) 'P12751 stage info'
+Check (P12-ReplyShape 'p12751_stage_page' 'version=1 select=0 at=20000 end=721000 pid=134 task=123 tid=456 stage=11 cpu=12345 user=123 sys=10 minor=0 major=0 images0=17 images1=19 ok=1 usage=1' $true) 'P12751 stage page'
 Check (P12-ReplyShape 'p1275_selected' '16' $true) 'P1275 selected'
 Check (-not (P12-ReplyShape 'p1275_selected' '17' $true)) 'P1275 invalid selected'
 Check (P12-ReplyShape 'p1275_focus' 'version=1 s=8192 s=12287' $true) 'P1275 focus'
@@ -17,7 +21,7 @@ Check (-not (P12-ReplyShape 'p1275_focus' 'version=1 s=8192 junk' $true)) 'P1275
 Check (-not (P12-ReplyShape 'p12741_revision' '1' $true)) 'old revision accepted'
 Check (P12-ReplyShape 'p12741_guard' 'version=2 armed=1 at=720001 big=64000 lit=63000 gpu=62000 age=1 battery=41 fast=0 lit_fast=0 peak_big=70000 peak_lit=64000 changes=2 last_change=500000 bcur=650000 lcur=1053000' $true) 'live guard shape'
 Check (P12-ReplyShape 'p1274_restore' 'version=1 state=3 profile=0 cores=4 actual=ff requested=ff fast=0 online=68 exit=0 display=1' $true) 'restore'
-foreach($bad in @(@('p1274_profile','4'),@('p12741_profile','4'),@('p12741_profile','10'),@('p1274_select','14280'),@('p12741_guard','1'),@('p1274_metal_log_mode','2'),@('p1274_user_event','1'),@('p1275_profile','4'),@('p1275_profile','17'),@('p1275_selected','4'),@('p1275_mode','4'))){
+foreach($bad in @(@('p1274_profile','4'),@('p12741_profile','4'),@('p12741_profile','10'),@('p1274_select','14280'),@('p12741_guard','1'),@('p1274_metal_log_mode','2'),@('p1274_user_event','1'),@('p1275_profile','4'),@('p1275_profile','17'),@('p1275_selected','4'),@('p1275_mode','4'),@('p12751_boot_latch','3'),@('p12751_next','3'),@('p12751_ack','3'),@('p12751_stage_select','512'))){
  $refused=$false;try{[void](P12-Query $bad[0] $bad[1])}catch{if($_.Exception.Message -match 'only permits|disallowed'){$refused=$true}else{throw}}
  Check $refused "unsafe write $bad"
 }
@@ -85,7 +89,7 @@ try{
   $sel=5000+$i;$script:mockPages[$sel]="version=1 select=$sel kind=5 cpu=$i n=0 ticks=0"
  }
  $script:mockOrder=[System.Collections.Generic.List[string]]::new()
- $script:mockSelect=0;$script:mockTraceSelect=0
+ $script:mockSelect=0;$script:mockTraceSelect=0;$script:mockStageSelect=0;$script:mockFair=$false
  $script:mockStatus=P125-Fields $st
  function Read-Frozen($meta){
   Stable-Line (Join-Path $opts.RunDir 'status.txt') $st
@@ -99,10 +103,14 @@ try{
   switch -Regex ($Name){
    '^p12741_guard$' {return 'version=2 armed=1 at=720001 big=64000 lit=63000 gpu=62000 age=1 battery=41 fast=0 lit_fast=0 peak_big=70000 peak_lit=64000 changes=2 last_change=500000 bcur=650000 lcur=1053000'}
    '^p1275_focus$' {return 'version=1 s=8192'}
+   '^p12751_stage_info$' {return 'version=1 sealed=1 count=2 done=1 drops=0'}
+   '^p12751_stage_focus$' {return 'version=1 s=0 s=1'}
+   '^p12751_stage_select$' {$script:mockStageSelect=[int]$Value;return $Value}
+   '^p12751_stage_page$' {$script:mockOrder.Add("S$script:mockStageSelect");if($script:mockStageSelect -eq 0){return 'version=1 select=0 at=20000 end=721000 pid=134 task=123 tid=456 stage=11 cpu=12345 user=123 sys=10 minor=0 major=0 images0=17 images1=19 ok=1 usage=1'}else{return 'version=1 select=1 at=330000 end=0 pid=135 task=124 tid=457 stage=7 cpu=18446744073709551615 user=0 sys=0 minor=0 major=0 images0=22 images1=0 ok=2 usage=0'}}
    '^p1274_select$' {$script:mockSelect=[int]$Value;return $Value}
    '^p1274_page$' {$script:mockOrder.Add("P$script:mockSelect");return $script:mockPages[$script:mockSelect]}
    '^p1273_gpu_status$' {return 'version=1 generation=1 submitted=0 completed=0 overwritten=0 first_wake=0 slots=1024'}
-   '^p1273_trace_cpu([0-7])$' {$cpu=[int]$Matches[1];$mask=if($cpu -eq 3){'2/0'}else{'0/0'};return "version=1 cpu=$cpu generation=1 mask=$mask overhead=0 clipped=0"}
+   '^p1273_trace_cpu([0-7])$' {$cpu=[int]$Matches[1];$mask=if($cpu -eq 3 -or ($script:mockFair -and $cpu -eq 0)){'2/0'}else{'0/0'};return "version=1 cpu=$cpu generation=1 mask=$mask overhead=0 clipped=0"}
    '^p1273_trace_select$' {$script:mockTraceSelect=[int]$Value;return $Value}
    '^p1273_trace_page$' {$script:mockOrder.Add("T$script:mockTraceSelect");return "version=1 select=$script:mockTraceSelect generation=1 present=1 bin=1 mask=1 dropped=0 dropped_ticks=0 r=1/2/136/2/100/0/1/1"}
    default {throw "unexpected mock query $Name"}
@@ -125,5 +133,15 @@ try{
  Check ($batch -and (Test-Path (Join-Path $opts.RunDir 'p1275-focus.txt'))) 'P1275 focus checkpoint'
  Check ($script:mockOrder[2] -eq 'P8192') 'P1275 focus priority'
  Check (-not (Test-Path (Join-Path $opts.RunDir 'dump.complete'))) 'P1275 partial marked complete'
+ $opts.RunDir=Join-Path $dir 'mock-p12751';[void](New-Item -ItemType Directory -Path $opts.RunDir)
+ $script:mockOrder.Clear();$script:mockFair=$true;$meta|Add-Member -NotePropertyName p12751_latch -NotePropertyValue 7
+ $script:budget=16;$opts.MaxPages=16
+ $batch=$false;try{Dump $meta}catch{if($_.Exception.Message -eq 'P1274_BATCH_LIMIT'){$batch=$true}else{throw}}
+ Check ($batch -and $script:mockOrder[0] -eq 'S0' -and $script:mockOrder[1] -eq 'S1') 'paired boot/tail and censored stage priority'
+ Check ($script:mockOrder.Contains('T3080') -and $script:mockOrder.Contains('T8')) 'both cluster pages must be included in first batch'
+ Check (-not (Test-Path (Join-Path $opts.RunDir 'dump.complete'))) 'P12751 partial marked complete'
+ $opts.MaxPages=512;$script:budget=512;Dump $meta
+ Check (Test-Path (Join-Path $opts.RunDir 'dump.complete')) 'P12751 resume failed'
+ Check (@($script:mockOrder|Where-Object {$_ -eq 'S0'}).Count -eq 1) 'P12751 reread sealed stage'
 }finally{Remove-Item -LiteralPath $dir -Recurse -Force}
 Write-Host 'P1274.1 typed ABI, refusal, episode coverage, partial peak, QH/energy, priority dump/resume and qualification mocks PASS; no serial'

@@ -100,7 +100,7 @@ extern uint64_t hakios_p127_fg_seq;
 extern uint64_t hakios_p1274_deadline,hakios_p1274_fg_seq;
 extern uint64_t hakios_p1274_usb_down,hakios_p1274_usb_up,hakios_p1274_display_on_at;
 extern uint64_t hakios_p1274_wfi_n[8],hakios_p1274_wfi_ticks[8];
-extern uint32_t hakios_p1274_trace_late,hakios_p1274_writers;
+extern uint32_t hakios_p1274_trace_late,hakios_p1274_writers,hakios_p12751_trace_replace;
 extern struct p127_fg_row hakios_p1274_fg_rows[P1274_FG_SLOTS];
 /* P12.7.3 bounded recount trace. State 0 empty, 1 preparing, 2 active,
  * 3 freezing, 4 frozen, 5 reader owns frozen storage. No policy writes. */

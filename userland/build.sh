@@ -269,6 +269,14 @@ if [ -n "$PANVK_DIR" ]; then
 		{ echo "build.sh: PANVK_DIR=$PANVK_DIR has no libvulkan_panfrost.dylib and vk_smoke (tools/mk-panvk.sh)" >&2; exit 1; }
 	mkdir -p root/lib
 	install -m 0755 "$PANVK_DIR/libvulkan_panfrost.dylib" root/lib/libvulkan_panfrost.dylib
+    if [ "${P12751_DUAL:-0}" = 1 ]; then
+        test -s "$PANVK_DIR/p12751-verify.json" || exit 1
+        node ../tools/p12751-panvk-null.js verify-pack "$PANVK_DIR/libvulkan_panfrost.dylib" "$PANVK_DIR/libvulkan_panfrost_opt.dylib" "$PANVK_DIR/p12751-verify.json"
+        install -m 0755 "$PANVK_DIR/libvulkan_panfrost_opt.dylib" root/lib/libvulkan_panfrost_opt.dylib
+        install -m 0755 "$PANVK_DIR/vk_smoke_opt" root/bin/vk_smoke_opt
+        cmp "$PANVK_DIR/libvulkan_panfrost_opt.dylib" root/lib/libvulkan_panfrost_opt.dylib
+        cmp "$PANVK_DIR/libvulkan_panfrost.dylib" root/lib/libvulkan_panfrost.dylib
+    fi
 	install -m 0755 "$PANVK_DIR/vk_smoke" root/bin/vk_smoke
 	echo "build.sh: PanVK (libvulkan_panfrost.dylib, vk_smoke) from $PANVK_DIR"
 fi

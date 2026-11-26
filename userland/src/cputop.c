@@ -17,6 +17,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include "p1274_user.h"
 
 /* libproc's, which the iPhoneOS SDK does not declare (XNU's bsd/sys/proc_info.h, libsyscall/wrappers/libproc) */
@@ -52,6 +54,8 @@ int proc_name(int pid, void *buffer, uint32_t buffersize);
 struct sample {
 	int pid;
 	uint64_t time;                  /* user + system, mach_absolute_time's units */
+    uint64_t user,sys;
+    int32_t faults,pageins,csw,threads,running;
 };
 
 static struct sample last[MAX_PROCS], now[MAX_PROCS];
@@ -64,6 +68,7 @@ static unsigned p1274_process_code(const char *name)
         "PridePosterExtension","GradientPosterExtension","PhotosPosterProvider","UnityPosterExtension",
         "ExtragalacticPoster","healthappd","DayStreamProces","HistoricalAnaly","dasd","runningboardd",
         "backboardd","SpringBoard","launchd","healthd","filecoordinationd","chronod","wifid","locationd"};
+    if(!strcmp(name,"mediaserverd"))return 24u;
     for(unsigned i=0;i<sizeof(names)/sizeof(names[0]);i++)
         if(!strcmp(name,names[i]) || ((i==10 || i==11 || i==16) && !strncmp(name,names[i],strlen(names[i]))))return i+1;
     return strstr(name,"Poster")?23u:0u;
@@ -83,18 +88,41 @@ by_time(const void *a, const void *b)
 }
 
 static uint64_t
-time_before(int pid, int *found)
+time_before(int pid, int *found,const struct sample **prior)
 {
 	for (int i = 0; i < last_count; i++) {
 		if (last[i].pid == pid) {
-			*found = 1;
+			*found = 1;*prior=&last[i];
 			return last[i].time;
 		}
 	}
-	*found = 0;
+	*found = 0;*prior=NULL;
 	return 0;
 }
 
+/* Explicit USB request, persisted on the already running 5s sampler.
+ * No boot mode is changed live. Atomic rename in a trusted root-owned dir. */
+static void p12751_persist_next(void){
+    if(p12751_boot_mode()<4 || geteuid()!=0)return;
+    int next=-1,ack=-1;size_t n=sizeof(next);
+    if(sysctlbyname("kern.hakios.p12751_next",&next,&n,NULL,0)!=0 || n!=sizeof(next) || next<0 || next>3)return;
+    n=sizeof(ack);if(sysctlbyname("kern.hakios.p12751_ack",&ack,&n,NULL,0)!=0 || n!=sizeof(ack) || ack==next)return;
+    const char *dir="/private/var/db";
+    struct stat st;
+    if(lstat(dir,&st)!=0 || !S_ISDIR(st.st_mode) || st.st_uid!=0 || (st.st_mode&0022))return;
+    char path[]="/private/var/db/HakiosMetal.nextboot.XXXXXX";
+    int fd=mkstemp(path);if(fd<0)return;
+    char v[2]={(char)('0'+next),'\n'};
+    bool ok=fchmod(fd,0600)==0 && write(fd,v,2)==2 && fsync(fd)==0;
+    if(close(fd)!=0)ok=false;
+    if(ok)ok=rename(path,"/private/var/db/HakiosMetal.nextboot")==0;
+    if(!ok){unlink(path);return;}
+    // Flush the containing directory if supported. File content was fsynced.
+    int d=open(dir,O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+    if(d>=0){(void)fsync(d);close(d);}
+    if(sysctlbyname("kern.hakios.p12751_ack",NULL,NULL,&next,sizeof(next))==0)
+        printf("P12751 nextboot persisted=%d (current mode unchanged)\n",next);
+}
 int
 main(int argc, char **argv)
 {
@@ -110,6 +138,7 @@ main(int argc, char **argv)
 	mach_timebase_info(&timebase);
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	for (unsigned look = 0; looks == 0 || look <= looks; look++) {
+		p12751_persist_next();
 		uint64_t sample_begin=mach_absolute_time();
 		int bytes = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids)), count = 0, shown = 0;
 		uint64_t at = mach_absolute_time(), all = 0;
@@ -122,20 +151,38 @@ main(int argc, char **argv)
 			}
 			now[count].pid = pids[i];
 			now[count].time = info.pti_total_user + info.pti_total_system;
+            now[count].user=info.pti_total_user;now[count].sys=info.pti_total_system;
+            now[count].faults=info.pti_faults;now[count].pageins=info.pti_pageins;now[count].csw=info.pti_csw;
+            now[count].threads=info.pti_threadnum;now[count].running=info.pti_numrunning;
 			count++;
 		}
 		if (look > 0) {
 			int n = 0;
 			const bool p1274_observe=p1274_user_observing();
+            const bool p12751_observe=p12751_boot_mode()>=0;
+            unsigned detailed=0;
 
 			for (int i = 0; i < count; i++) {
 				int found;
-				uint64_t then = time_before(now[i].pid, &found);
-				if(p1274_observe && (!found || now[i].time>then)){
+				const struct sample *prior=NULL;
+				uint64_t then = time_before(now[i].pid, &found,&prior);
+				if((p1274_observe || p12751_observe) && (!found || now[i].time>then)){
 					char name[64]={0};
 					if(proc_name(now[i].pid,name,sizeof(name))>0){
 						unsigned code=p1274_process_code(name);
-						if(code && (!found || now[i].time>then))
+						if(p12751_observe && detailed<12 && (code<=9 || code==23 || code==24) && code &&
+                            now[i].time>then && now[i].time-then>(at-before)/20){
+                            bool valid=prior && now[i].user>=prior->user && now[i].sys>=prior->sys &&
+                              prior->faults>=0 && prior->pageins>=0 && prior->csw>=0 &&
+                              now[i].faults>=prior->faults && now[i].pageins>=prior->pageins && now[i].csw>=prior->csw;
+                            printf("P12751 cpu at=%llu pid=%d code=%u user=%llu sys=%llu faults=%d pageins=%d csw=%d threads=%d running=%d valid=%u\n",
+                              (unsigned long long)at,now[i].pid,code,
+                              (unsigned long long)(valid?now[i].user-prior->user:0),
+                              (unsigned long long)(valid?now[i].sys-prior->sys:0),
+                              valid?now[i].faults-prior->faults:0,valid?now[i].pageins-prior->pageins:0,valid?now[i].csw-prior->csw:0,
+                              now[i].threads,now[i].running,valid?1:0);detailed++;
+                        }
+                        if(p1274_observe && code && (!found || now[i].time>then))
 							(void)p1274_emit(4,code,(uint64_t)now[i].pid,
 							    now[i].time>=then?now[i].time-then:0,now[i].time,
 							    found?0:1,at-before,at);

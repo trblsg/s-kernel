@@ -1484,6 +1484,35 @@ test_writable(void)
 	list_tree("/tmp/t", 1);
 }
 
+/* Latch before the real launchd, after the data volume is mounted.
+ * The root-owned two-byte file is only a NEXT boot preference. */
+static void
+p12751_boot_choice(void)
+{
+    const char *enabled=boot_arg("p12751");
+    if(!enabled || strcmp(enabled,"1"))return;
+    int choice=3;
+    if(var_kept){
+        const char *path="/private/var/db/HakiosMetal.nextboot";
+        struct stat st,before,dir;
+        char buf[3]={0};
+        int fd=-1;
+        if(!lstat("/private/var/db",&dir) && dir.st_uid==0 && (dir.st_mode&0170000)==0040000 && !(dir.st_mode&0022) &&
+            !lstat(path,&before) && before.st_uid==0 && (before.st_mode&0170000)==0100000 && !(before.st_mode&0022))
+            fd=open(path,O_RDONLY,0);
+        if(fd>=0){
+            if(!fstat(fd,&st) && st.st_dev==before.st_dev && st.st_ino==before.st_ino && st.st_uid==0 && (st.st_mode&0170000)==0100000 &&
+                !(st.st_mode&0022) && st.st_size==2 &&
+                read(fd,buf,sizeof(buf))==2 && buf[0]>='0' && buf[0]<='3' && buf[1]=='\n')
+                choice=buf[0]-'0';
+            close(fd);
+        }
+    }
+    int latch=choice|(var_kept?4:0);
+    int rc=sysctlbyname("kern.hakios.p12751_boot_latch",NULL,NULL,&latch,sizeof(latch));
+    printf("P12751 boot latch=%d rc=%d (bit0 opt, bit1 early, bit2 kept)\n",latch,rc);
+}
+
 /* Run one line of /etc/rc: words separated by blanks, no quoting; a last word "&" = do not wait. */
 static void
 run_command(char *line)
@@ -1563,6 +1592,7 @@ run_command(char *line)
 		if (flash_root_mode && strcmp(argv[1], "/sbin/launchd.darwin") == 0) {
 			argv[1] = "/sbin/launchd";      /* the root is Darwin's own volume: its launchd is that */
 		}
+		if (!strcmp(argv[1], "/sbin/launchd") || !strcmp(argv[1], "/sbin/launchd.darwin"))p12751_boot_choice();
 		execve(argv[1], argv + 1, envp);
 		printf("%s: %s\n", argv[1], strerror(errno));
 		return;

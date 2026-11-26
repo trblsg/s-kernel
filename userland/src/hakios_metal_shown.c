@@ -45,6 +45,7 @@
 #include <sys/sysctl.h>
 #include <unistd.h>
 #include "hakios_metal_shown.h"
+#include "p1274_user.h"
 
 int
 hakios_metal_beside_bundle(const char *name, char *path, unsigned long size)
@@ -76,7 +77,7 @@ hakios_metal_vk_driver(char *path, unsigned long size, void (*say)(const char *l
 	char file[1024], line[1200];
 	FILE *f;
 
-	if (environment != NULL && environment[0] != '\0') {
+	if (!p12751_user_boot() && environment != NULL && environment[0] != '\0') {
 		strlcpy(path, environment, size);
 		return;
 	}
@@ -86,6 +87,9 @@ hakios_metal_vk_driver(char *path, unsigned long size, void (*say)(const char *l
 		fclose(f);
 		path[strcspn(path, " \t\r\n#")] = '\0';
 		if (named && path[0] == '/') {
+            int mode=p12751_boot_mode();
+            if(!strcmp(path,"/redwood/lib/libvulkan_panfrost.dylib") && mode>=0 && (mode&1))
+                strlcpy(path,"/redwood/lib/libvulkan_panfrost_opt.dylib",size);
 			return;
 		}
 		if (say != NULL) {
