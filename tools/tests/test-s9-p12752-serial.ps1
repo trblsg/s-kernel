@@ -57,18 +57,26 @@ function Test-OfflineTransport([string]$Case){
     $script:LifeSerial=[IO.Ports.SerialPort]::new()
     $script:LifeState='OFF';$script:LifeCurrentSegment=$null
     $Port='COM125';$ReconnectPort='COM126';$Scenario='Idle52Offline'
+    $P12752Idle=$Case -in @('ok','stale','hot','parser','timeout','kernel_early','fencehot')
+    if($Case -eq 'stale'){$ReconnectPort=''}
+    $script:expectedPort=if($ReconnectPort){$ReconnectPort}else{$Port}
+    $script:holdList=0;$script:hold=$false
     function Life-Now {$script:fakeAt=$script:fakeAt.AddSeconds(1);return $script:fakeAt}
     function Start-Sleep {param([int]$Milliseconds)}
-    function Life-Say([string]$Message){if($Message -match 'RECONNECT USB NOW'){$script:fakeReconnect=$true}}
+    function Life-Say([string]$Message){
+        if($Message -match 'keep unplugged'){$script:hold=$true}
+        if($Message -match 'RECONNECT USB NOW'){$script:hold=$false;$script:fakeReconnect=$true}
+    }
     function Life-CheckSafety([datetime]$At){if($script:fakeCase -eq 'hot'){throw 'synthetic thermal stop'}}
     function P12-EarlyThermalGuard{}
     function P125-PortNames{
         $script:fakeList++
+        if($script:hold){$script:holdList++}
         if($script:fakeReconnect){
-            if($script:fakeCase -ne 'timeout'){return 'COM126'}
+            if($script:fakeCase -ne 'timeout'){return $script:expectedPort}
             return
         }
-        if($script:fakeCase -eq 'stuck' -or $script:fakeList -le 3){return 'COM125'}
+        if($script:fakeCase -in @('stuck','stale','kernel_early') -or $script:fakeList -le 3){return 'COM125'}
         if($script:fakeCase -eq 'early' -and $script:fakeList -ge 7){return 'COM125'}
     }
     function Life-Pump{
@@ -79,28 +87,49 @@ function Test-OfflineTransport([string]$Case){
         [void]$script:LifeSerial.Read($buf,0,$buf.Length)
     }
     function P125-Open([string]$Name){
-        if($Name -ne 'COM126'){throw 'wrong COM reopened'}
+        if($Name -ne $script:expectedPort){throw 'wrong COM reopened'}
+        if($script:hold -or -not $script:fakeReconnect){throw 'opened before reconnect prompt'}
         $script:fakeOpen++
-        if($script:fakeOpen -eq 1){throw [System.IO.IOException]::new('synthetic enumeration race')}
+        if($script:fakeOpen -eq 1 -or $script:fakeCase -eq 'timeout'){throw [System.IO.IOException]::new('synthetic enumeration race')}
         $script:LifeSerial=[IO.Ports.SerialPort]::new()
     }
-    function Life-SyncReadOnly{$script:fakeFence++;$script:LifeState='OFF'}
+    function Life-SyncReadOnly{
+        $script:fakeFence++
+        if($script:fakeCase -eq 'stale' -and $script:fakeFence -eq 1){throw 'P10 display sysctl reply absent; synthetic stale handle'}
+        if($script:fakeCase -eq 'fencehot'){throw 'synthetic thermal stop in live fence'}
+        $script:LifeState='OFF'
+    }
     try{
         switch($Case){
-            'ok'{P125-Offline 6;Check ($script:fakeRead -eq 1 -and $script:fakeOpen -eq 2 -and $script:fakeFence -eq 1) 'offline reopen/fence failed'}
+            {$_ -in @('ok','stale','kernel_early')}{
+                P125-Offline 6
+                $openCount=if($Case -eq 'stale'){3}else{2}
+                $fenceCount=if($Case -eq 'stale'){2}else{1}
+                Check ($script:fakeRead -eq 1 -and $script:fakeOpen -eq $openCount -and $script:fakeFence -eq $fenceCount -and $script:holdList -eq 0) 'offline reopen/fence or silent hold failed'
+            }
             'hot'{Refuse {P125-Offline 6} 'thermal stop';Check ($script:fakeRead -eq 0 -and $script:fakeOpen -eq 0) 'thermal error swallowed'}
             'parser'{Refuse {P125-Offline 6} 'malformed telemetry';Check ($script:fakeOpen -eq 0) 'parser error swallowed'}
             'stuck'{Refuse {P125-Offline 6} 'COM did not disappear';Check ($script:fakeOpen -eq 0) 'false unplug accepted'}
             'early'{Refuse {P125-Offline 6} 'reconnected early';Check ($script:fakeOpen -eq 0) 'early reconnect accepted'}
-            'timeout'{Refuse {P125-Offline 6} 'reconnect timeout';Check ($script:fakeOpen -eq 0) 'unrequested port opened'}
+            'timeout'{Refuse {P125-Offline 6} 'reconnect timeout';Check ($script:fakeOpen -gt 0 -and $script:fakeFence -eq 0) 'timeout did not remain bounded to target'}
+            'fencehot'{Refuse {P125-Offline 6} 'thermal stop in live fence';Check ($script:fakeOpen -eq 2 -and $script:fakeFence -eq 1) 'thermal stop retried'}
         }
     }finally{if($null -ne $script:LifeSerial){$script:LifeSerial.Dispose();$script:LifeSerial=$null}}
 }
-foreach($case in @('ok','hot','parser','stuck','early','timeout')){Test-OfflineTransport $case}
+foreach($case in @('ok','stale','kernel_early','hot','parser','stuck','early','timeout','fencehot')){Test-OfflineTransport $case}
 $arm=@{anchor='abcd';hz='26000000';now='1000'}
 $end=@{anchor='abcd';hz='26000000';now='5000';start='1200';down='1200'}
 Check (P125-RejoinMatches $arm $end) 'valid offline rejoin rejected'
 $end.anchor='dcba';Check (-not (P125-RejoinMatches $arm $end)) 'wrong kernel accepted'
 $end.anchor='abcd';$end.start='900';$end.down='900';Check (-not (P125-RejoinMatches $arm $end)) 'old phase accepted'
 $end.start='1200';$end.down='0';Check (-not (P125-RejoinMatches $arm $end)) 'missing disconnect accepted'
-Write-Host 'P12752 real offline flow: closed Read, delayed COM removal, reopen retry, live fence, thermal/parser refusal, early/timeout and phase identity PASS (no physical serial)'
+$link=@{hz='26000000';start='2600000000';down='2600000000';end='4160000000';up='4160000000'}
+Check (P125-LinkIntervalValid $link 60) 'complete kernel interval rejected'
+$link.end='2860000000';$link.up=$link.end
+Check (-not (P125-LinkIntervalValid $link 60)) 'early physical reconnect accepted'
+$link.end='4160000000';$link.up='0'
+Check (-not (P125-LinkIntervalValid $link 60)) 'missing link-up accepted'
+$link.up=$link.end;$link.down='0'
+Check (-not (P125-LinkIntervalValid $link 60)) 'missing link-down accepted'
+$link.down=$link.start;Check (P125-LinkIntervalValid $link 60 -Fixed) 'fixed kernel interval rejected'
+Write-Host 'P12752 real offline flow: closed Read, persistent COM125 name, silent hold, stale Open/fence retry, thermal/parser refusal, legacy early/stuck, timeout, phase identity and early/missing kernel link evidence PASS (no physical serial)'

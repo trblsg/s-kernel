@@ -217,6 +217,13 @@ function P125-ReadSnapshot([string]$Label,[switch]$CountsOnly){
     return $snapshot
 }
 function P125-Sub([uint64]$End,[uint64]$Begin){if($End -lt $Begin){throw 'P125 counter reset or reboot during capture'};return ($End-$Begin)}
+function P125-LinkIntervalValid($Status,[int]$Seconds,[switch]$Fixed){
+    if([double]$Status.hz -le 0 -or [uint64]$Status.end -le [uint64]$Status.start -or
+       $Status.down -eq '0' -or $Status.down -ne $Status.start){return $false}
+    $duration=([double]$Status.end-[double]$Status.start)/[double]$Status.hz
+    if($Fixed){return ([uint64]$Status.up -ge [uint64]$Status.end -and [Math]::Abs($duration-60) -le 0.001)}
+    return ($Status.up -eq $Status.end -and $duration -ge ($Seconds-5))
+}
 function P125-Delta($Before,$After,[string]$Label,[int]$Mode,[string]$Stem,[switch]$OfflineAggregate){
     $st=$After.Status;$hz=[double]$st.hz
     if($hz -le 0 -or [uint64]$st.end -le [uint64]$st.start){throw 'P125 missing kernel interval; raw retained'}
@@ -225,8 +232,8 @@ function P125-Delta($Before,$After,[string]$Label,[int]$Mode,[string]$Stem,[swit
     $expectedReason=if($fixed){'10'}else{'0'}
     $valid=($st.reason -eq $expectedReason -and $st.display_on -eq '0' -and $st.active -eq '0' -and $st.armed -eq '0')
     if($fixed){
-        if($Mode -ne 3 -or $st.down -ne $st.start -or $st.down -eq '0' -or [uint64]$st.up -lt [uint64]$st.end -or [Math]::Abs($seconds-60) -gt 0.001){$valid=$false}
-    }elseif($Mode -eq 3 -and ($st.down -ne $st.start -or $st.up -ne $st.end -or $st.down -eq '0' -or $seconds -lt ($TraceSeconds-5))){$valid=$false}
+        if($Mode -ne 3 -or -not (P125-LinkIntervalValid $st 60 -Fixed)){$valid=$false}
+    }elseif($Mode -eq 3 -and -not (P125-LinkIntervalValid $st $TraceSeconds)){$valid=$false}
     $data=New-Object 'System.Collections.Generic.List[object]'
     $cs=New-Object 'System.Collections.Generic.List[object]'
     $sum=@{}
@@ -317,6 +324,10 @@ function P125-Offline([int]$WaitSeconds=$TraceSeconds) {
     $script:P125OfflineTransportLost=$false
     $target=if($ReconnectPort){$ReconnectPort}else{$Port}
     $source=$Port
+    # P12752 Idle52Offline is a kernel-timestamped measurement. A Windows
+    # COM name is registry/enumeration metadata, not a USB link witness.
+    # Other callers retain their old strict host enumeration behavior.
+    $kernelLinkProof=($P12752Idle -and $Scenario -in @('Idle52Offline','EnergyOffline'))
     Life-Say 'P125 USB OFFLINE ARMED: disconnect USB now; do NOT wake screen'
     $until=(Life-Now).AddSeconds(20)
     while((P125-PortNames) -contains $source){
@@ -327,31 +338,77 @@ function P125-Offline([int]$WaitSeconds=$TraceSeconds) {
         try{Life-Pump}
         catch{
             if(-not (P125-IsReadDisconnect $_.Exception)){throw}
-            Life-Say 'P125 serial read lost during requested unplug; verifying COM removal'
+            Life-Say 'P125 serial read lost during requested unplug; closing host handle'
             break
         }
         Life-CheckSafety (Life-Now);P12-EarlyThermalGuard
         if($script:LifeState -ne 'OFF'){throw 'P125 display woke before USB disconnect'}
         Start-Sleep -Milliseconds 100
     }
-    $until=(Life-Now).AddSeconds(10)
-    while((P125-PortNames) -contains $source -and (Life-Now) -lt $until){Start-Sleep -Milliseconds 200}
-    if((P125-PortNames) -contains $source){throw 'P125 COM did not disappear; offline interval not verified'}
+    # Release the old handle immediately, before consulting Windows.
+    # Keeping it alive can itself delay removal of the virtual COM name.
     if($null -ne $script:LifeCurrentSegment){$script:LifeCurrentSegment.End=Life-Now}
     $script:LifeCurrentSegment=$null
     $script:P125OfflineTransportLost=$true
     try{$script:LifeSerial.Dispose()}catch{}
     $script:LifeSerial=$null
+    if($kernelLinkProof){
+        if((P125-PortNames) -contains $source){
+            Life-Say 'P125 COM name still listed after handle loss; provisional offline, kernel down/up proof required'
+        }else{
+            Life-Say 'P125 COM name absent; provisional offline, kernel down/up proof required'
+        }
+    }else{
+        $until=(Life-Now).AddSeconds(10)
+        while((P125-PortNames) -contains $source -and (Life-Now) -lt $until){Start-Sleep -Milliseconds 200}
+        if((P125-PortNames) -contains $source){throw 'P125 COM did not disappear; offline interval not verified'}
+    }
     $hostWait=if($Scenario -eq 'OfflineABA'){$WaitSeconds+5}else{$WaitSeconds}
-    Life-Say "P125 host COM disconnected; keep unplugged $hostWait seconds"
+    if($kernelLinkProof){Life-Say "P125 host handle closed; keep unplugged $hostWait seconds (kernel verification pending)"}
+    else{Life-Say "P125 host COM disconnected; keep unplugged $hostWait seconds"}
     $until=(Life-Now).AddSeconds($hostWait)
     while((Life-Now) -lt $until){
-        $ports=@(P125-PortNames)
-        if($ports -contains $source -or $ports -contains $target){throw 'P125 reconnected early; offline phase invalid'}
+        # For P12752 no opens, reads, writes or enumeration-based early
+        # reconnect guesses. An early physical link-up freezes P125 in
+        # kernel; P125-Delta rejects an insufficient down/up interval.
+        if(-not $kernelLinkProof){
+            $ports=@(P125-PortNames)
+            if($ports -contains $source -or $ports -contains $target){throw 'P125 reconnected early; offline phase invalid'}
+        }
         Start-Sleep -Milliseconds 250
     }
     Life-Say "P125 RECONNECT USB NOW to $target; keep screen OFF"
     $until=(Life-Now).AddSeconds(25)
+    if($kernelLinkProof){
+        # A persistent virtual COM name may allow Open() before the
+        # device can answer. A successful Open alone is not a reconnect.
+        # Retry only the exact COM and the read-only fence, never arm.
+        $until=(Life-Now).AddSeconds(45)
+        $AckTimeoutSeconds=5
+        while((Life-Now) -lt $until){
+            Life-CheckSafety (Life-Now);P12-EarlyThermalGuard
+            try{
+                P125-Open $target
+                $script:LifePartial='';$script:LifeSynced=$false;$script:LifeFenceSent=$false;$script:LifeFenceEcho=$false
+                $script:LifeState='UNKNOWN';$script:LifeScene='UNKNOWN'
+                Life-SyncReadOnly
+                if($script:LifeState -ne 'OFF'){throw 'P125 reconnected while screen ON'}
+                $script:Port=$target
+                return
+            }catch{
+                $retry=(P125-IsReadDisconnect $_.Exception) -or
+                    ($_.Exception.Message -like 'P10 display sysctl reply absent;*')
+                for($e=$_.Exception;$null -ne $e;$e=$e.InnerException){
+                    if($e -is [System.UnauthorizedAccessException] -or $e -is [System.TimeoutException]){$retry=$true;break}
+                }
+                if($null -ne $script:LifeSerial){try{$script:LifeSerial.Dispose()}catch{};$script:LifeSerial=$null}
+                if(-not $retry){throw}
+                Life-Say 'P125 reconnect handle/fence not ready; retrying exact COM read-only'
+                Start-Sleep -Milliseconds 500
+            }
+        }
+        throw 'P125 reconnect timeout; kernel probe lease self-expires'
+    }
     # Enumeration can precede a usable device handle. Retry only
     # opening the exact requested COM, never re-arm or resend a policy.
     $opened=$false
@@ -431,7 +488,10 @@ function P125-Phase([string]$Label,[int]$Mode,[int]$Seconds,[string]$Stem,$Befor
             if(-not (P125-RejoinMatches $armed $rejoined)){
                 throw 'P125 reconnected kernel/phase identity mismatch; old lease bounded, raw retained'
             }
-            $script:P125Report.Add("P125 REJOIN verified start=$($rejoined.start) down=$($rejoined.down) up=$($rejoined.up) reason=$($rejoined.reason)")
+            $msg="P125 REJOIN verified start=$($rejoined.start) down=$($rejoined.down) up=$($rejoined.up) reason=$($rejoined.reason)"
+            $script:P125Report.Add($msg);Life-Say $msg
+            # This verifies phase identity only. Duration, stop reason,
+            # thermal coverage and battery external=0 are checked later.
         }catch{
             if($script:P125OfflineTransportLost){
                 # Never send restore commands to an unverified new session.
