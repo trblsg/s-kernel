@@ -50,6 +50,10 @@
  * kernel. Those were read for facts and not copied.
  */
 #include <kern/clock.h>
+#if __has_include(<kern/hakios_p125.h>)
+#include <kern/hakios_p125.h>
+#define P1273_GPU_TRACE 1
+#endif
 #include <kern/locks.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
@@ -2212,14 +2216,32 @@ walk_tables(uint64_t gpu, uint64_t walk[3])
  * finished nor failed within a second. After a failure the GPU is reset, so the next job finds it working.
  */
 #define MALI_HUNG       0xffu
-uint32_t
-hakios_mali_submit(uint64_t chain, bool fragment)
+/* Wake timing is collected under the existing job serialization, never
+ * by reading registers of a sleeping GPU. Direct callers retain old ABI. */
+struct p1273_wake_info {uint64_t begin,end;uint32_t attempted,success;};
+static uint32_t
+mali_submit_observed(uint64_t chain, bool fragment,struct p1273_wake_info *obs)
 {
 	uint32_t slot = fragment ? 0 : 1, js = fragment ? JS0 : JS1, raw, status = 0;
 	bool finished;
 
 	lck_mtx_lock(&mali_job_lock);
-	if (!g3d_ensure_on()) {
+	if(obs){
+		obs->attempted=!g3d_awake;
+		obs->begin=mach_absolute_time();
+	}
+	bool on=g3d_ensure_on();
+	if(obs){
+		obs->end=mach_absolute_time();
+		obs->success=on;
+#if P1273_GPU_TRACE
+		if(obs->attempted && on && __atomic_load_n(&hakios_p1273_trace_state,__ATOMIC_ACQUIRE)==2){
+			uint64_t zero=0;
+			(void)__atomic_compare_exchange_n(&hakios_p1273_trace_trigger,&zero,obs->begin,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);
+		}
+#endif
+	}
+	if (!on) {
 		lck_mtx_unlock(&mali_job_lock);
 		return 0xff;
 	}
@@ -2288,6 +2310,12 @@ hakios_mali_submit(uint64_t chain, bool fragment)
 	return status;
 }
 
+uint32_t
+hakios_mali_submit(uint64_t chain,bool fragment)
+{
+	return mali_submit_observed(chain,fragment,NULL);
+}
+
 /*
  * Jobs in a queue, run by a thread of their own. A submission returns at once with the job's number, and callers wait
  * for that number (hakios_mali_wait). Jobs run one at a time, in the order given, which panfrost needs: a pass's vertex
@@ -2299,6 +2327,10 @@ hakios_mali_submit(uint64_t chain, bool fragment)
 static struct {
 	uint64_t chain, seq, queued;
 	uint32_t owner;                 /* the client's number (hakios_mali_enqueue_for), 0: none */
+#if P1273_GPU_TRACE
+	uint64_t trace_generation,trace_tid,trace_task;
+	uint32_t trace_pid;
+#endif
 	bool fragment;
 } mali_queue[MALI_QUEUE];
 
@@ -2308,6 +2340,62 @@ static unsigned mali_queue_head, mali_queue_count;
 static uint64_t mali_queued_seq, mali_done_seq;
 static bool mali_worker_started;
 static LCK_MTX_DECLARE(mali_queue_lock, &mali_lock_group);
+#if P1273_GPU_TRACE
+/* Completed jobs only; the first successful wake is pinned separately.
+ * Lock is already held on queue completion. No IRQ allocation or MMIO. */
+#define P1273_GPU_ROWS 1024u
+struct p1273_gpu_row {
+	uint64_t seq,generation,job,tid,task,queued,began,ended,wake_begin,wake_end;
+	uint32_t pid,owner,fragment,dropped,status,wake_attempt,wake_ok;
+};
+static struct p1273_gpu_row p1273_gpu_rows[P1273_GPU_ROWS],p1273_gpu_first_wake;
+static uint64_t p1273_gpu_n,p1273_gpu_submitted;
+static unsigned p1273_gpu_select;
+static int
+p1273_gpu_status_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unused int arg2,struct sysctl_req *req)
+{
+	char buf[256];
+	lck_mtx_lock(&mali_queue_lock);
+	snprintf(buf,sizeof(buf),"version=1 generation=%llu submitted=%llu completed=%llu overwritten=%llu first_wake=%llu slots=1024",
+	    (unsigned long long)__atomic_load_n(&hakios_p1273_trace_generation,__ATOMIC_ACQUIRE),
+	    (unsigned long long)p1273_gpu_submitted,(unsigned long long)p1273_gpu_n,
+	    (unsigned long long)(p1273_gpu_n>P1273_GPU_ROWS?p1273_gpu_n-P1273_GPU_ROWS:0),
+	    (unsigned long long)p1273_gpu_first_wake.seq);
+	lck_mtx_unlock(&mali_queue_lock);
+	return SYSCTL_OUT(req,buf,strlen(buf)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1273_gpu_status,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1273_gpu_status_sysctl,"A","P12.7.3 GPU trace coverage");
+static int
+p1273_gpu_select_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unused int arg2,struct sysctl_req *req)
+{
+	int v=(int)__atomic_load_n(&p1273_gpu_select,__ATOMIC_ACQUIRE);
+	int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+	if(e || !req->newptr)return e;
+	if(v<0 || v>(int)P1273_GPU_ROWS)return EINVAL;
+	if(__atomic_load_n(&hakios_p1273_trace_state,__ATOMIC_ACQUIRE)!=4)return EBUSY;
+	__atomic_store_n(&p1273_gpu_select,(unsigned)v,__ATOMIC_RELEASE);
+	return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1273_gpu_select,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1273_gpu_select_sysctl,"I","P12.7.3 GPU trace slot (1024 first wake)");
+static int
+p1273_gpu_page_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unused int arg2,struct sysctl_req *req)
+{
+	if(__atomic_load_n(&hakios_p1273_trace_state,__ATOMIC_ACQUIRE)!=4)return EBUSY;
+	unsigned slot=__atomic_load_n(&p1273_gpu_select,__ATOMIC_ACQUIRE);
+	struct p1273_gpu_row r;
+	lck_mtx_lock(&mali_queue_lock);
+	r=slot==P1273_GPU_ROWS?p1273_gpu_first_wake:p1273_gpu_rows[slot];
+	lck_mtx_unlock(&mali_queue_lock);
+	char buf[448];
+	snprintf(buf,sizeof(buf),"version=1 slot=%u seq=%llu generation=%llu job=%llu tid=%llu task=%llu pid=%u owner=%u fragment=%u dropped=%u status=%u queued=%llu began=%llu ended=%llu wake_begin=%llu wake_end=%llu wake_attempt=%u wake_ok=%u",
+	    slot,(unsigned long long)r.seq,(unsigned long long)r.generation,(unsigned long long)r.job,
+	    (unsigned long long)r.tid,(unsigned long long)r.task,r.pid,r.owner,r.fragment,r.dropped,r.status,
+	    (unsigned long long)r.queued,(unsigned long long)r.began,(unsigned long long)r.ended,
+	    (unsigned long long)r.wake_begin,(unsigned long long)r.wake_end,r.wake_attempt,r.wake_ok);
+	return SYSCTL_OUT(req,buf,strlen(buf)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1273_gpu_page,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1273_gpu_page_sysctl,"A","P12.7.3 frozen GPU job record");
+#endif
 
 /*
  * A client whose job hung (did not end within the second, MALI_HUNG): the GPU is reset under it, as before, and the
@@ -3355,6 +3443,14 @@ mali_worker(__unused void *parameter, __unused wait_result_t result)
 		uint64_t queued = mali_queue[mali_queue_head].queued, job_began = mach_absolute_time();
 		uint32_t owner = mali_queue[mali_queue_head].owner;
 		uint32_t p5_job_status = 0;
+#if P1273_GPU_TRACE
+		struct p1273_gpu_row tr={0};
+		tr.generation=mali_queue[mali_queue_head].trace_generation;
+		tr.tid=mali_queue[mali_queue_head].trace_tid;
+		tr.task=mali_queue[mali_queue_head].trace_task;
+		tr.pid=mali_queue[mali_queue_head].trace_pid;
+		struct p1273_wake_info wake={0};
+#endif
 		bool dropped = owner_drops(owner, seq);
 
 		fragment = mali_queue[mali_queue_head].fragment;
@@ -3368,7 +3464,11 @@ mali_worker(__unused void *parameter, __unused wait_result_t result)
 			static uint64_t busy[2], since, jobs[2];
 			uint64_t began = mach_absolute_time(), now, ns;
 
+#if P1273_GPU_TRACE
+			uint32_t status = mali_submit_observed(chain,fragment,tr.generation?&wake:NULL);
+#else
 			uint32_t status = hakios_mali_submit(chain, fragment);
+#endif
 			p5_job_status = status;
 
 			if (status != 0) {
@@ -3433,6 +3533,16 @@ mali_worker(__unused void *parameter, __unused wait_result_t result)
 		}
 
 		lck_mtx_lock(&mali_queue_lock);
+#if P1273_GPU_TRACE
+		if(tr.generation && __atomic_load_n(&hakios_p1273_trace_state,__ATOMIC_ACQUIRE)==2 &&
+		   ended<=__atomic_load_n(&hakios_p1273_trace_until,__ATOMIC_ACQUIRE)){
+			tr.seq=++p1273_gpu_n;tr.job=seq;tr.owner=owner;tr.fragment=fragment;tr.dropped=dropped;
+			tr.status=p5_job_status;tr.queued=queued;tr.began=job_began;tr.ended=ended;
+			tr.wake_begin=wake.begin;tr.wake_end=wake.end;tr.wake_attempt=wake.attempted;tr.wake_ok=wake.success;
+			p1273_gpu_rows[(tr.seq-1)%P1273_GPU_ROWS]=tr;
+			if(wake.attempted && wake.success && !p1273_gpu_first_wake.seq)p1273_gpu_first_wake=tr;
+		}
+#endif
 		mali_queue_head = (mali_queue_head + 1) % MALI_QUEUE;
 		mali_queue_count--;
 		mali_done_seq = seq;
@@ -3481,6 +3591,16 @@ hakios_mali_enqueue_for(uint64_t chain, bool fragment, uint32_t owner)
 	mali_queue[at].owner = owner;
 	mali_queue[at].seq = seq;
 	mali_queue[at].queued = mach_absolute_time();
+#if P1273_GPU_TRACE
+	mali_queue[at].trace_generation=0;
+	mali_queue[at].trace_tid=0;mali_queue[at].trace_task=0;mali_queue[at].trace_pid=0;
+	if(__atomic_load_n(&hakios_p1273_trace_state,__ATOMIC_ACQUIRE)==2 &&
+	   mali_queue[at].queued<__atomic_load_n(&hakios_p1273_trace_until,__ATOMIC_ACQUIRE)){
+		mali_queue[at].trace_generation=__atomic_load_n(&hakios_p1273_trace_generation,__ATOMIC_ACQUIRE);
+		hakios_p1273_identity(&mali_queue[at].trace_tid,&mali_queue[at].trace_task,&mali_queue[at].trace_pid);
+		p1273_gpu_submitted++;
+	}
+#endif
 	mali_queue_count++;
 	p5_queue_added_locked(owner,mali_queue_count); /* only counters; already queue-locked */
 	lck_mtx_unlock(&mali_queue_lock);

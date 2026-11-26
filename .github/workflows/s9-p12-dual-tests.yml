@@ -27,6 +27,11 @@ jobs:
           node tools/tests/test-p125-symbol-map.js
           node tools/tests/test-p126-contract.js
           node tools/tests/test-p127-contract.js
+          node tools/tests/test-p1273-contract.js
+          cc -std=c11 -Wall -Wextra -Werror -O2 tools/tests/test_s9_p1273_gate.c -o /tmp/s9-p1273-gate
+          /tmp/s9-p1273-gate
+          cc -std=c11 -Wall -Wextra -Werror -O2 userland/tests/test_s9_texture_layout.c -o /tmp/s9-texture-layout
+          /tmp/s9-texture-layout
           node tools/tests/test-p1272-gpu-cache.js --compile
           python3 tools/tests/test_p127_jiffies_header.py
       - name: Check source guards, preserving P9 panel and P7 CPU recovery safety
@@ -134,6 +139,8 @@ jobs:
             'tools/tests/test-s9-p127-energy-trials.ps1',
             'tools/tests/test-s9-p127-serial-recovery.ps1',
             'tools/tests/test-s9-p1272-gpu-cache.ps1',
+            'tools/tests/test-s9-p1273-telemetry.ps1',
+            'tools/tests/test-s9-p1273-gate.ps1',
             'tools/tests/test-s9-p11-lifecycle-serial.ps1',
             'tools/tests/test-s9-p10-lockscreen-source.ps1',
             'tools/tests/test-s9-p10-serial-harness.ps1',
@@ -163,6 +170,9 @@ jobs:
           xcrun clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
             -std=gnu11 -fblocks -Wno-deprecated-declarations \
             -fsyntax-only userland/src/inject_sb.c
+          xcrun clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -fobjc-arc -fblocks -Wno-deprecated-declarations \
+            -fsyntax-only userland/src/metal_test.m
           # eagl.c depends on the generated Mesa/EAGL slot table, built
           # by userland/build.sh in the paired installer. Do not falsely
           # report a standalone syntax pass with a missing/stub table.

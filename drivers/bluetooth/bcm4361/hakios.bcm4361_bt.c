@@ -423,6 +423,9 @@ bt_write(const uint8_t *b, size_t n, uint32_t timeout_ms)
 		}
 		wr(uart, UTXH, b[i]);
 	}
+#if __has_include(<kern/hakios_p125.h>)
+	hakios_p1273_event(P1273_BT_TX,n);
+#endif
 	return true;
 }
 
@@ -437,6 +440,9 @@ bt_getc(void)
 	}
 	if (rd(uart, UERSTAT) & 0xf) {
 		hakios_p126_diag_add(4,1);
+#if __has_include(<kern/hakios_p125.h>)
+		hakios_p1273_event(P1273_BT_ERROR,1);
+#endif
 		rx_errors++;
 	}
 	return (int)(rd(uart, URXH) & 0xff);
@@ -1332,7 +1338,11 @@ bt_tty_pump(__unused void *arg, __unused wait_result_t w)
 		}
 		/* Read-only P12.6 evidence: no IRQ/mask/baud/FIFO changes. */
 		hakios_p126_diag_add((out==0 && in==0)?0:1,1);
-		if(in>0){hakios_p126_diag_add(2,(unsigned)in);p127_bt_empty=0;}
+		if(in>0){hakios_p126_diag_add(2,(unsigned)in);p127_bt_empty=0;
+#if __has_include(<kern/hakios_p125.h>)
+			hakios_p1273_event(P1273_BT_RX,(unsigned)in);
+#endif
+		}
 		if(out>0)hakios_p126_diag_add(3,(unsigned)out);
 		if (out == 0 && in == 0) {
 			p127_bt_idle(tp);

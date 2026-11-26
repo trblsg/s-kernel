@@ -74,6 +74,8 @@
  */
 #include <stdarg.h>
 #include <kern/clock.h>
+#include <kern/locks.h>
+#include <sys/sysctl.h>
 #if __has_include(<kern/hakios_p125.h>)
 #include <kern/hakios_p125.h>
 #else
@@ -420,94 +422,161 @@ hakios_scanout_carved(uint64_t phys)
 }
 
 /*
- * fb_psr state: psr_ms the idle limit in ms (0 off), psr_last_frame the time of the last frame, and psr_masked
- * whether the TE trigger is masked.
+ * fb_psr state: psr_ms the idle limit in ms (0 off), psr_last_frame the time of the last frame, and psr_owner
+ * which path owns the masked TE trigger.
  */
 static uint32_t psr_ms;
 static thread_call_t psr_call;
 static uint64_t psr_last_frame;
-static bool psr_masked;
-static bool p127_psr_owned;
-static void plane_off(void);            /* fb_planes (below): the lower window off at the next update */
+static unsigned psr_owner; /* 0 none, 1 legacy, 2 governor */
+static bool psr_b,psr_drained;
+static uint64_t psr_legacy_ticks,psr_legacy_masks,psr_legacy_unmasks,psr_faults;
+static LCK_GRP_DECLARE(psr_group,"hakios-psr");
+static LCK_SPIN_DECLARE(psr_lock,&psr_group);
+static void plane_off(void);
+static void psr_tick(thread_call_param_t,thread_call_param_t);
+#if __has_include(<kern/hakios_p125.h>)
+extern int hakios_display_requested_on(void);
+extern int hakios_p9_panel_auto_on(void);
+#endif
 
-/* a frame is coming: unmask the trigger before the shadow update is requested, or that update is never taken */
+/* The lock covers ownership and the actual trigger/shadow write. Never
+ * unmask a trigger owned by something else; preserve ownership on failure. */
+static bool
+psr_release_locked(void)
+{
+    unsigned owner=psr_owner;
+    if(!owner)return true;
+    wr(decon,TRIG_CONTROL,rd(decon,TRIG_CONTROL)&~HW_TRIG_MASKED);
+    __asm__ volatile ("dsb sy" ::: "memory");
+    if(rd(decon,TRIG_CONTROL)&HW_TRIG_MASKED){
+        psr_faults++;
+        if(owner==2)hakios_p127_metric(2,3,1);
+        return false;
+    }
+    psr_owner=0;
+    if(owner==2)hakios_p127_metric(2,1,1);else psr_legacy_unmasks++;
+    return true;
+}
 static void
 psr_wake(void)
 {
-	/* Record every submit, even when boot PSR is disabled. */
-	__atomic_store_n(&psr_last_frame, mach_absolute_time(), __ATOMIC_RELEASE);
-	if(__atomic_exchange_n(&p127_psr_owned,false,__ATOMIC_ACQ_REL)){
-		wr(decon,TRIG_CONTROL,rd(decon,TRIG_CONTROL)&~HW_TRIG_MASKED);
-		__asm__ volatile ("dsb sy" ::: "memory");
-		if(rd(decon,TRIG_CONTROL)&HW_TRIG_MASKED)hakios_p127_metric(2,3,1);
-		else hakios_p127_metric(2,1,1);
-	}
-	if (__atomic_exchange_n(&psr_masked, false, __ATOMIC_ACQ_REL)) {
-		wr(decon, TRIG_CONTROL, rd(decon, TRIG_CONTROL) & ~HW_TRIG_MASKED);
-		__asm__ volatile ("dsb sy" ::: "memory");
-	}
+    lck_spin_lock(&psr_lock);
+    psr_last_frame=mach_absolute_time();
+    (void)psr_release_locked();
+    lck_spin_unlock(&psr_lock);
 }
-
-/* Governor calls this at its existing 1s tick, not a new timer.
- * Only use VGF0 command-mode path; do not overlap boot PSR. Never mask
- * an already masked trigger we do not own. Frame path unmask is above. */
-void
-hakios_p127_psr_poll(void)
+/* The early wake in the frame path is not enough: a timer could mask
+ * between it and SHADOW_REQ. Serialize the final request as well. */
+static void
+psr_shadow(void)
 {
-    if(probed<=0 || mode!=2 || psr_ms)return;
-    if(!(hakios_p127_mode()&P127_PSR)){
-        if(__atomic_load_n(&p127_psr_owned,__ATOMIC_ACQUIRE))psr_wake();
+    lck_spin_lock(&psr_lock);
+    psr_last_frame=mach_absolute_time();
+    (void)psr_release_locked();
+    wr(decon,SHADOW_REQ,rd(decon,SHADOW_REQ)|SHADOW_ALL);
+    lck_spin_unlock(&psr_lock);
+}
+static void
+psr_mask_locked(unsigned owner,uint32_t threshold)
+{
+    if(probed<=0 || mode!=2 || !threshold || psr_owner)return;
+    uint64_t now=mach_absolute_time(),ns=0;
+    if(!psr_last_frame || now<psr_last_frame)return;
+    absolutetime_to_nanoseconds(now-psr_last_frame,&ns);
+    if(ns<(uint64_t)threshold*NSEC_PER_MSEC || rd(decon,SHADOW_REQ)!=0 ||
+       (rd(decon,TRIG_CONTROL)&HW_TRIG_MASKED)){
+        if(owner==2)hakios_p127_metric(2,2,1);
         return;
     }
-    if(__atomic_load_n(&p127_psr_owned,__ATOMIC_ACQUIRE))return;
-    uint64_t stamp=__atomic_load_n(&psr_last_frame,__ATOMIC_ACQUIRE),now=mach_absolute_time(),ns=0;
-    if(!stamp || now<stamp){hakios_p127_metric(2,2,1);return;}
-    absolutetime_to_nanoseconds(now-stamp,&ns);
-    if(ns<100ULL*NSEC_PER_MSEC || rd(decon,SHADOW_REQ)!=0 ||
-        (rd(decon,TRIG_CONTROL)&HW_TRIG_MASKED)){hakios_p127_metric(2,2,1);return;}
-    __atomic_store_n(&p127_psr_owned,true,__ATOMIC_RELEASE);
     wr(decon,TRIG_CONTROL,rd(decon,TRIG_CONTROL)|HW_TRIG_MASKED);
     __asm__ volatile ("dsb sy" ::: "memory");
     if(!(rd(decon,TRIG_CONTROL)&HW_TRIG_MASKED)){
-        hakios_p127_metric(2,3,1);psr_wake();return;
+        psr_faults++;
+        if(owner==2)hakios_p127_metric(2,3,1);
+        return;
     }
-    if(!__atomic_load_n(&p127_psr_owned,__ATOMIC_ACQUIRE) ||
-       !(hakios_p127_mode()&P127_PSR) || rd(decon,SHADOW_REQ)!=0 ||
-       __atomic_load_n(&psr_last_frame,__ATOMIC_ACQUIRE)!=stamp){
-        /* A submit may have cleared ownership before our MMIO write.
-         * Always unmask our just-written bit in that race. */
-        __atomic_store_n(&p127_psr_owned,false,__ATOMIC_RELEASE);
-        wr(decon,TRIG_CONTROL,rd(decon,TRIG_CONTROL)&~HW_TRIG_MASKED);
-        __asm__ volatile ("dsb sy" ::: "memory");
-        hakios_p127_metric(2,2,1);return;
+    psr_owner=owner;
+    if(owner==2)hakios_p127_metric(2,0,1);else psr_legacy_masks++;
+    if(rd(decon,SHADOW_REQ)!=0)(void)psr_release_locked();
+}
+/* A pending legacy callback drains itself without rearming. B does not
+ * mask until that callback acknowledges the handoff. No cancel-and-wait
+ * under the spin lock, no new timer. A1 rearms exactly once. */
+void
+hakios_p127_psr_poll(void)
+{
+#if __has_include(<kern/hakios_p125.h>)
+    bool want=(hakios_p127_mode()&P127_PSR) &&
+        hakios_display_requested_on()==0 && !hakios_p9_panel_auto_on();
+#else
+    bool want=false;
+#endif
+    bool rearm=false;
+    uint32_t ms=0;
+    lck_spin_lock(&psr_lock);
+    if(probed<=0 || mode!=2){lck_spin_unlock(&psr_lock);return;}
+    if(want && !psr_b){
+        if(!psr_release_locked()){lck_spin_unlock(&psr_lock);return;}
+        psr_b=true;
+        psr_drained=!psr_ms || !psr_call;
     }
-    hakios_p127_metric(2,0,1);
+    if(!want && psr_b){
+        if(!psr_release_locked()){lck_spin_unlock(&psr_lock);return;}
+        psr_b=false;
+        rearm=psr_drained && psr_ms && psr_call;
+        psr_drained=false;ms=psr_ms;
+    }
+    if(want && psr_b && psr_drained){
+#if __has_include(<kern/hakios_p125.h>)
+        if((hakios_p127_mode()&P127_PSR) && hakios_display_requested_on()==0 && !hakios_p9_panel_auto_on())
+            psr_mask_locked(2,psr_ms?psr_ms:100);
+#endif
+    }
+    lck_spin_unlock(&psr_lock);
+    if(rearm){
+        uint64_t deadline;
+        clock_interval_to_deadline(ms<500?ms:500,NSEC_PER_MSEC,&deadline);
+        thread_call_enter_delayed(psr_call,deadline);
+    }
 }
 
 static void
 psr_tick(thread_call_param_t p0 __unused, thread_call_param_t p1 __unused)
 {
-	uint64_t now = mach_absolute_time(), idle, deadline, ns;
-
-	if (psr_ms == 0) {
-		return;
-	}
-	idle = now - __atomic_load_n(&psr_last_frame, __ATOMIC_ACQUIRE);
-	absolutetime_to_nanoseconds(idle, &ns);
-	if (mode == 2 && !__atomic_load_n(&psr_masked, __ATOMIC_ACQUIRE) && ns >= (uint64_t)psr_ms * NSEC_PER_MSEC &&
-	    rd(decon, SHADOW_REQ) == 0) {
-		__atomic_store_n(&psr_masked, true, __ATOMIC_RELEASE);
-		wr(decon, TRIG_CONTROL, rd(decon, TRIG_CONTROL) | HW_TRIG_MASKED);
-		__asm__ volatile ("dsb sy" ::: "memory");
-		/* a frame that arrived while masking may have seen the trigger unmasked: unmask again, so its update goes out */
-		if (rd(decon, SHADOW_REQ) != 0) {
-			__atomic_store_n(&psr_masked, false, __ATOMIC_RELEASE);
-			wr(decon, TRIG_CONTROL, rd(decon, TRIG_CONTROL) & ~HW_TRIG_MASKED);
-		}
-	}
-	clock_interval_to_deadline(psr_ms < 500 ? psr_ms : 500, NSEC_PER_MSEC, &deadline);
-	thread_call_enter_delayed(psr_call, deadline);
+    uint32_t ms;
+    lck_spin_lock(&psr_lock);
+    ms=psr_ms;
+    if(!ms){lck_spin_unlock(&psr_lock);return;}
+    if(psr_b){
+        psr_drained=true;
+        lck_spin_unlock(&psr_lock);
+        return;
+    }
+    psr_legacy_ticks++;
+    psr_mask_locked(1,ms);
+    lck_spin_unlock(&psr_lock);
+    uint64_t deadline;
+    clock_interval_to_deadline(ms<500?ms:500,NSEC_PER_MSEC,&deadline);
+    thread_call_enter_delayed(psr_call,deadline);
 }
+#if __has_include(<kern/hakios_p125.h>)
+SYSCTL_DECL(_kern_hakios);
+static int
+p1273_psr_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unused int arg2,struct sysctl_req *req)
+{
+    char buf[320];
+    lck_spin_lock(&psr_lock);
+    unsigned ms=psr_ms,owner=psr_owner,b=psr_b,drained=psr_drained;
+    unsigned ready=probed>0 && mode==2;
+    uint64_t ticks=psr_legacy_ticks,masks=psr_legacy_masks,unmasks=psr_legacy_unmasks,faults=psr_faults,last=psr_last_frame;
+    lck_spin_unlock(&psr_lock);
+    snprintf(buf,sizeof(buf),"version=1 ready=%u boot_ms=%u owner=%u governor=%u drained=%u legacy_ticks=%llu legacy_mask=%llu legacy_unmask=%llu faults=%llu last_frame=%llu",
+        ready,ms,owner,b,drained,(unsigned long long)ticks,(unsigned long long)masks,(unsigned long long)unmasks,(unsigned long long)faults,(unsigned long long)last);
+    return SYSCTL_OUT(req,buf,strlen(buf)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1273_psr,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1273_psr_sysctl,"A","P12.7.3 serialized PSR ownership and legacy cadence");
+#endif
 
 /*
  * fb_zc: VGF0 scans out a surface of the pool from the next refresh on. rowbytes is the row length (the display's size
@@ -532,7 +601,7 @@ hakios_scanout_show(uint64_t phys, uint32_t rowbytes)
 	wr(i, IDMA_BASE_C, (uint32_t)phys);
 	plane_off();                            /* (fb_planes: one layer again) */
 	__asm__ volatile ("dsb sy" ::: "memory");
-	wr(decon, SHADOW_REQ, rd(decon, SHADOW_REQ) | SHADOW_ALL);
+	psr_shadow();
 	return 0;
 }
 
@@ -567,7 +636,7 @@ hakios_scanout_flip(unsigned index)
 	wr(i, IDMA_BASE_C, (uint32_t)buffers[index]);
 	plane_off();                            /* (fb_planes: a frame drawn whole) */
 	__asm__ volatile ("dsb sy" ::: "memory");
-	wr(decon, SHADOW_REQ, rd(decon, SHADOW_REQ) | SHADOW_ALL);
+	psr_shadow();
 	return 0;
 }
 
@@ -783,7 +852,7 @@ plane_setup(uint64_t lower, uint32_t rowbytes, uint32_t rows, uint32_t x, uint32
 	__asm__ volatile ("dsb sy" ::: "memory");
 	frames = rd(decon, FRAME_COUNT);
 	psr_wake();
-	wr(decon, SHADOW_REQ, rd(decon, SHADOW_REQ) | SHADOW_ALL);
+	psr_shadow();
 	if (wait_taken(100) != 0) {
 		say("exynos_dpu: fb_planes: the DECON did not take the lower window in 100 ms\n");
 		goto off;
@@ -821,7 +890,7 @@ plane_setup(uint64_t lower, uint32_t rowbytes, uint32_t rows, uint32_t x, uint32
 off:
 	plane_off();
 	__asm__ volatile ("dsb sy" ::: "memory");
-	wr(decon, SHADOW_REQ, rd(decon, SHADOW_REQ) | SHADOW_ALL);
+	psr_shadow();
 	(void)wait_taken(100);
 	say("exynos_dpu: fb_planes: VGF1 not usable: the layers are blended on the processor\n");
 	return -1;
@@ -899,7 +968,7 @@ hakios_scanout_planes(uint64_t upper, uint32_t upper_rowbytes, uint64_t lower, u
 	wr(ui, IDMA_BASE_C, (uint32_t)upper);
 	plane_place(lower, lower_rowbytes, sh, x, y, w, h, px0, py0, px1, py1);
 	__asm__ volatile ("dsb sy" ::: "memory");
-	wr(decon, SHADOW_REQ, rd(decon, SHADOW_REQ) | SHADOW_ALL);
+	psr_shadow();
 	return 0;
 }
 
@@ -913,14 +982,16 @@ hakios_scanout_detach(const char *why)
 	say("exynos_dpu: back to the boot loader's window (%s)\n", why);
 	psr_wake();
 	plane_restore();
-	psr_ms = 0;
+	lck_spin_lock(&psr_lock);
+	psr_ms = 0;psr_b=false;psr_drained=false;
+	lck_spin_unlock(&psr_lock);
 	if (mode == 2) {
 		wr(decon, DATA_PATH_1, boot_data_path_1);
 	}
 	wr(idma(boot_type), IDMA_BASE_Y, boot_base);
 	wr(idma(boot_type), IDMA_BASE_C, boot_base);
 	__asm__ volatile ("dsb sy" ::: "memory");
-	wr(decon, SHADOW_REQ, rd(decon, SHADOW_REQ) | SHADOW_ALL);
+	psr_shadow();
 	if (wait_taken(100) != 0) {
 		say("exynos_dpu: the DECON has not taken it after 100 ms (shadow request %x)\n", rd(decon, SHADOW_REQ));
 	}
@@ -992,7 +1063,7 @@ attach_vgf0(uint64_t phys, uint32_t width, uint32_t height, uint32_t rowbytes)
 	channel_type = IDMA_VGF0;
 	wr(decon, DATA_PATH_1, (path1 & ~(7u << (4 * win))) | (uint32_t)CHANNEL_VGF0 << (4 * win));
 	__asm__ volatile ("dsb sy" ::: "memory");
-	wr(decon, SHADOW_REQ, rd(decon, SHADOW_REQ) | SHADOW_ALL);
+	psr_shadow();
 	if (wait_taken(100) != 0) {
 		hakios_scanout_detach("the DECON did not take the window's new channel in 100 ms");
 		return -1;
@@ -1062,8 +1133,10 @@ hakios_scanout_attach(int want, const uint64_t *phys, unsigned count, uint32_t w
 		if (PE_parse_boot_argn("fb_psr", &psr_ms, sizeof(psr_ms)) && psr_ms >= 50 && psr_ms <= 5000) {
 			psr_last_frame = mach_absolute_time();
 			psr_call = thread_call_allocate(psr_tick, NULL);
-			psr_tick(NULL, NULL);
-			say("exynos_dpu: fb_psr: the panel left to itself after %u ms without a frame\n", psr_ms);
+			if(psr_call){
+				psr_tick(NULL, NULL);
+				say("exynos_dpu: fb_psr: the panel left to itself after %u ms without a frame\n", psr_ms);
+			}else psr_ms=0;
 		} else {
 			psr_ms = 0;
 		}

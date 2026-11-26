@@ -227,6 +227,7 @@ lx_netif_rx(struct sk_buff *skb)
 		}
 	} else if (c.joined && skb->len >= ETH_HLEN) {
 		c.received++;
+		(void)lx_os_option("p1273_wifi_rx");
 		lx_os_net_input(skb->data, skb->len);
 	}
 	dev_kfree_skb(skb);
@@ -254,6 +255,7 @@ frame_send(const uint8_t *frame, unsigned length)
 	ndev->netdev_ops->ndo_start_xmit(skb, ndev);	/* (it takes the frame whatever it says) */
 	mutex_unlock(&c.send);
 	c.sent++;
+	(void)lx_os_option("p1273_wifi_tx"); /* driver submission, not over-air ACK */
 	return (0);
 }
 

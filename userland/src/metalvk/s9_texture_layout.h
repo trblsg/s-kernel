@@ -11,6 +11,7 @@
 typedef struct s9_texture_layout {
     uint64_t row_bytes, block_rows, size, alignment;
     uint32_t block_width, block_height, bytes_per_block;
+    uint64_t width, height;
 } s9_texture_layout;
 
 static inline int s9_tex_mul(uint64_t x, uint64_t y, uint64_t *out) {
@@ -78,6 +79,7 @@ static inline int s9_tex_plan(uint32_t fmt, uint64_t width, uint64_t height,
         !s9_tex_add(height,bh-1,&blocks_h)) return 0;
     blocks_w/=bw; blocks_h/=bh;
     if (!s9_tex_mul(blocks_w,bytes,&min_row)) return 0;
+    if (bw==1 && bh==1 && !device_pitch) return 0;
     row=device_pitch?device_pitch:min_row;
     if (row<min_row || (row%bytes)!=0 || !s9_tex_mul(row,blocks_h,&raw) ||
         !s9_tex_add(raw,page-1,&padded))return 0;
@@ -90,6 +92,7 @@ static inline int s9_tex_plan(uint32_t fmt, uint64_t width, uint64_t height,
     out->block_width=bw;
     out->block_height=bh;
     out->bytes_per_block=bytes;
+    out->width=width;out->height=height;
     return 1;
 }
 
@@ -99,7 +102,13 @@ static inline int s9_tex_region(const s9_texture_layout *p,
                                 uint64_t x, uint64_t y, uint64_t w, uint64_t h,
                                 uint64_t *offset, uint64_t *row_bytes, uint64_t *rows) {
     uint64_t block_x,block_y,block_w,block_h,cell,beg,end,last;
-    if (!p || !w || !h || (x%p->block_width) || (y%p->block_height)) return 0;
+    if (!p || !w || !h || !p->block_width || !p->block_height ||
+        x>=p->width || y>=p->height || w>p->width-x || h>p->height-y ||
+        (x%p->block_width) || (y%p->block_height)) return 0;
+    /* Partial compressed blocks may only touch the actual image edge,
+     * not interior texels or padded row bytes. */
+    if ((w%p->block_width && w!=p->width-x) ||
+        (h%p->block_height && h!=p->height-y)) return 0;
     block_x=x/p->block_width; block_y=y/p->block_height;
     if (!s9_tex_add(w,p->block_width-1,&block_w) ||
         !s9_tex_add(h,p->block_height-1,&block_h))return 0;
@@ -117,5 +126,15 @@ static inline int s9_tex_region(const s9_texture_layout *p,
     if (row_bytes) *row_bytes=end;
     if (rows) *rows=block_h;
     return 1;
+}
+/* The allocation length is not supplied by this SPI. Check arithmetic and
+ * optional per-image stride, without claiming to know the external buffer size. */
+static inline int s9_tex_linear_span(uint64_t offset,uint64_t pitch,uint64_t bytes,
+                                      uint64_t rows,uint64_t image) {
+    uint64_t span,end;
+    if (!rows || !bytes || pitch<bytes ||
+        !s9_tex_mul(rows-1,pitch,&span) || !s9_tex_add(span,bytes,&span) ||
+        !s9_tex_add(offset,span,&end) || end>SIZE_MAX) return 0;
+    return !image || span<=image;
 }
 #endif

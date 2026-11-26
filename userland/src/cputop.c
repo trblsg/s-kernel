@@ -96,6 +96,7 @@ main(int argc, char **argv)
 	mach_timebase_info(&timebase);
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	for (unsigned look = 0; looks == 0 || look <= looks; look++) {
+		uint64_t sample_begin=mach_absolute_time();
 		int bytes = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids)), count = 0, shown = 0;
 		uint64_t at = mach_absolute_time(), all = 0;
 
@@ -140,6 +141,8 @@ main(int argc, char **argv)
 				shown++;
 			}
 			printf("\n");
+			printf("cputop-meta: ticks=%llu sample_ticks=%llu processes=%d truncated=%u\n",
+			    (unsigned long long)at,(unsigned long long)(mach_absolute_time()-sample_begin),count,bytes>=(int)sizeof(pids)?1u:0u);
 		}
 		memcpy(last, now, sizeof(now[0]) * (size_t)count);
 		last_count = count;

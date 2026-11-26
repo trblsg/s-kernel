@@ -11,7 +11,8 @@ function fn(s,name){
 const cap=fn(mali,'hakios_mali_parameter'),reader=fn(mali,'p1272_read_cap_on'),
     capture=fn(mali,'p1272_capture_caps'),ready=fn(mali,'hakios_mali_ready'),
     serve=fn(mali,'step_serve'),power=fn(mali,'p1272_power_present'),guard=fn(mali,'p1272_mmio_ok'),
-    irq=fn(mali,'mali_job_interrupt'),submit=fn(mali,'hakios_mali_submit');
+    irq=fn(mali,'mali_job_interrupt'),submit=fn(mali,'mali_submit_observed');
+assert(fn(mali,'hakios_mali_submit').includes('mali_submit_observed(chain,fragment,NULL)'));
 for(const f of [cap,ready,irq])assert(!/\b(?:rd|wr|wait_for|g3d_power_on|g3d_ensure_on|as0_update)\s*\(/.test(f),f);
 assert(!cap.includes('lck_mtx_'));
 assert(ready.includes('__ATOMIC_ACQUIRE'));
@@ -24,7 +25,7 @@ assert(power.includes('PMU_G3D_STATUS') && power.includes('PLL_ENABLE|PLL_STABLE
 assert(guard.includes('g3d_awake && g3d_lab_gpu_safe && g3d_lab_protection_ok'));
 assert(fn(mali,'g3d_ensure_on').includes('p1272_require_mmio()'));
 assert(fn(mali,'hakios_mali_unmap').includes('p1272_mmio_ok()') && fn(mali,'hakios_mali_mapped').includes('p1272_mmio_ok()'));
-assert(submit.indexOf('g3d_ensure_on()')<submit.indexOf('wr(mali,'));
+assert(submit.indexOf('g3d_ensure_on()')>=0 && submit.indexOf('if (!on)')<submit.indexOf('wr(mali,') && submit.indexOf('g3d_ensure_on()')<submit.indexOf('if (!on)'));
 assert(submit.includes('if(!gpu_reset() || !gpu_cores_on(&which))'));
 assert(fn(mali,'g3d_idle_gate').indexOf('mali_irq_off();')<fn(mali,'g3d_idle_gate').indexOf('g3d_off();'));
 assert(fn(lab,'p1272_probe_request_sysctl').includes('p1272_probe_used') &&

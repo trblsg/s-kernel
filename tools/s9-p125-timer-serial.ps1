@@ -4,7 +4,7 @@
 param(
  [ValidatePattern('^COM[0-9]+$')][string]$Port='COM125',
  [string]$ReconnectPort='',
- [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump','DriverTrials','EnergyTrials','EnergyOffline','GpuCacheCheck')][string]$Scenario='Trace',
+ [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump','DriverTrials','EnergyTrials','EnergyOffline','GpuCacheCheck','P1273Diagnostics','BusTrace','ThermalTrace','ThermalTraceDump','ThermalGpuDump','OffBurstCapABA','OfflineABA','FunctionalGate','CombinedConnected')][string]$Scenario='Trace',
  [ValidateRange(30,90)][int]$TraceSeconds=60,
  [ValidateRange(12,40)][int]$AggregateSeconds=20,
  [string]$SymbolMap='',
@@ -17,6 +17,15 @@ param(
  [ValidateRange(30,250)][int]$ReadPaceMs=60,
  [switch]$AllowLowerFloor,
  [switch]$RequireGpuCache,
+ [switch]$P1273Telemetry,
+ [switch]$AllowOffCap,
+ [switch]$AllowStrongerCap,
+ [ValidateSet('ABOX','BT','WIFI','TICKER','LITTLE949','COMBINED5','COMBINED6')][string]$OfflineModule='LITTLE949',
+ [ValidateSet('USB','ABOX','BT','WIFI','TICKER','LITTLE949','COMBINED5','COMBINED6')][string]$GateModule='USB',
+ [ValidateSet('COMBINED5','COMBINED6')][string]$CombinedProfile='COMBINED5',
+ [switch]$AllowFunctionalGate,
+ [switch]$AllowCombined,
+ [switch]$AllowOfflineTrial,
  [switch]$Execute,[switch]$LibraryOnly
 )
 Set-StrictMode -Version 2
@@ -28,6 +37,11 @@ $script:P125HostEnabled=$true
 $script:P126HostEnabled=$true
 $script:P127HostEnabled=$true
 $script:P1272HostEnabled=$true
+$script:P1273HostEnabled=([bool]$P1273Telemetry -or $Scenario -in @('P1273Diagnostics','BusTrace','ThermalTrace','ThermalTraceDump','ThermalGpuDump','OffBurstCapABA','OfflineABA','FunctionalGate','CombinedConnected'))
+$script:P1273GateDirty=$false
+$script:P1273OfflineDirty=$false
+$script:P1273CapDirty=$false
+$script:P1273TraceDirty=$false
 $script:P1272Dirty=$false
 $script:P1272Required=$RequireGpuCache
 # P12.7.1 transport only, no new firmware ABI.
@@ -130,7 +144,7 @@ function P125-ReadSnapshot([string]$Label,[switch]$CountsOnly){
             # P127 has independent USB cadence counters. Only exhausted
             # READ timeout is optional; refusal, transport and safety
             # failures still stop the suite. Never substitute zero.
-            if($Scenario -notin @('EnergyTrials','EnergyOffline') -or $_.Exception.Message -ne "Missing echo and sysctl readback sysctl kern.hakios.$k"){throw}
+            if($Scenario -notin @('EnergyTrials','EnergyOffline','OfflineABA') -or $_.Exception.Message -ne "Missing echo and sysctl readback sysctl kern.hakios.$k"){throw}
             $msg="P127 USB_OPTIONAL_MISSING $Label $k (no delta for this counter)"
             $script:P125Report.Add($msg);Life-Say $msg
         }
@@ -203,8 +217,12 @@ function P125-Delta($Before,$After,[string]$Label,[int]$Mode,[string]$Stem,[swit
     $st=$After.Status;$hz=[double]$st.hz
     if($hz -le 0 -or [uint64]$st.end -le [uint64]$st.start){throw 'P125 missing kernel interval; raw retained'}
     $seconds=([double]$st.end-[double]$st.start)/$hz
-    $valid=($st.reason -eq '0' -and $st.display_on -eq '0' -and $st.active -eq '0' -and $st.armed -eq '0')
-    if($Mode -eq 3 -and ($st.down -ne $st.start -or $st.up -ne $st.end -or $st.down -eq '0' -or $seconds -lt ($TraceSeconds-5))){$valid=$false}
+    $fixed=($Scenario -eq 'OfflineABA')
+    $expectedReason=if($fixed){'10'}else{'0'}
+    $valid=($st.reason -eq $expectedReason -and $st.display_on -eq '0' -and $st.active -eq '0' -and $st.armed -eq '0')
+    if($fixed){
+        if($Mode -ne 3 -or $st.down -ne $st.start -or $st.down -eq '0' -or [uint64]$st.up -lt [uint64]$st.end -or [Math]::Abs($seconds-60) -gt 0.001){$valid=$false}
+    }elseif($Mode -eq 3 -and ($st.down -ne $st.start -or $st.up -ne $st.end -or $st.down -eq '0' -or $seconds -lt ($TraceSeconds-5))){$valid=$false}
     $data=New-Object 'System.Collections.Generic.List[object]'
     $cs=New-Object 'System.Collections.Generic.List[object]'
     $sum=@{}
@@ -279,7 +297,7 @@ function P125-PumpOff([int]$Seconds){
         if($script:LifeState -ne 'OFF'){throw 'P125 display woke; stop observation'}
     }
 }
-function P125-Offline {
+function P125-Offline([int]$WaitSeconds=$TraceSeconds) {
     $target=if($ReconnectPort){$ReconnectPort}else{$Port}
     Life-Say 'P125 USB OFFLINE ARMED: disconnect USB now; do NOT wake screen'
     $until=(Life-Now).AddSeconds(20)
@@ -296,8 +314,9 @@ function P125-Offline {
     $script:LifeCurrentSegment=$null
     try{$script:LifeSerial.Dispose()}catch{}
     $script:LifeSerial=$null
-    Life-Say "P125 host COM disconnected; keep unplugged $TraceSeconds seconds"
-    $until=(Life-Now).AddSeconds($TraceSeconds)
+    $hostWait=if($Scenario -eq 'OfflineABA'){$WaitSeconds+5}else{$WaitSeconds}
+    Life-Say "P125 host COM disconnected; keep unplugged $hostWait seconds"
+    $until=(Life-Now).AddSeconds($hostWait)
     while((Life-Now) -lt $until){
         if([IO.Ports.SerialPort]::GetPortNames() -contains $target){throw 'P125 reconnected early; offline phase invalid'}
         Start-Sleep -Milliseconds 250
@@ -309,6 +328,7 @@ function P125-Offline {
         Start-Sleep -Milliseconds 250
     }
     P125-Open $target
+    $script:Port=$target
     $script:LifePartial='';$script:LifeSynced=$false;$script:LifeFenceSent=$false;$script:LifeFenceEcho=$false
     $script:LifeState='UNKNOWN';$script:LifeScene='UNKNOWN'
     Life-SyncReadOnly
@@ -385,13 +405,16 @@ function P127-Status {
 function P127-Read {
     $w=@{}
     for($cpu=0;$cpu -lt 8;$cpu++){
-        $v=P125-Fields (P12-Query "p127_wfi$cpu")
-        if($v.version -ne '1' -or [int]$v.cpu -ne $cpu){throw 'P127 WFI ABI mismatch'}
+        $key=if($script:P1273HostEnabled){"p1273_wfi$cpu"}else{"p127_wfi$cpu"}
+        $version=if($script:P1273HostEnabled){'2'}else{'1'}
+        $v=P125-Fields (P12-Query $key)
+        if($v.version -ne $version -or [int]$v.cpu -ne $cpu){throw 'P127 WFI ABI mismatch'}
         $bins=@($v.bins.Split(',')|ForEach-Object {
             $x=$_.Split('/');if($x.Count -ne 2){throw 'P127 WFI pair invalid'}
             [pscustomobject]@{N=(P125-Hex $x[0]);Ticks=(P125-Hex $x[1])}
         })
-        if($bins.Count -ne 7){throw 'P127 WFI bin count'}
+        $expected=if($script:P1273HostEnabled){9}else{7}
+        if($bins.Count -ne $expected){throw 'P127 WFI bin count'}
         $w[$cpu]=[pscustomobject]@{Bins=$bins;SGI=(P125-Hex $v.sgi);PPI=(P125-Hex $v.ppi);SPI=(P125-Hex $v.spi)}
     }
     $seq=P125-Fields (P12-Query 'p127_fg_seq')
@@ -401,16 +424,17 @@ function P127-Read {
 function P127-Delta($Before,$After,$Timer,[string]$Label,[string]$Stem){
     $hz=[double]$Timer.hz;$seconds=([double]$Timer.end-[double]$Timer.start)/$hz
     if($seconds -le 0){throw 'P127 invalid kernel interval'}
-    $labels=@('lt100us','100_499us','500_999us','1_1.999ms','2_3.499ms','3.5_9.999ms','ge10ms')
+    $labels=@('lt100us','100_499us','500_999us','1_1.999ms','2_3.499ms','3.5_9.999ms')
+    if($script:P1273HostEnabled){$labels+=@('10_19.999ms','20_49.999ms','ge50ms')}else{$labels+='ge10ms'}
     $rows=@()
     for($cpu=0;$cpu -lt 8;$cpu++){
         $a=$After.Wfi[$cpu];$b=$Before.Wfi[$cpu]
         $n=0.0;$t=0.0
-        for($i=0;$i -lt 7;$i++){
+        for($i=0;$i -lt $labels.Count;$i++){
             $n+=P125-Sub $a.Bins[$i].N $b.Bins[$i].N
             $t+=P125-Sub $a.Bins[$i].Ticks $b.Bins[$i].Ticks
         }
-        for($i=0;$i -lt 7;$i++){
+        for($i=0;$i -lt $labels.Count;$i++){
             $count=P125-Sub $a.Bins[$i].N $b.Bins[$i].N
             $ticks=P125-Sub $a.Bins[$i].Ticks $b.Bins[$i].Ticks
             $rows+=[pscustomobject]@{phase=$Label;cpu=$cpu;seconds=$seconds;bin=$labels[$i];count=$count;ticks=$ticks;wfi_seconds=$ticks/$hz;count_pct=$(if($n){100*$count/$n}else{0});wfi_time_pct=$(if($t){100*$ticks/$t}else{0});window_pct=100*$ticks/$hz/$seconds;sgi=(P125-Sub $a.SGI $b.SGI);ppi=(P125-Sub $a.PPI $b.PPI);spi=(P125-Sub $a.SPI $b.SPI)}
@@ -418,8 +442,8 @@ function P127-Delta($Before,$After,$Timer,[string]$Label,[string]$Stem){
     }
     $rows|Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath "$Stem.$Label.wfi.csv"
     $big=@($rows|Where-Object {$_.cpu -in 3,4,5,6})
-    $all=($big|Measure-Object count -Sum).Sum;$long=($big|Where-Object {$_.bin -in '3.5_9.999ms','ge10ms'}|Measure-Object count -Sum).Sum
-    $time=($big|Measure-Object ticks -Sum).Sum;$lt=($big|Where-Object {$_.bin -in '3.5_9.999ms','ge10ms'}|Measure-Object ticks -Sum).Sum
+    $all=($big|Measure-Object count -Sum).Sum;$long=($big|Where-Object {$_.bin -in @('3.5_9.999ms','ge10ms','10_19.999ms','20_49.999ms','ge50ms')}|Measure-Object count -Sum).Sum
+    $time=($big|Measure-Object ticks -Sum).Sum;$lt=($big|Where-Object {$_.bin -in @('3.5_9.999ms','ge10ms','10_19.999ms','20_49.999ms','ge50ms')}|Measure-Object ticks -Sum).Sum
     $line="P127 WFI $Label BIG_count=$all ge3.5ms_count=$long BIG_ticks=$time ge3.5ms_ticks=$lt"
     $script:P125Report.Add($line);Life-Say $line
     foreach($group in @('Metrics','Wifi','BT','Ticker')){
@@ -504,8 +528,32 @@ function P127-Window([string]$Label,[int]$Mask,[int]$Seconds,[string]$Stem,$Befo
     if($initial.mode -ne '0'){throw 'P127 old mode still active'}
     $before=P127-Read
     [pscustomobject]@{Version=1;Label=$Label;Mask=$Mask;Seconds=$Seconds;Offline=[bool]$Offline;BeforeTimer=$BeforeTimer;Before=$before}|Export-Clixml -Depth 12 -LiteralPath "$Stem.$Label.energy-pre.clixml"
+    $psrPre=$null
+    if($script:P1273HostEnabled -and ($Mask -eq 9 -or $Scenario -eq 'EnergyTrials')){
+        $psrPre=P125-Fields (P12-Query 'p1273_psr')
+        Add-Content -Encoding UTF8 -LiteralPath "$Stem.$Label.psr.txt" -Value ($psrPre|ConvertTo-Json -Compress)
+        if($Mask -eq 9 -and ($psrPre.ready -ne '1' -or $psrPre.boot_ms -ne '300' -or $psrPre.governor -ne '0' -or $psrPre.owner -eq '2')){
+            throw 'P1273 matched PSR comparison requires effective legacy 300ms and restored ownership'
+        }
+    }
+    $fixed=($Scenario -eq 'OfflineABA')
+    if($fixed){
+        if(-not $Offline -or $Seconds -ne 60){throw 'P1273 fixed offline phase requires 60s'}
+        $script:P1273OfflineDirty=$true
+        [void](P12-Query 'p1273_offline_s' '60')
+        if((P12-Query 'p1273_offline_s') -ne '60'){throw 'P1273 fixed duration ACK missing'}
+    }
     $script:P127Dirty=$true
-    [void](P12-Query 'p127_mode' "$Mask")
+    try{[void](P12-Query 'p127_mode' "$Mask")}catch{
+        $original=$_
+        if($script:P1273HostEnabled -and (($Mask -shr 4) -band 7)){
+            try{
+                $denial=P12-Query 'p1273_floor'
+                Add-Content -Encoding UTF8 -LiteralPath "$Stem.$Label.floor-denial.txt" -Value $denial
+            }catch{Life-Say 'P1273 floor denial read unavailable; retaining original error'}
+        }
+        throw $original
+    }
     $armed=P127-Status
     if([int]$armed.mode -ne $Mask -or [int]$armed.lease_s -lt ($Seconds+12)){throw 'P127 lease arm refused or too short'}
     P125-PumpOff 2
@@ -514,10 +562,25 @@ function P127-Window([string]$Label,[int]$Mask,[int]$Seconds,[string]$Stem,$Befo
     $afterTimer=P125-Phase $Label $timerMode $Seconds $Stem $BeforeTimer -CountsOnly -OfflineAggregate:$Offline
     $script:P12Phase="$Label-POST"
     $after=P127-Read
+    $psrPost=$null;$psrRestore=$null
+    if($null -ne $psrPre){
+        $psrPost=P125-Fields (P12-Query 'p1273_psr')
+        Add-Content -Encoding UTF8 -LiteralPath "$Stem.$Label.psr.txt" -Value ($psrPost|ConvertTo-Json -Compress)
+    }
     [pscustomobject]@{Version=1;Label=$Label;Mask=$Mask;Timer=$afterTimer;Before=$before;After=$after}|Export-Clixml -Depth 12 -LiteralPath "$Stem.$Label.energy-post.clixml"
-    if([int]$after.Status.mode -ne $Mask -or $after.Status.reason -ne '0'){throw "P127 $Label lease revoked; phase invalid"}
+    if($fixed){
+        $f=P125-Fields (P12-Query 'p1273_offline_status')
+        $f|Export-Clixml -LiteralPath "$Stem.$Label.offline-status.clixml"
+        if($after.Status.mode -ne '0' -or $after.Status.reason -ne '10' -or $f.fixed -ne '0' -or
+            $f.capture_reason -ne '10' -or $f.policy_reason -ne '10' -or $f.deadline -ne $afterTimer.Status.end){throw 'P1273 planned offline freeze/rollback not proven'}
+    }elseif([int]$after.Status.mode -ne $Mask -or $after.Status.reason -ne '0'){throw "P127 $Label lease revoked; phase invalid"}
     # Stop policy before reading gauge pages. P125 already froze WFI/FG.
     [void](P12-Query 'p127_mode' '0' -Cleanup)
+    if($fixed){
+        [void](P12-Query 'p1273_offline_s' '0' -Cleanup)
+        if((P12-Query 'p1273_offline_s') -ne '0'){throw 'P1273 offline configuration restore missing'}
+        $script:P1273OfflineDirty=$false
+    }
     P125-PumpOff 2
     $restored=P127-Status
     if($restored.mode -ne '0'){throw 'P127 restore ACK missing'}
@@ -530,12 +593,17 @@ function P127-Window([string]$Label,[int]$Mask,[int]$Seconds,[string]$Stem,$Befo
     if((P125-Sub ([uint64]$m.abox_stop) ([uint64]$before.Metrics.abox_stop)) -ne (P125-Sub ([uint64]$m.abox_resume) ([uint64]$before.Metrics.abox_resume))){throw 'P127 RDMA restore counts disagree'}
     if((P125-Sub ([uint64]$w.attach) ([uint64]$before.Wifi.attach)) -ne (P125-Sub ([uint64]$w.detach) ([uint64]$before.Wifi.detach))){throw 'P127 INTx restore counts disagree'}
     if((P125-Sub ([uint64]$m.psr_mask) ([uint64]$before.Metrics.psr_mask)) -gt (P125-Sub ([uint64]$m.psr_unmask) ([uint64]$before.Metrics.psr_unmask))){throw 'P127 PSR unmask not proven'}
+    if($null -ne $psrPre){
+        $psrRestore=P125-Fields (P12-Query 'p1273_psr')
+        Add-Content -Encoding UTF8 -LiteralPath "$Stem.$Label.psr.txt" -Value ($psrRestore|ConvertTo-Json -Compress)
+        if($psrRestore.governor -ne '0' -or $psrRestore.drained -ne '0' -or $psrRestore.owner -eq '2' -or $psrRestore.faults -ne $psrPre.faults){throw 'P1273 PSR restoration/fault check failed'}
+    }
     $script:P127Dirty=$false
     if($script:P1272Required){[void](P1272-Caps)}
     $script:P125Report.Add("P127 RESTORE $Label mode=0 $($restored.little_cur) kHz")
     $script:P12Phase="$Label-FG"
     P127-Delta $before $after $afterTimer.Status $Label $Stem
-    $result=[pscustomobject]@{Timer=$afterTimer;Pre=$before;Post=$after;Restored=$restored}
+    $result=[pscustomobject]@{Timer=$afterTimer;Pre=$before;Post=$after;Restored=$restored;PsrPre=$psrPre;PsrPost=$psrPost;PsrRestore=$psrRestore}
     $result|Export-Clixml -Depth 12 -LiteralPath "$Stem.$Label.energy-complete.clixml"
     return $result
 }
@@ -567,17 +635,368 @@ function P127-RunEnergy([string]$Stem){
             WIFI {([uint64]$b.Post.Wifi.attach -gt [uint64]$b.Pre.Wifi.attach) -and ([uint64]$b.Post.Wifi.fallback -eq [uint64]$b.Pre.Wifi.fallback)}
             default {([uint64]$b.Post.Status.floor_hits -gt [uint64]$b.Pre.Status.floor_hits) -and ([int]$b.Post.Status.little_cur -eq [int]$b.Post.Status.little_request)}
         }
-        $line="P127 MODULE $name "+$(if($eligible){'APPLIED'}else{'NO_ELIGIBLE_PATH_OR_FALLBACK'})
+        $line="P127 MODULE $name "+$(if($eligible -and $script:P1273HostEnabled -and $name -eq 'PSR'){'TRANSITION_ONLY_PENDING_A1'}elseif($eligible){'APPLIED'}else{'NO_ELIGIBLE_PATH_OR_FALLBACK'})
         $script:P125Report.Add($line);Life-Say $line
+        $prior=$a
         $a=P127-Window "P127-$name-A1" 1 $EnergySeconds $Stem $b.Timer
+        if($script:P1273HostEnabled -and $name -eq 'PSR'){
+            $matched=$null -ne $prior.PsrPre -and $null -ne $prior.PsrPost -and
+                $prior.PsrPre.boot_ms -eq '300' -and $a.PsrPre.boot_ms -eq '300' -and
+                [uint64]$prior.PsrPost.legacy_ticks -gt [uint64]$prior.PsrPre.legacy_ticks -and
+                [uint64]$a.PsrPost.legacy_ticks -gt [uint64]$a.PsrPre.legacy_ticks -and
+                $b.PsrPost.governor -eq '1' -and $b.PsrPost.drained -eq '1' -and
+                (P125-Sub ([uint64]$b.PsrPost.legacy_ticks) ([uint64]$b.PsrPre.legacy_ticks)) -le 4
+            $eligible=$eligible -and $matched
+            $script:P125Report.Add("P1273 PSR matched legacy cadence=$matched applied=$eligible; screen wake validation still required")
+        }
         $script:P125Report.Add("P127 MODULE $name ABA_COMPLETE applied=$eligible")
         $script:P125Report|Set-Content -Encoding UTF8 -LiteralPath "$Stem.p125-report.txt"
         Life-Say "P127 MODULE $name ABA_COMPLETE applied=$eligible"
     }
 }
+function P1273-ReadDiagnostics([string]$Stem,[string]$Label){
+    $script:P12Phase="P1273-$Label"
+    if((P125-Status).armed -ne '0'){throw 'P1273 diagnostics require stopped observation'}
+    $floor=P12-Query 'p1273_floor'
+    Add-Content -Encoding UTF8 -LiteralPath "$Stem.p1273-diag.txt" -Value "$Label floor $floor"
+    for($i=0;$i -lt 8;$i++){
+        $line=P12-Query "p1273_bus$i"
+        Add-Content -Encoding UTF8 -LiteralPath "$Stem.p1273-diag.txt" -Value "$Label bus$i $line"
+    }
+    for($cpu=0;$cpu -lt 8;$cpu++){
+        $line=P12-Query "p1273_wfi$cpu"
+        Add-Content -Encoding UTF8 -LiteralPath "$Stem.p1273-diag.txt" -Value "$Label wfi$cpu $line"
+    }
+    $script:P125Report.Add("P1273 $Label diagnostic checkpoint; cached bus data may be unsampled/stale, WFI cumulative")
+}
+function P1273-TraceStatus {
+    $s=P125-Fields (P12-Query 'p1273_trace_status')
+    if($s.version -ne '1' -or $s.buckets -ne '128' -or $s.owners -ne '16'){throw 'P1273 trace ABI mismatch'}
+    return $s
+}
+function P1273-TraceCapture([string]$Stem){
+    $script:P12Phase='THERMAL-TRACE'
+    $pre=P1273-TraceStatus
+    if($pre.state -ne '0'){throw 'P1273 prior capture exists; preserve frozen data (reboot clears ring)'}
+    if((P126-Status).mode -ne '0' -or (P127-Status).mode -ne '0'){throw 'P1273 requires stock driver policy'}
+    $script:P1273TraceDirty=$true
+    [void](P12-Query 'p1273_trace_mode' '1')
+    $s=P1273-TraceStatus
+    if($s.state -notin @('2','4') -or [uint64]$s.generation -le [uint64]$pre.generation){throw 'P1273 trace arm missing'}
+    $gen=$s.generation
+    $until=(Life-Now).AddSeconds(185)
+    while($s.state -ne '4' -and (Life-Now) -lt $until){
+        P125-PumpOff 5
+        $s=P1273-TraceStatus
+        if($s.generation -ne $gen){throw 'P1273 generation changed'}
+    }
+    if($s.state -ne '4'){throw 'P1273 capture did not freeze'}
+    $script:P1273TraceDirty=$false
+    $s|Export-Clixml -LiteralPath "$Stem.thermal-status.clixml"
+    $script:P125Report.Add("P1273 TRACE FROZEN generation=$gen trigger=$($s.trigger) reason=$($s.reason); use ThermalTraceDump; no-trigger capture is inconclusive")
+}
+function P1273-TraceDump([string]$Stem){
+    $script:P12Phase='THERMAL-DUMP'
+    $s=P1273-TraceStatus
+    if($s.state -ne '4' -or $s.span -eq '0'){throw 'P1273 trace not frozen'}
+    $s|Export-Clixml -LiteralPath "$Stem.thermal-status.clixml"
+    $gen=$s.generation
+    $n=0
+    for($cpu=0;$cpu -lt 8;$cpu++){
+        $line=P12-Query "p1273_trace_cpu$cpu"
+        $c=P125-Fields $line
+        if($c.generation -ne $gen -or [int]$c.cpu -ne $cpu){throw 'P1273 coverage identity mismatch'}
+        Add-Content -Encoding UTF8 -LiteralPath "$Stem.thermal-pages.txt" -Value $line
+        $m=@($c.mask.Split('/')|ForEach-Object {P125-Hex $_})
+        for($slot=0;$slot -lt 128;$slot++){
+            if(-not ($m[[int][Math]::Floor($slot/64)] -band ([uint64]1 -shl ($slot%64)))){continue}
+            $mask=0
+            for($p=0;$p -lt 8;$p++){
+                if($p -gt 0 -and -not ($mask -band (3 -shl ($p*2)))){continue}
+                $sel=$cpu*1024+$slot*8+$p
+                [void](P12-Query 'p1273_trace_select' "$sel")
+                $line=P12-Query 'p1273_trace_page'
+                $v=P125-Fields $line
+                if($v.generation -ne $gen -or [int]$v.select -ne $sel -or $v.present -ne '1' -or ([uint64]$v.bin%128) -ne $slot){throw 'P1273 page identity mismatch'}
+                if($p -eq 0){$mask=P125-Hex $v.mask;$bin=$v.bin}
+                if((P125-Hex $v.mask) -ne $mask -or $v.bin -ne $bin -or $mask -gt 65535){throw 'P1273 bucket changed'}
+                $expected=0
+                foreach($i in @(0,1)){if($mask -band (1 -shl ($p*2+$i))){$expected++}}
+                if(([regex]::Matches($line,' r=')).Count -ne $expected){throw 'P1273 owner count mismatch'}
+                Add-Content -Encoding UTF8 -LiteralPath "$Stem.thermal-pages.txt" -Value $line
+                $n++
+            }
+        }
+    }
+    $post=P1273-TraceStatus
+    foreach($key in @('state','generation','start','end','trigger','span','reason')){if($s[$key] -ne $post[$key]){throw 'P1273 final trace identity mismatch'}}
+    $script:P125Report.Add("P1273 TRACE DUMP COMPLETE generation=$gen pages=$n; dropped/clipped coverage must be reviewed")
+}
+function P1273-GpuDump([string]$Stem){
+    $script:P12Phase='THERMAL-GPU-DUMP'
+    $s=P1273-TraceStatus
+    if($s.state -ne '4'){throw 'P1273 trace not frozen'}
+    $s|Export-Clixml -LiteralPath "$Stem.thermal-status.clixml"
+    $line=P12-Query 'p1273_gpu_status'
+    $g=P125-Fields $line
+    if($g.generation -ne $s.generation -or [uint64]$g.completed -gt [uint64]$g.submitted){throw 'P1273 GPU coverage mismatch'}
+    Add-Content -Encoding UTF8 -LiteralPath "$Stem.thermal-gpu.txt" -Value $line
+    $n=[uint64]$g.completed
+    $first=[Math]::Max(1,[double]$n-1023)
+    if([uint64]$g.first_wake){
+        [void](P12-Query 'p1273_gpu_select' '1024')
+        $line=P12-Query 'p1273_gpu_page'
+        $v=P125-Fields $line
+        if($v.slot -ne '1024' -or $v.seq -ne $g.first_wake -or $v.generation -ne $s.generation -or $v.wake_ok -ne '1'){throw 'P1273 first wake mismatch'}
+        Add-Content -Encoding UTF8 -LiteralPath "$Stem.thermal-gpu.txt" -Value $line
+    }
+    for($i=[uint64]$first;$i -le $n;$i++){
+        $slot=($i-1)%1024
+        [void](P12-Query 'p1273_gpu_select' "$slot")
+        $line=P12-Query 'p1273_gpu_page'
+        $v=P125-Fields $line
+        if([uint64]$v.slot -ne $slot -or [uint64]$v.seq -ne $i -or $v.generation -ne $s.generation -or
+            [uint64]$v.queued -gt [uint64]$v.began -or [uint64]$v.began -gt [uint64]$v.ended){throw 'P1273 GPU row identity/timing mismatch'}
+        Add-Content -Encoding UTF8 -LiteralPath "$Stem.thermal-gpu.txt" -Value $line
+    }
+    for($slot=0;$slot -lt 128;$slot++){
+        [void](P12-Query 'p1273_gov_select' "$slot")
+        $line=P12-Query 'p1273_gov_page'
+        $v=P125-Fields $line
+        if([int]$v.slot -ne $slot){throw 'P1273 governor slot mismatch'}
+        if($v.present -eq '1' -and (([uint64]$v.bin%128) -ne $slot -or [uint64]$v.at -lt [uint64]$s.start -or [uint64]$v.at -ge [uint64]$s.end)){throw 'P1273 governor row outside capture'}
+        Add-Content -Encoding UTF8 -LiteralPath "$Stem.thermal-gov.txt" -Value $line
+    }
+    $post=P1273-TraceStatus
+    foreach($key in @('state','generation','start','end','trigger','span','reason')){if($s[$key] -ne $post[$key]){throw 'P1273 GPU dump trace changed'}}
+    $script:P125Report.Add("P1273 GPU/GOV DUMP COMPLETE submitted=$($g.submitted) completed=$n overwritten=$($g.overwritten); incomplete jobs and overwritten rows are missing evidence")
+}
+function P1273-CapWindow([string]$Stem,[string]$Label,[int]$Mode){
+    $script:P12Phase=$Label
+    $before=P125-Fields (P12-Query 'p1273_cap_status')
+    if($before.state -in @('2','3')){throw 'P1273 prior cap active'}
+    P125-PumpOff 5
+    $script:P1273CapDirty=$true
+    [void](P12-Query 'p1273_cap_mode' "$Mode")
+    $until=(Life-Now).AddSeconds(80)
+    $s=P125-Fields (P12-Query 'p1273_cap_status')
+    while($s.state -ne '4' -and (Life-Now) -lt $until){
+        if([uint64]$s.generation -le [uint64]$before.generation -or [int]$s.mode -ne $Mode){throw 'P1273 cap generation/mode mismatch'}
+        P125-PumpOff 2
+        $s=P125-Fields (P12-Query 'p1273_cap_status')
+    }
+    $s|Export-Clixml -LiteralPath "$Stem.$Label.cap.clixml"
+    if($s.state -ne '4' -or [uint64]$s.generation -le [uint64]$before.generation -or [int]$s.mode -ne $Mode){throw 'P1273 cap did not terminate'}
+    [void](P12-Query 'p1273_cap_mode' '0' -Cleanup)
+    if((P12-Query 'p1273_cap_mode') -ne '0'){throw 'P1273 cap restore not proven'}
+    $script:P1273CapDirty=$false
+    if($s.reason -eq '10'){throw 'P1273 no naturally sustained load: INCONCLUSIVE; do not induce overheating'}
+    if($s.reason -ne '1' -or $s.start -eq '0' -or $s.end -ne $s.until -or $s.windows -eq '0'){throw "P1273 cap phase revoked reason=$($s.reason)"}
+    $script:P125Report.Add("P1273 CAP $Label natural trigger, 15s bounded; rate asked flags=$($s.big_asked)/$($s.lit_asked); workload matching and energy not established")
+    return $s
+}
+function P1273-CapABA([string]$Stem){
+    if(-not $AllowOffCap){throw 'OffBurstCapABA requires -AllowOffCap after reviewing frozen ThermalTrace'}
+    $trace=P1273-TraceStatus
+    if($trace.state -ne '4' -or $trace.trigger -eq '0'){throw 'P1273 attributed burst capture required'}
+    $mode=if($AllowStrongerCap){2}else{1}
+    if($mode -eq 2 -and (P125-Fields (P12-Query 'p1273_cap_status')).mild_done -ne '1'){throw 'P1273 stronger cap requires completed mild trial and explicit review'}
+    $a=P1273-CapWindow $Stem 'CAP-A0' 3
+    $b=P1273-CapWindow $Stem 'CAP-B' $mode
+    $c=P1273-CapWindow $Stem 'CAP-A1' 3
+    $script:P125Report.Add("P1273 CAP ABA recorded; peaks BIG=$($a.big_peak)/$($b.big_peak)/$($c.big_peak), LITTLE=$($a.lit_peak)/$($b.lit_peak)/$($c.lit_peak); not a matched-workload energy result")
+}
+function P1273-OfflineSamples([string]$Stem,[string]$Label){
+    $path="$Stem.$Label.fg.csv"
+    if(-not (Test-Path -LiteralPath $path)){throw "P1273 $Label no fuel-gauge samples"}
+    $all=@(Import-Csv -LiteralPath $path)
+    if(@($all|Where-Object {$_.in_window -eq 'True' -and ([int]$_.external -ne 0 -or [int]$_.current_ua -ge 0 -or [int]$_.voltage_uv -lt 3000000 -or [int]$_.voltage_uv -gt 4500000)}).Count){throw "P1273 $Label charging/non-discharge/invalid voltage inside window"}
+    # Trim link transition edges; integrate only observed support.
+    $v=@($all|Where-Object {$_.in_window -eq 'True' -and [double]$_.seconds_from_start -ge 5 -and [double]$_.seconds_from_start -le 55}|Sort-Object {[double]$_.seconds_from_start})
+    if($v.Count -lt 4){throw "P1273 $Label insufficient independent samples"}
+    for($i=1;$i -lt $v.Count;$i++){
+        $dt=[double]$v[$i].seconds_from_start-[double]$v[$i-1].seconds_from_start
+        if($dt -le 0 -or $dt -gt 15 -or [uint64]$v[$i].seq -ne ([uint64]$v[$i-1].seq+1)){throw "P1273 $Label sample gap"}
+    }
+    return $v
+}
+function P1273-OfflineIntegrate($Rows,[string]$Label,[double]$Lo,[double]$Hi){
+    if($Hi-$Lo -lt 30){throw 'P1273 insufficient common integration support'}
+    $area=0.0;$duration=0.0
+    for($i=1;$i -lt $Rows.Count;$i++){
+        $x=[double]$Rows[$i-1].seconds_from_start;$y=[double]$Rows[$i].seconds_from_start
+        $a=[Math]::Max($x,$Lo);$b=[Math]::Min($y,$Hi)
+        if($b -le $a){continue}
+        $p=-[double]$Rows[$i-1].net_battery_w;$q=-[double]$Rows[$i].net_battery_w
+        $pa=$p+($q-$p)*($a-$x)/($y-$x);$pb=$p+($q-$p)*($b-$x)/($y-$x)
+        $area+=($pa+$pb)*($b-$a)/2;$duration+=$b-$a
+    }
+    if([Math]::Abs($duration-($Hi-$Lo)) -gt 0.001){throw 'P1273 extrapolation/coverage gap'}
+    return [pscustomobject]@{Label=$Label;Samples=$Rows.Count;Start=$Lo;End=$Hi;Seconds=$duration;MeanW=$area/$duration;ObservedWh=$area/3600}
+}
+function P1273-OfflineABA([string]$Stem){
+    if(-not $AllowOfflineTrial){throw 'OfflineABA requires -AllowOfflineTrial after individual functional review'}
+    if((P126-Status).mode -ne '0' -or (P127-Status).mode -ne '0' -or (P12-Query 'p1273_offline_s') -ne '0'){throw 'P1273 prior lease or offline configuration active'}
+    $defs=@{ABOX=5;BT=257;WIFI=129;TICKER=513;LITTLE949=17;COMBINED5=903;COMBINED6=919}
+    if($OfflineModule -in 'COMBINED5','COMBINED6'){P1273-CombinedPermission $defs[$OfflineModule]}
+    $nonce=P12-Query 'p1273_boot_identity'
+    $base=P125-ReadSnapshot 'P1273-OFFLINE-BASE' -CountsOnly
+    $a=P127-Window 'OFFLINE-A0' 1 60 $Stem $base -Offline
+    if((P12-Query 'p1273_boot_identity') -ne $nonce){throw 'P1273 boot identity changed after A0'}
+    $b=P127-Window 'OFFLINE-B' $defs[$OfflineModule] 60 $Stem $a.Timer -Offline
+    if((P12-Query 'p1273_boot_identity') -ne $nonce){throw 'P1273 boot identity changed after B'}
+    $c=P127-Window 'OFFLINE-A1' 1 60 $Stem $b.Timer -Offline
+    if((P12-Query 'p1273_boot_identity') -ne $nonce){throw 'P1273 boot identity changed after A1'}
+    if($a.Timer.Status.anchor -ne $b.Timer.Status.anchor -or $a.Timer.Status.anchor -ne $c.Timer.Status.anchor -or
+       $a.Timer.Status.hz -ne $b.Timer.Status.hz -or $a.Timer.Status.hz -ne $c.Timer.Status.hz -or
+       [uint64]$b.Timer.Status.start -le [uint64]$a.Timer.Status.end -or [uint64]$c.Timer.Status.start -le [uint64]$b.Timer.Status.end){throw 'P1273 offline capture continuity failed'}
+    $labels=@('OFFLINE-A0','OFFLINE-B','OFFLINE-A1')
+    $samples=@{};$lo=5.0;$hi=55.0
+    foreach($label in $labels){
+        $v=@(P1273-OfflineSamples $Stem $label)
+        $samples[$label]=$v
+        $lo=[Math]::Max($lo,[double]$v[0].seconds_from_start)
+        $hi=[Math]::Min($hi,[double]$v[-1].seconds_from_start)
+    }
+    $energy=@(foreach($label in $labels){P1273-OfflineIntegrate $samples[$label] $label $lo $hi})
+    if($OfflineModule -in 'COMBINED5','COMBINED6'){
+        P1273-CombinedPermission $defs[$OfflineModule]
+        P1273-CombinedApplication $b $defs[$OfflineModule] -Offline
+    }
+    $energy|Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath "$Stem.offline-energy.csv"
+    $reference=($energy[0].MeanW+$energy[2].MeanW)/2
+    $script:P125Report.Add("P1273 OFFLINE ABA fixed 60s each, module=$OfflineModule common support=$lo..$hi s A0=$($energy[0].MeanW)W B=$($energy[1].MeanW)W A1=$($energy[2].MeanW)W Amean=$reference W; observed NET battery discharge only; USB quiet N/A offline, no causal claim without workload/temperature match")
+}
+# Explicit gate: user performs external real traffic while OFF, then tests
+# foreground functions after kernel has restored mode0. Never ACK on time alone.
+function P1273-GateStatus {
+    $v=P125-Fields (P12-Query 'p1273_gate_status')
+    if($v.version -ne '1' -or [int]$v.qualified -gt 255){throw 'P1273 gate ABI mismatch'}
+    return $v
+}
+function P1273-GateBit([int]$Mode){
+    switch($Mode){3{1} 5{2} 257{4} 129{8} 513{16} 17{32} 903{64} 919{128} default{throw 'P1273 invalid gate mask'}}
+}
+function P1273-CombinedPermission([int]$Mode,[switch]$Qualifying){
+    $script:P1273CombinedAllowed=$false
+    if(-not $AllowCombined){throw 'P1273 combined requires -AllowCombined and same-boot gate'}
+    $g=P1273-GateStatus
+    $need=if($Mode -eq 903){31}elseif($Mode -eq 919){127}else{throw 'P1273 exact combined masks only'}
+    if(-not $Qualifying){$need=$need -bor (P1273-GateBit $Mode)}
+    if($g.phase -ne '0' -or (([int]$g.qualified -band $need) -ne $need)){throw "P1273 gate prerequisite missing need=$need actual=$($g.qualified)"}
+    $script:P1273CombinedAllowed=$true
+}
+function P1273-GateCheckpoint([string]$Stem,[string]$Phase){
+    $script:P12Phase=$Phase
+    $g=P1273-GateStatus
+    $row=[pscustomobject]@{Phase=$Phase;Gate=$g;Policy=(P127-Status);Metrics=(P125-Fields (P12-Query 'p127_metrics'));BT=(P125-Fields (P12-Query 'p127_bt'));WiFi=(P125-Fields (P12-Query 'p127_wifi'));Ticker=(P125-Fields (P12-Query 'p127_ticker'));Active=(P12-Query 'p1273_gate_active');Post=(P12-Query 'p1273_gate_post')}
+    $row|Export-Clixml -Depth 8 -LiteralPath "$Stem.$Phase.gate.clixml"
+    return $row
+}
+function P1273-GateForeground([string]$Module){
+    # No blocking Read-Host: maintain thermal watchdog while the user tests.
+    Life-Say "P1273 ${Module}: policy OFF. Wake screen and verify normal function now. ABOX: play audible audio and record/play mic; BT: real paired data/reconnect; WIFI: bidirectional LAN transfer/reconnect; ticker: network timing/cancel; floor: input response and normal UI; USB: serial after link cycle. For combined test ALL applicable functions. Press Y on PC only after successful checks, N to reject."
+    $until=(Life-Now).AddSeconds(100)
+    while((Life-Now) -lt $until){
+        Life-Pump;Life-CheckSafety (Life-Now);P12-EarlyThermalGuard
+        try{
+            if([Console]::KeyAvailable){
+                $key=[Console]::ReadKey($true).Key
+                if($key -eq [ConsoleKey]::N){throw 'P1273 operator rejected functional test'}
+                if($key -eq [ConsoleKey]::Y){
+                    if($script:LifeState -ne 'ON'){throw 'P1273 foreground wake not observed'}
+                    return
+                }
+            }
+        }catch{throw "P1273 interactive confirmation unavailable or rejected: $($_.Exception.Message)"}
+    }
+    throw 'P1273 foreground confirmation timed out; no qualification'
+}
+function P1273-FunctionalGate([string]$Stem){
+    if(-not $AllowFunctionalGate){throw 'FunctionalGate requires -AllowFunctionalGate; real external workload and foreground confirmation'}
+    $defs=@{USB=3;ABOX=5;BT=257;WIFI=129;TICKER=513;LITTLE949=17;COMBINED5=903;COMBINED6=919}
+    $mask=$defs[$GateModule];$bit=P1273-GateBit $mask
+    if($mask -in 903,919){P1273-CombinedPermission $mask -Qualifying}
+    $script:P1273GateAllowed=$true
+    $pre=P1273-GateCheckpoint $Stem 'GATE-PRE'
+    if($pre.Gate.phase -ne '0' -or $pre.Policy.mode -ne '0'){throw 'P1273 pending gate or prior policy; cancel/read status first'}
+    $script:P1273GateDirty=$true
+    [void](P12-Query 'p1273_gate_begin' "$mask")
+    $g=P1273-GateStatus
+    if($g.phase -ne '1' -or [int]$g.mode -ne $mask -or [int]$g.generation -le [int]$pre.Gate.generation){throw 'P1273 gate prepare not verified'}
+    $generation=$g.generation
+    $script:P127Dirty=$true
+    [void](P12-Query 'p127_mode' "$mask")
+    $g=P1273-GateStatus
+    if($g.phase -ne '2' -or $g.generation -ne $generation -or $g.lease -eq '0' -or [int](P127-Status).mode -ne $mask){throw 'P1273 gate arm identity mismatch'}
+    Life-Say "P1273 $GateModule active; keep screen OFF, no touch. Generate genuine background traffic from another device for BT/WIFI/ticker; do NOT intentionally heat device."
+    if($mask -eq 3){
+        P125-PumpOff 8
+        P125-Offline 5
+        P125-PumpOff 12
+    }else{P125-PumpOff 45}
+    $active=P1273-GateCheckpoint $Stem 'GATE-ACTIVE'
+    if($active.Gate.generation -ne $generation -or $active.Gate.phase -ne '2' -or $active.Policy.mode -ne "$mask" -or $active.Policy.reason -ne '0'){throw 'P1273 functional policy revoked'}
+    if($mask -eq 17){
+        Life-Say 'P1273 LITTLE949: wake screen NOW to prove kernel revokes the floor lease'
+        $until=(Life-Now).AddSeconds(20)
+        while($script:LifeState -ne 'ON' -and (Life-Now) -lt $until){
+            Life-Pump;Life-CheckSafety (Life-Now);P12-EarlyThermalGuard
+        }
+        if($script:LifeState -ne 'ON'){throw 'P1273 floor wake not observed'}
+        $expectedReason='4'
+    }else{
+        [void](P12-Query 'p127_mode' '0' -Cleanup)
+        P125-PumpOff 3
+        $expectedReason='0'
+    }
+    $stopped=P1273-GateCheckpoint $Stem 'GATE-RESTORED'
+    if($stopped.Policy.mode -ne '0' -or $stopped.Policy.reason -ne $expectedReason){throw 'P1273 normal rollback not proven'}
+    $script:P127Dirty=$false
+    [void](P12-Query 'p1273_gate_review' $generation)
+    if((P1273-GateStatus).phase -ne '3'){throw 'P1273 review not armed'}
+    P1273-GateForeground $GateModule
+    $post=P1273-GateCheckpoint $Stem 'GATE-FOREGROUND'
+    if($post.Gate.phase -ne '3' -or $post.Gate.generation -ne $generation -or $post.Gate.missing -ne '0'){
+        throw "P1273 no qualification: missing evidence bitmap=$($post.Gate.missing), report retained"
+    }
+    [void](P12-Query 'p1273_gate_ack' $generation)
+    $done=P1273-GateCheckpoint $Stem 'GATE-DONE'
+    if($done.Gate.phase -ne '0' -or (([int]$done.Gate.qualified -band $bit) -ne $bit)){throw 'P1273 qualification ACK missing'}
+    $script:P1273GateDirty=$false
+    $script:P125Report.Add("P1273 GATE $GateModule qualified for this boot; generation=$generation qualified=$($done.Gate.qualified); operator-confirmed foreground and driver activity, not energy proof")
+}
+function P1273-CombinedApplication($B,[int]$Mode,[switch]$Offline){
+    $flags=[ordered]@{
+        USB=if($Offline){'N/A_OFFLINE'}elseif([uint64]$B.Post.Metrics.usb_8ms -gt [uint64]$B.Pre.Metrics.usb_8ms){'APPLIED'}else{'NO_EVIDENCE'}
+        ABOX=if([uint64]$B.Post.Metrics.abox_stop -gt [uint64]$B.Pre.Metrics.abox_stop -and [uint64]$B.Post.Metrics.abox_idle_wait -gt [uint64]$B.Pre.Metrics.abox_idle_wait){'APPLIED'}else{'NO_EVIDENCE'}
+        BT=if([uint64]$B.Post.BT.attach -gt [uint64]$B.Pre.BT.attach -and $B.Post.BT.fallback -eq $B.Pre.BT.fallback){'APPLIED'}else{'NO_EVIDENCE'}
+        WIFI=if([uint64]$B.Post.Wifi.attach -gt [uint64]$B.Pre.Wifi.attach -and $B.Post.Wifi.fallback -eq $B.Pre.Wifi.fallback){'APPLIED'}else{'NO_EVIDENCE'}
+        TICKER=if([uint64]$B.Post.Ticker.wait -gt [uint64]$B.Pre.Ticker.wait){'APPLIED'}else{'NO_EVIDENCE'}
+    }
+    if($Mode -eq 919){
+        $flags['LITTLE949']=if([uint64]$B.Post.Status.floor_hits -gt [uint64]$B.Pre.Status.floor_hits){'REQUESTED_VERIFY_MEASURED_MHZ'}else{'NO_EVIDENCE'}
+    }
+    $line=($flags.GetEnumerator()|ForEach-Object {"$($_.Key)=$($_.Value)"}) -join ' '
+    $script:P125Report.Add("P1273 COMBINED APPLICATION $line")
+    Life-Say "P1273 COMBINED APPLICATION $line"
+    if('NO_EVIDENCE' -in $flags.Values){$script:P125Report.Add('P1273 combined effect incomplete; do not attribute energy difference to full profile')}
+}
+function P1273-CombinedConnected([string]$Stem){
+    $mask=if($CombinedProfile -eq 'COMBINED5'){903}else{919}
+    P1273-CombinedPermission $mask
+    if($EnergySeconds -gt 30){throw 'P1273 first combined connected A/B/A limited to <=30s'}
+    $base=P125-ReadSnapshot 'P1273-COMBINED-BASE' -CountsOnly
+    $a=P127-Window 'COMBINED-A0' 1 $EnergySeconds $Stem $base
+    $b=P127-Window 'COMBINED-B' $mask $EnergySeconds $Stem $a.Timer
+    $c=P127-Window 'COMBINED-A1' 1 $EnergySeconds $Stem $b.Timer
+    P1273-CombinedPermission $mask
+    P1273-CombinedApplication $b $mask
+    $script:P125Report.Add("P1273 combined $mask A/B/A restored; actual module application must be verified from B counters, connected battery not energy evidence")
+}
 function P125-Run {
     if(-not $Execute){
-        Write-Host 'P12.5 preview: -Execute to measure OFF timer source. Trace=aggregate+detail; UsbCrossover=aggregate+A0/B/A1; OfflineOnly=B; AggregateOnly=aggregate; FrozenSummary=read-only counters; FrozenDump=read-only counters and pages on fixed firmware. No automatic cooling wait. DriverTrials=selective bounded A/B/A without page dumps; default COMBINED. ResumeSnapshot=FrozenDump checkpoint. EnergyTrials=guarded P12.7 A/B/A; EnergyOffline=connected/unplug/reconnect aggregate+WFI+FG.'
+        Write-Host 'P12.5 preview: -Execute to measure OFF timer source. Trace=aggregate+detail; UsbCrossover=aggregate+A0/B/A1; OfflineOnly=B; AggregateOnly=aggregate; FrozenSummary=read-only counters; FrozenDump=read-only counters and pages on fixed firmware. No automatic cooling wait. DriverTrials=selective bounded A/B/A without page dumps; default COMBINED. ResumeSnapshot=FrozenDump checkpoint. EnergyTrials=guarded P12.7 A/B/A; EnergyOffline=connected/unplug/reconnect aggregate+WFI+FG. P1273Diagnostics=read-only floor/bus/WFIv2; BusTrace=90s baseline-only ACPM observation.'
         return
     }
     if($env:OS -ne 'Windows_NT'){throw 'Windows serial runner only'}
@@ -603,6 +1022,18 @@ function P125-Run {
             Life-Say 'P125 recovered frozen cumulative counters; no new trial'
             return
         }
+        if($Scenario -eq 'ThermalGpuDump'){
+            P1273-GpuDump $stem
+            return
+        }
+        if($Scenario -eq 'ThermalTraceDump'){
+            P1273-TraceDump $stem
+            return
+        }
+        if($Scenario -eq 'P1273Diagnostics'){
+            P1273-ReadDiagnostics $stem 'READONLY'
+            return
+        }
         if(-not $s.ContainsKey('page_lookup') -or $s.page_lookup -ne 'scalar'){
             throw 'P125 legacy page resolver refused; use FrozenSummary or matched P12.5.1 kernel'
         }
@@ -615,8 +1046,35 @@ function P125-Run {
         P125-PumpOff 25
         $g=P12-Query 'g3d_lab_stats'
         if($g -notmatch ' domain=0 pll=0 ' -or $g -notmatch ' fault=0 '){throw 'P125 independent GPU OFF evidence missing'}
+        if($Scenario -eq 'OffBurstCapABA'){
+            P1273-CapABA $stem
+            return
+        }
+        if($Scenario -eq 'ThermalTrace'){
+            P1273-TraceCapture $stem
+            return
+        }
+        if($Scenario -eq 'BusTrace'){
+            P1273-ReadDiagnostics $stem 'PRE'
+            $base=P125-ReadSnapshot 'P1273-BUS-BASE' -CountsOnly
+            [void](P127-Window 'P1273-BUS' 1 90 $stem $base)
+            P1273-ReadDiagnostics $stem 'POST'
+            return
+        }
         if($Scenario -eq 'GpuCacheCheck'){
             P1272-Check
+            return
+        }
+        if($Scenario -eq 'FunctionalGate'){
+            P1273-FunctionalGate $stem
+            return
+        }
+        if($Scenario -eq 'CombinedConnected'){
+            P1273-CombinedConnected $stem
+            return
+        }
+        if($Scenario -eq 'OfflineABA'){
+            P1273-OfflineABA $stem
             return
         }
         if($Scenario -in @('EnergyTrials','EnergyOffline')){
@@ -636,6 +1094,12 @@ function P125-Run {
     }catch{
         $errorText=$_.Exception.Message;Life-Say "P125 STOP $errorText"
     }finally{
+        if($script:P1273CapDirty -and $null -ne $script:LifeSerial -and $script:LifeSerial.IsOpen){
+            try{[void](P12-Query 'p1273_cap_mode' '0' -Cleanup);$script:P1273CapDirty=$false}catch{Life-Say 'P1273 cap stop unconfirmed; kernel bounded expiry'}
+        }
+        if($script:P1273TraceDirty -and $null -ne $script:LifeSerial -and $script:LifeSerial.IsOpen){
+            try{[void](P12-Query 'p1273_trace_mode' '0' -Cleanup);$script:P1273TraceDirty=$false}catch{Life-Say 'P1273 trace freeze unconfirmed; bounded 180s expiry'}
+        }
         if($script:P1272Dirty -and $null -ne $script:LifeSerial -and $script:LifeSerial.IsOpen){
             try{[void](P12-Query 'p1272_probe_request' '0' -Cleanup);$script:P1272Dirty=$false}catch{Life-Say 'P1272 request cancel unconfirmed; 60s bounded expiry'}
         }
@@ -647,6 +1111,12 @@ function P125-Run {
         }
         if($script:P125Dirty -and $null -ne $script:LifeSerial -and $script:LifeSerial.IsOpen){
             try{[void](P12-Query 'p125_mode' '0' -Cleanup);$script:P125Dirty=$false}catch{Life-Say 'P125 cleanup ACK missing; kernel lease <=180s'}
+        }
+        if($script:P1273GateDirty -and $null -ne $script:LifeSerial -and $script:LifeSerial.IsOpen){
+            try{[void](P12-Query 'p1273_gate_begin' '0' -Cleanup);$script:P1273GateDirty=$false}catch{Life-Say 'P1273 pending gate discard unconfirmed; expires in kernel'}
+        }
+        if($script:P1273OfflineDirty -and $null -ne $script:LifeSerial -and $script:LifeSerial.IsOpen){
+            try{[void](P12-Query 'p1273_offline_s' '0' -Cleanup);$script:P1273OfflineDirty=$false}catch{Life-Say 'P1273 offline configuration reset unconfirmed; hardware policy remains bounded'}
         }
         if($null -ne $script:LifeSerial){try{$script:LifeSerial.Dispose()}catch{};$script:LifeSerial=$null}
         if($null -ne $script:LifeRaw){$script:LifeRaw.Dispose();$script:LifeRaw=$null}

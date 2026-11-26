@@ -6,7 +6,7 @@ const has=(s,...v)=>v.forEach(x=>a(s.includes(x),x));
 const h=read('xnu/files/hakios_p125.h'), c=read('xnu/files/hakios_p125_impl.h'), sys=read('drivers/power/exynos/hakios.p125_sysctl.h');
 has(h,'P127_MASK 1023u','P127_FG_SLOTS 64');
 has(c,'hakios_p127_stop(4)','hakios_p127_offline_aggregate','hakios_p127_wfi_ticks','(seq-1)%P127_FG_SLOTS','if(!hakios_p127_mode() || !hakios_p125_active())return');
-has(sys,'120ULL:420ULL','360ULL:180ULL','extras&(extras-1)','extras && P127_FLOOR(v)','{100,500,1000,2000,3500,10000}','949000,832000,715000,598000,455000','!hakios_p124_ufs_safe() || hakios_p124_ufs_busy()','p127_bus_poll','hakios_acpm_dvfs_get','p127_fg_page_sysctl');
+has(sys,'120ULL:420ULL','360ULL:180ULL','extras&(extras-1)','extras && P127_FLOOR(v)','{100,500,1000,2000,3500,10000,20000,50000}','949000,832000,715000,598000,455000','!hakios_p124_ufs_safe())reason|=1u<<6','hakios_p124_ufs_busy())reason|=1u<<7','p127_bus_poll','hakios_acpm_dvfs_get','p127_fg_page_sysctl');
 a(!sys.includes('hakios_acpm_dvfs_set'));
 const bt=read('drivers/bluetooth/bcm4361/hakios.bcm4361_bt.c');
 has(bt,'P127_BT_INTID (32u+422u)','UMCON_AFC','UFSTAT_RX_FULL','p127_bt_fallback','p127_bt_uintm','p127_bt_ucon','clock_interval_to_deadline(8,NSEC_PER_MSEC','sleep_ms(1)');
@@ -26,7 +26,7 @@ const valid=m=>{const floor=(m>>4)&7,extra=m&~0x71;return m===0||!!(m&1)&&m<=102
 for(const m of [0,1,3,5,9,17,33,49,65,81,129,257,513])a(valid(m));
 for(const m of [2,7,15,97,131,273,1023,1025])a(!valid(m));
 for(const m of [1,3,513,81]){const end=123456789n&~1023n,word=end|BigInt(m);a.equal(word&1023n,BigInt(m));a.equal(word&~1023n,end);}
-const bounds=[100,500,1000,2000,3500,10000],bin=x=>bounds.filter(y=>x>=y).length;
+const bounds=[100,500,1000,2000,3500,10000,20000,50000],bin=x=>bounds.filter(y=>x>=y).length;
 bounds.forEach((b,i)=>{a.equal(bin(b-1),i);a.equal(bin(b),i+1)});
 for(let seq=1;seq<=128;seq++)a.equal(Math.floor(((seq-1)%64)/4),Math.floor((seq-1)/4)%16);
 console.log('P12.7 source contracts, lease, WFI bins, gauge wrap PASS (not native compile)');

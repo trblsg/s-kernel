@@ -25,7 +25,7 @@ static bool s9LayoutOn(void) {
     return on;
 }
 static bool s9LayoutDescriptor(MTLTextureDescriptor *d,s9_texture_layout *out) {
-    if(!d || d.textureType!=MTLTextureType2D || d.depth!=1 ||
+    if(!d || d.storageMode!=MTLStorageModeShared || d.textureType!=MTLTextureType2D || d.depth!=1 ||
        d.width==0 || d.height==0 || d.mipmapLevelCount!=1 ||
        d.arrayLength!=1 || d.sampleCount!=1) return false;
     uint32_t bw=0,bh=0,bytes=0;
@@ -60,14 +60,11 @@ typedef struct {uint64_t words[2];} S9TextureWatermark;
          linearBytesPerRow:(NSUInteger)sourceRow linearBytesPerImage:(NSUInteger)image
          toTextureMemory:(void *)dest textureSlice:(NSUInteger)slice textureLevel:(NSUInteger)level
          textureRegion:(MTLRegion)region {
-    (void)image;
     uint64_t start=0,n=0,rows=0;
-    if(!source || !dest || slice || level ||
+    if(!source || !dest || slice || level || region.origin.z || region.size.depth!=1 ||
        !s9_tex_region(&_plan,region.origin.x,region.origin.y,region.size.width,region.size.height,
-                      &start,&n,&rows) || sourceRow<n ||
-       (rows && sourceRow>SIZE_MAX/(rows-1?rows-1:1)) ||
-       offset>SIZE_MAX-(rows-1)*sourceRow ||
-       n>SIZE_MAX-offset-(rows-1)*sourceRow)return;
+                      &start,&n,&rows) ||
+       !s9_tex_linear_span(offset,sourceRow,n,rows,image))return;
     for(uint64_t i=0;i<rows;++i)
         memcpy((uint8_t *)dest+start+i*_plan.row_bytes,
                (const uint8_t *)source+offset+i*sourceRow,(size_t)n);
@@ -76,14 +73,11 @@ typedef struct {uint64_t words[2];} S9TextureWatermark;
                 textureLevel:(NSUInteger)level textureRegion:(MTLRegion)region
                 toLinearBytes:(void *)dest linearOffset:(NSUInteger)offset
                 linearBytesPerRow:(NSUInteger)destRow linearBytesPerImage:(NSUInteger)image {
-    (void)image;
     uint64_t start=0,n=0,rows=0;
-    if(!source || !dest || slice || level ||
+    if(!source || !dest || slice || level || region.origin.z || region.size.depth!=1 ||
        !s9_tex_region(&_plan,region.origin.x,region.origin.y,region.size.width,region.size.height,
-                      &start,&n,&rows) || destRow<n ||
-       (rows && destRow>SIZE_MAX/(rows-1?rows-1:1)) ||
-       offset>SIZE_MAX-(rows-1)*destRow ||
-       n>SIZE_MAX-offset-(rows-1)*destRow)return;
+                      &start,&n,&rows) ||
+       !s9_tex_linear_span(offset,destRow,n,rows,image))return;
     for(uint64_t i=0;i<rows;++i)
         memcpy((uint8_t *)dest+offset+i*destRow,
                (const uint8_t *)source+start+i*_plan.row_bytes,(size_t)n);

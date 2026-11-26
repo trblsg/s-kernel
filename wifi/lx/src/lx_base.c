@@ -368,6 +368,7 @@ linux_queue_delayed_work_on(int cpu, struct workqueue_struct *wq, struct delayed
 	}
 	lx_os_unlock();
 	if (slot < 0) {
+		(void)lx_os_option("p1273_tick_fail");
 		printf("lx: no room for more work that waits for its time: one piece will not be done\n");
 	}
 	return (slot >= 0);
@@ -383,6 +384,7 @@ linux_cancel_delayed_work(struct delayed_work *dwork)
 	for (unsigned i = 0; i < nitems(later); i++) {
 		if (later[i].work == dwork) {
 			later[i].work = NULL;
+			(void)lx_os_option("p1273_tick_cancel");
 			p127_ticker_changed();
 			waited = true;
 		}
@@ -401,6 +403,7 @@ timer_delete_sync(struct timer_list *timer)
 	for (unsigned i = 0; i < nitems(armed); i++) {
 		if (armed[i] == timer) {
 			armed[i] = NULL;
+			(void)lx_os_option("p1273_tick_cancel");
 			p127_ticker_changed();
 			was = 1;
 		}
@@ -446,6 +449,7 @@ mod_timer(struct timer_list *timer, unsigned long expires)
 	}
 	lx_os_unlock();
 	if (slot < 0) {
+		(void)lx_os_option("p1273_tick_fail");
 		printf("lx: no room for another timer: one will not fire\n");
 	}
 	return (was);

@@ -16,6 +16,7 @@
 #import <objc/runtime.h>
 #include <algorithm>
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <pthread.h>
 #include <string>
@@ -26,6 +27,7 @@
 #include <dlfcn.h>
 #include <execinfo.h>
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 #include <thread>
 #include <fcntl.h>
 #include <unistd.h>
@@ -294,6 +296,59 @@ void (*native_bridge_metal_log_hook)(const char *);
 // Not problems: written to the log without counting in the status line's refusals.
 #define NBSAY(...) do{NSString *nbText=[NSString stringWithFormat:__VA_ARGS__];NSLog(@"%@",nbText);\
  if(native_bridge_metal_log_hook)native_bridge_metal_log_hook(nbText.UTF8String?:"?");}while(0)
+/* P12.7.3 logging-only experiment: select a fresh test process with
+ * HAKIOS_METAL_LOG_AB=0 (existing logging) or 1 (one refusal per second
+ * per selector). No changes to nil, texture lifetime or other NBLOG paths.
+ * The environment is read once, not queried on each request. */
+struct P1273LogStats {
+ std::atomic<uint64_t> calls{0},printed{0},suppressed{0},elapsedUs{0},nextPrint{0},nextReport{0};
+ std::atomic<uint64_t> format[1025]{}; // 1024 = out-of-range format bucket
+ std::atomic<uint64_t> distinct{0};
+};
+static P1273LogStats p1273LogStats[2];
+static int p1273LogMode() {
+ static const int mode=[] {
+  const char *s=getenv("HAKIOS_METAL_LOG_AB");
+  return s && !strcmp(s,"0")?0:s && !strcmp(s,"1")?1:-1;
+ }();
+ return mode;
+}
+static bool p1273LogDue(std::atomic<uint64_t>& next,uint64_t now) {
+ uint64_t old=next.load(std::memory_order_relaxed);
+ return now>=old && next.compare_exchange_strong(old,now+1000000,std::memory_order_relaxed);
+}
+static void p1273Unsupported(unsigned selector,bool baselinePrint,NSString *message,void *caller,MTLTextureDescriptor *d,bool backed) {
+ const int mode=p1273LogMode();
+ if(mode<0) {if(baselinePrint)NBLOG(@"%@",message);return;}
+ P1273LogStats &s=p1273LogStats[selector];
+ const uint64_t start=nowUs(),n=++s.calls;
+ const NSUInteger fmt=d?d.pixelFormat:0;
+ const unsigned bucket=fmt<1024?(unsigned)fmt:1024;
+ const uint64_t fmtCount=++s.format[bucket];
+ const bool firstFormat=fmtCount==1 && ++s.distinct<=16;
+ if(baselinePrint){
+  if(mode==0 || p1273LogDue(s.nextPrint,start)){NBLOG(@"%@",message);s.printed++;}
+  else s.suppressed++;
+ }
+ s.elapsedUs+=nowUs()-start;
+ if(n==64 || p1273LogDue(s.nextReport,start)){
+  NBSAY(@"native-metal-p1273: mode=%d selector=%u pid=%d tid=%u ticks=%llu calls=%llu printed=%llu suppressed=%llu elapsed_us=%llu",
+   mode,selector,getpid(),threadIdLow(),(unsigned long long)mach_absolute_time(),
+   (unsigned long long)n,(unsigned long long)s.printed.load(),
+   (unsigned long long)s.suppressed.load(),(unsigned long long)s.elapsedUs.load());
+  NBSAY(@"native-metal-p1273-desc: selector=%u pid=%d ticks=%llu format=%lu format_calls=%llu distinct=%llu width=%lu height=%lu type=%lu mips=%lu backed=%d storage=%lu",
+   selector,getpid(),(unsigned long long)mach_absolute_time(),(unsigned long)fmt,
+   (unsigned long long)fmtCount,(unsigned long long)s.distinct.load(),(unsigned long)d.width,(unsigned long)d.height,
+   (unsigned long)d.textureType,(unsigned long)d.mipmapLevelCount,backed?1:0,(unsigned long)d.storageMode);
+ }
+ if(firstFormat)NBSAY(@"native-metal-p1273-first-format: selector=%u pid=%d format=%lu depth=%lu array=%lu samples=%lu",
+    selector,getpid(),(unsigned long)fmt,(unsigned long)d.depth,(unsigned long)d.arrayLength,(unsigned long)d.sampleCount);
+ if(n==1){
+  Dl_info at={};
+  if(dladdr(caller,&at))NBSAY(@"native-metal-p1273: selector=%u first-caller=%s+0x%llx",
+   selector,at.dli_fname?at.dli_fname:"unknown",(unsigned long long)((uintptr_t)caller-(uintptr_t)at.dli_fbase));
+ }
+}
 static std::atomic<uint64_t> gSaidSurfaceTextures,gBufferPresents,gDrawablePresents,gBigLoads,gBigLoadBytes,gBigLoadUs;
 // (no-copy buffers made, by callers and over IOSurfaces, and released: newBufferWithBytesNoCopy:, surfaceBuffer below)
 static std::atomic<uint64_t> gNoCopyAll,gNoCopyMade,gNoCopyReleased,gSurfaceImportsMade,gSurfaceImportsReleased;
@@ -2139,6 +2194,23 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
 }
 
 #include "s9_texture_layout.inc"
+/* Dry run selected only for a fresh, explicitly opted-in test process.
+ * Never changes nil return, resource backing or allocation lifetime. */
+static void p1273LayoutPlan(MTLTextureDescriptor *d,unsigned selector,bool backed) {
+ static const bool enabled=[] {const char *e=getenv("HAKIOS_METAL_LAYOUT_PLAN");return e && !strcmp(e,"1");}();
+ if(!enabled)return;
+ static std::atomic<uint64_t> calls{0},good{0},bad{0},next{0};
+ s9_texture_layout p={};
+ const bool ok=!backed && s9LayoutDescriptor(d,&p);
+ const uint64_t n=++calls;
+ if(ok)good++;else bad++;
+ if(p1273LogDue(next,nowUs())){
+  NBSAY(@"native-metal-p1273-plan: pid=%d tid=%u ticks=%llu selector=%u backed=%d format=%lu accepted=%d width=%lu height=%lu row=%llu bytes=%llu align=%llu calls=%llu good=%llu bad=%llu",
+    getpid(),threadIdLow(),(unsigned long long)mach_absolute_time(),selector,backed?1:0,(unsigned long)d.pixelFormat,ok?1:0,
+    (unsigned long)d.width,(unsigned long)d.height,(unsigned long long)p.row_bytes,(unsigned long long)p.size,(unsigned long long)p.alignment,
+    (unsigned long long)n,(unsigned long long)good.load(),(unsigned long long)bad.load());
+ }
+}
 
 @interface NBDeviceMethods : NSObject
 @end
@@ -2220,7 +2292,8 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
 // answered with a guessed shape.
 - (id<MTLTexture>)newTextureWithBytesNoCopy:(void *)bytes length:(NSUInteger)length descriptor:(MTLTextureDescriptor *)d deallocator:(void (^)(void *,NSUInteger))deallocator {
  if(!s9LayoutOn()) {
-  NBLOG(@"native-metal: newTextureWithBytesNoCopy:length:descriptor:deallocator: is not implemented (Apple's texture layout of raw memory is not known)");
+  p1273Unsupported(0,true,@"native-metal: newTextureWithBytesNoCopy:length:descriptor:deallocator: is not implemented (Apple's texture layout of raw memory is not known)",__builtin_return_address(0),d,false);
+  p1273LayoutPlan(d,0,false);
   return nil;
  }
  s9_texture_layout p={};
@@ -2237,11 +2310,10 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
   MTLTextureDescriptor *own=[d copy];own.storageMode=MTLStorageModeShared;
   id<MTLTexture> texture=[(id<MTLDevice>)self newTextureWithDescriptor:own];
   if(!texture)return nil;
-  @try {
-   [texture replaceRegion:MTLRegionMake2D(0,0,d.width,d.height)
-            mipmapLevel:0 withBytes:bytes bytesPerRow:(NSUInteger)p.row_bytes];
-  } @catch(NSException *e) {
-   NBLOG(@"native-metal: S9 compressed no-copy refused: %@",e.reason);return nil;
+  const uint64_t region[6]={0,0,0,d.width,d.height,1};
+  const uint64_t image=p.row_bytes*p.block_rows;
+  if(!nmb_texture_replace([(NBTexture *)texture handle],region,0,0,bytes,p.row_bytes,image,image)){
+   NBLOG(@"native-metal: S9 compressed upload refused: %@",lastError());return nil;
   }
   S9TextureMemoryOwner *owner=[S9TextureMemoryOwner new];
   owner.pointer=bytes;owner.length=length;owner.deallocator=deallocator;
@@ -2249,11 +2321,19 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
   s9NoCopyAccepts++;
   return texture;
  }
+ // A failed texture import must leave ownership with the caller even
+ // if buffer construction already succeeded. The runtime releases the
+ // buffer only after queued GPU references have been retired.
+ auto accepted=std::make_shared<std::atomic<bool>>(false);
+ void (^release)(void *,NSUInteger)=nil;
+ if(deallocator)release=^(void *ptr,NSUInteger len){
+  if(accepted->load(std::memory_order_acquire))deallocator(ptr,len);
+ };
  id<MTLBuffer> buffer=[(id<MTLDevice>)self newBufferWithBytesNoCopy:bytes length:length
-                     options:MTLResourceStorageModeShared deallocator:deallocator];
+                     options:MTLResourceStorageModeShared deallocator:release];
  if(!buffer)return nil;
  NBTexture *texture=textureOnBuffer((NBBuffer *)buffer,d,0,(NSUInteger)p.row_bytes,false);
- if(texture)s9NoCopyAccepts++;
+ if(texture){accepted->store(true,std::memory_order_release);s9NoCopyAccepts++;}
  return (id<MTLTexture>)texture;
 }
 - (id)newTextureLayoutWithDescriptor:(MTLTextureDescriptor *)d isHeapOrBufferBacked:(BOOL)backed {
@@ -2281,12 +2361,13 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
   }
  }
  if(!s9LayoutOn()) {
-  if(!pLayoutProbe)NBLOG(@"native-metal: newTextureLayoutWithDescriptor:isHeapOrBufferBacked: is not implemented (Apple's layout object is not known)");
+  p1273Unsupported(1,!pLayoutProbe,@"native-metal: newTextureLayoutWithDescriptor:isHeapOrBufferBacked: is not implemented (Apple's layout object is not known)",__builtin_return_address(0),d,backed);
+  p1273LayoutPlan(d,1,backed);
   return nil;
  }
  s9LayoutRequests++;
  s9_texture_layout p={};
- if(!s9LayoutDescriptor(d,&p)) {
+ if(backed || !s9LayoutDescriptor(d,&p)) {
   static std::atomic<bool> said{false};
   if(!said.exchange(true))NBLOG(@"native-metal: S9 texture layout refused: unknown format or unsupported descriptor");
   return nil;

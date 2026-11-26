@@ -287,6 +287,7 @@ line_fired(void *argument)
 	irqreturn_t r = lp.handler(LX_PCI_IRQ, lp.argument);
 	if(experimental){
 		(void)lx_os_option(watchdog?"p127_intx_watchdog":"p127_intx_irq");
+		if(!watchdog && r!=IRQ_NONE)(void)lx_os_option("p1273_wifi_handled");
 		if(!watchdog && __atomic_fetch_add(&lp.exp_irqs,1,__ATOMIC_RELAXED)>=100){lp.exp_fault=true;(void)lx_os_option("p127_intx_fallback");}
 		if((watchdog && r!=IRQ_NONE) || (!watchdog && r==IRQ_NONE && ++lp.exp_empty>=8)){
 			lp.exp_fault=true;(void)lx_os_option("p127_intx_fallback");

@@ -1098,6 +1098,9 @@ fill_period(uint32_t p, enum source source)
 		OSMemoryBarrier();
 		sink_tail = tail + n;
 		fed_frames += n;
+#if __has_include(<kern/hakios_p125.h>)
+		hakios_p1273_event(P1273_AUDIO_FEED,n);
+#endif
 		if (n != 0 && n < PERIOD_FRAMES) {
 			short_periods++;
 		}
@@ -1296,6 +1299,9 @@ stream_run(uint64_t tone_until_us, uint64_t until_us)
 			outside = 0;
 			if (pos != last_pos) {
 				read_bytes += (pos + RING_BYTES - last_pos) % RING_BYTES;
+#if __has_include(<kern/hakios_p125.h>)
+				if(!by_clock && (status & RDMA_PROGRESS))hakios_p1273_event(P1273_AUDIO_DMA,1);
+#endif
 				moved = true;
 			}
 			last_pos = pos;
@@ -1887,6 +1893,9 @@ live_follow(void)
 			live_zeroes += v == 0;
 		}
 		hakios_audio_input_put(live_mono, frames);
+#if __has_include(<kern/hakios_p125.h>)
+		hakios_p1273_event(P1273_AUDIO_CAPTURE,frames);
+#endif
 		live_frames += frames;
 		live_last = (live_last + frames * FRAME_BYTES) % REC_RING_BYTES;
 	}

@@ -12,6 +12,8 @@ uint64_t hakios_p125_intervals[P125_CPUS][5];
 uint64_t hakios_p125_lease, hakios_p125_start, hakios_p125_end;
 uint32_t hakios_p125_stop_reason;
 uint64_t hakios_p125_usb_down_at,hakios_p125_usb_up_at;
+uint64_t hakios_p1273_offline_duration,hakios_p1273_offline_deadline;
+uint32_t hakios_p1273_offline_fixed;
 uint64_t hakios_p125_display_events;
 uint64_t hakios_p126_lease;
 uint32_t hakios_p126_reason;
@@ -20,12 +22,142 @@ uint64_t hakios_p126_diag[9];
 uint32_t hakios_p126_audio_state;
 uint64_t hakios_p127_lease;
 uint32_t hakios_p127_reason,hakios_p127_offline_aggregate;
-uint64_t hakios_p127_wfi_n[8][7],hakios_p127_wfi_ticks[8][7],hakios_p127_bounds[6];
+uint64_t hakios_p127_wfi_n[8][9],hakios_p127_wfi_ticks[8][9],hakios_p127_bounds[8];
 uint64_t hakios_p127_usb[5],hakios_p127_abox[4],hakios_p127_psr[4],hakios_p127_floor[2];
 uint64_t hakios_p127_irq[8][3],hakios_p127_wifi[5],hakios_p127_bt[6],hakios_p127_ticker[3];
 uint32_t hakios_p127_audio_event;
 struct p127_fg_row hakios_p127_fg_rows[P127_FG_SLOTS];
 uint64_t hakios_p127_fg_seq;
+/* The recount hook executes with interrupts disabled: one writer per CPU.
+ * Freeze never waits on a writer. The reader claims frozen state and checks
+ * inflight before touching plain ring storage. No pointer is retained. */
+uint32_t hakios_p1273_trace_state,hakios_p1273_trace_reason;
+uint64_t hakios_p1273_trace_generation,hakios_p1273_trace_start,hakios_p1273_trace_until;
+uint64_t hakios_p1273_trace_trigger,hakios_p1273_trace_end,hakios_p1273_trace_span;
+uint64_t hakios_p1273_trace_overhead[8],hakios_p1273_trace_clipped[8];
+struct p1273_trace_bucket hakios_p1273_trace_rows[8][P1273_TRACE_BUCKETS];
+static uint32_t p1273_trace_inflight[8];
+static bool p1273_trace_quiet(void)
+{
+    for(unsigned i=0;i<8;i++)if(__atomic_load_n(&p1273_trace_inflight[i],__ATOMIC_SEQ_CST))return false;
+    return true;
+}
+bool hakios_p1273_trace_arm(uint64_t start,uint64_t until,uint64_t bucket_span)
+{
+    if(!bucket_span || until<=start)return false;
+    uint32_t old=__atomic_load_n(&hakios_p1273_trace_state,__ATOMIC_SEQ_CST);
+    if(old!=0)return false; /* preserve one frozen capture per boot */
+    if(!__atomic_compare_exchange_n(&hakios_p1273_trace_state,&old,1,false,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST))return false;
+    if(!p1273_trace_quiet()){
+        __atomic_store_n(&hakios_p1273_trace_state,old,__ATOMIC_SEQ_CST);return false;
+    }
+    __atomic_fetch_add(&hakios_p1273_trace_generation,1,__ATOMIC_RELAXED);
+    __atomic_store_n(&hakios_p1273_trace_start,start,__ATOMIC_RELAXED);
+    __atomic_store_n(&hakios_p1273_trace_until,until,__ATOMIC_RELAXED);
+    __atomic_store_n(&hakios_p1273_trace_span,bucket_span,__ATOMIC_RELAXED);
+    __atomic_store_n(&hakios_p1273_trace_trigger,0,__ATOMIC_RELAXED);
+    __atomic_store_n(&hakios_p1273_trace_end,0,__ATOMIC_RELAXED);
+    __atomic_store_n(&hakios_p1273_trace_reason,0,__ATOMIC_RELAXED);
+    for(unsigned i=0;i<8;i++){
+        __atomic_store_n(&hakios_p1273_trace_overhead[i],0,__ATOMIC_RELAXED);
+        __atomic_store_n(&hakios_p1273_trace_clipped[i],0,__ATOMIC_RELAXED);
+    }
+    __atomic_store_n(&hakios_p1273_trace_state,2,__ATOMIC_SEQ_CST);
+    return true;
+}
+void hakios_p1273_trace_stop(unsigned reason,uint64_t now)
+{
+    uint32_t old=2;
+    if(!__atomic_compare_exchange_n(&hakios_p1273_trace_state,&old,3,false,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST))return;
+    uint64_t until=__atomic_load_n(&hakios_p1273_trace_until,__ATOMIC_RELAXED);
+    __atomic_store_n(&hakios_p1273_trace_end,now<until?now:until,__ATOMIC_RELAXED);
+    __atomic_store_n(&hakios_p1273_trace_reason,reason,__ATOMIC_RELAXED);
+    __atomic_store_n(&hakios_p1273_trace_state,4,__ATOMIC_SEQ_CST);
+}
+bool hakios_p1273_trace_read_begin(void)
+{
+    uint32_t old=4;
+    if(!__atomic_compare_exchange_n(&hakios_p1273_trace_state,&old,5,false,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST))return false;
+    if(!p1273_trace_quiet()){
+        __atomic_store_n(&hakios_p1273_trace_state,4,__ATOMIC_SEQ_CST);return false;
+    }
+    return true;
+}
+void hakios_p1273_trace_read_end(void)
+{
+    __atomic_store_n(&hakios_p1273_trace_state,4,__ATOMIC_SEQ_CST);
+}
+void hakios_p1273_identity(uint64_t *tid,uint64_t *task_id,uint32_t *pid)
+{
+    thread_t th=current_thread();
+    task_t task=get_threadtask(th);
+    *tid=th->thread_id;
+    *task_id=task?task->task_uniqueid:0;
+    *pid=task && task!=kernel_task?(uint32_t)task_pid(task):0;
+}
+void hakios_p1273_recount(void *p,void *t,uint64_t end,uint64_t ticks,bool from_user,bool switched)
+{
+    if(!p || !t || !ticks || ticks>end)return;
+    unsigned cpu=hakios_p125_cpu();
+    if(cpu>=8)return;
+    uint64_t gen=__atomic_load_n(&hakios_p1273_trace_generation,__ATOMIC_ACQUIRE);
+    __atomic_fetch_add(&p1273_trace_inflight[cpu],1,__ATOMIC_SEQ_CST);
+    if(__atomic_load_n(&hakios_p1273_trace_state,__ATOMIC_SEQ_CST)!=2 ||
+       gen!=__atomic_load_n(&hakios_p1273_trace_generation,__ATOMIC_ACQUIRE))goto done;
+    {
+        uint64_t entered=mach_absolute_time();
+        uint64_t start=__atomic_load_n(&hakios_p1273_trace_start,__ATOMIC_RELAXED);
+        uint64_t until=__atomic_load_n(&hakios_p1273_trace_until,__ATOMIC_RELAXED);
+        uint64_t span=__atomic_load_n(&hakios_p1273_trace_span,__ATOMIC_RELAXED);
+        uint64_t begin=end-ticks,original_end=end;
+        if(!span || end<=start || begin>=until)goto done;
+        if(begin<start)begin=start;
+        if(end>until)end=until;
+        /* Clamp exceptionally long samples to the ring's current horizon.
+         * Count omitted time explicitly; never extend an idle interval. */
+        uint64_t last=(end-1-start)/span;
+        uint64_t first=last>=P1273_TRACE_BUCKETS-1?last-(P1273_TRACE_BUCKETS-1):0;
+        uint64_t low=start+first*span;
+        if(begin<low){
+            __atomic_fetch_add(&hakios_p1273_trace_clipped[cpu],low-begin,__ATOMIC_RELAXED);
+            begin=low;
+        }
+        thread_t thread=(thread_t)p;
+        task_t task=(task_t)t;
+        uint64_t tid=thread->thread_id,task_id=task->task_uniqueid;
+        uint32_t kind=(thread->options&TH_OPT_IDLE_THREAD)?0u:task==kernel_task?1u:2u;
+        uint32_t pid=kind==2?(uint32_t)task_pid(task):0;
+        while(begin<end){
+            uint64_t bin=(begin-start)/span,edge=start+(bin+1)*span;
+            uint64_t part=edge<end?edge:end,delta=part-begin;
+            struct p1273_trace_bucket *b=&hakios_p1273_trace_rows[cpu][bin%P1273_TRACE_BUCKETS];
+            if(b->generation!=gen || b->bin!=bin){
+                bzero(b,sizeof(*b));b->generation=gen;b->bin=bin;
+            }
+            unsigned pos=P1273_TRACE_OWNERS;
+            for(unsigned i=0;i<P1273_TRACE_OWNERS;i++){
+                if(!(b->mask&(1u<<i))){
+                    b->mask|=1u<<i;
+                    b->owner[i].tid=tid;b->owner[i].task=task_id;
+                    b->owner[i].pid=pid;b->owner[i].kind=kind;pos=i;break;
+                }
+                if(b->owner[i].tid==tid && b->owner[i].task==task_id &&
+                   b->owner[i].kind==kind){pos=i;break;}
+            }
+            if(pos==P1273_TRACE_OWNERS){b->dropped++;b->dropped_ticks+=delta;}
+            else{
+                struct p1273_trace_owner *o=&b->owner[pos];
+                if(from_user)o->user_ticks+=delta;else o->system_ticks+=delta;
+                o->fragments++;
+                if(switched && part==original_end)o->switches++;
+            }
+            begin=part;
+        }
+        __atomic_fetch_add(&hakios_p1273_trace_overhead[cpu],mach_absolute_time()-entered,__ATOMIC_RELAXED);
+    }
+done:
+    __atomic_fetch_sub(&p1273_trace_inflight[cpu],1,__ATOMIC_SEQ_CST);
+}
 void hakios_p127_fg_record(int32_t ua,int32_t avg_ua,uint32_t uv,unsigned external,unsigned charger,unsigned qh)
 {
     if(!hakios_p127_mode() || !hakios_p125_active())return;
@@ -46,18 +178,39 @@ void hakios_p127_audio_wake(void){
 unsigned hakios_p127_mode(void)
 {
     uint64_t v=__atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE);
-    return v && mach_absolute_time()<(v&~(uint64_t)P127_MASK)?(unsigned)(v&P127_MASK):0;
+    if(!v)return 0;
+    uint64_t now=mach_absolute_time();
+    if(__atomic_load_n(&hakios_p1273_offline_fixed,__ATOMIC_ACQUIRE)){
+        uint64_t deadline=__atomic_load_n(&hakios_p1273_offline_deadline,__ATOMIC_ACQUIRE);
+        if((deadline && now>=deadline) || __atomic_load_n(&hakios_p125_usb_up_at,__ATOMIC_ACQUIRE))return 0;
+    }
+    return now<(v&~(uint64_t)P127_MASK)?(unsigned)(v&P127_MASK):0;
+}
+uint32_t hakios_p1273_gate_watch,hakios_p1273_last_stop_reason;
+uint64_t hakios_p1273_events[2][P1273_EVENT_COUNT],hakios_p1273_last_stop_lease,hakios_p1273_fault_seq;
+void hakios_p1273_event(unsigned event,uint64_t count)
+{
+    if(event==P1273_BT_ERROR || event==P1273_TICK_FAIL)
+        __atomic_fetch_add(&hakios_p1273_fault_seq,count,__ATOMIC_RELAXED);
+    unsigned watch=__atomic_load_n(&hakios_p1273_gate_watch,__ATOMIC_ACQUIRE);
+    if(!watch || event>=P1273_EVENT_COUNT || !count)return;
+    unsigned active=hakios_p127_mode()==watch?0:1;
+    __atomic_fetch_add(&hakios_p1273_events[active][event],count,__ATOMIC_RELAXED);
 }
 void hakios_p127_stop(unsigned reason)
 {
     uint64_t v=__atomic_exchange_n(&hakios_p127_lease,0,__ATOMIC_ACQ_REL);
-    if(v)__atomic_store_n(&hakios_p127_reason,reason,__ATOMIC_RELEASE);
+    if(v){
+        __atomic_store_n(&hakios_p127_reason,reason,__ATOMIC_RELEASE);
+        __atomic_store_n(&hakios_p1273_last_stop_reason,reason,__ATOMIC_RELAXED);
+        __atomic_store_n(&hakios_p1273_last_stop_lease,v,__ATOMIC_RELEASE);
+    }
 }
 void hakios_p127_wfi(unsigned cpu,uint64_t ticks)
 {
     if(cpu>=8 || !hakios_p127_mode() || !hakios_p125_active())return;
     unsigned b=0;
-    while(b<6 && ticks>=__atomic_load_n(&hakios_p127_bounds[b],__ATOMIC_RELAXED))b++;
+    while(b<8 && ticks>=__atomic_load_n(&hakios_p127_bounds[b],__ATOMIC_RELAXED))b++;
     __atomic_fetch_add(&hakios_p127_wfi_n[cpu][b],1,__ATOMIC_RELAXED);
     __atomic_fetch_add(&hakios_p127_wfi_ticks[cpu][b],ticks,__ATOMIC_RELAXED);
 }
@@ -105,22 +258,49 @@ hakios_p125_active(void)
     if((v&3u)==3u){
         if(!__atomic_load_n(&hakios_p125_usb_down_at,__ATOMIC_ACQUIRE) ||
             __atomic_load_n(&hakios_p125_usb_up_at,__ATOMIC_ACQUIRE))return 0;
+        if(__atomic_load_n(&hakios_p1273_offline_fixed,__ATOMIC_ACQUIRE)){
+            uint64_t deadline=__atomic_load_n(&hakios_p1273_offline_deadline,__ATOMIC_ACQUIRE);
+            if(!deadline || mach_absolute_time()>=deadline || !hakios_p127_mode())return 0;
+        }
         return __atomic_load_n(&hakios_p127_offline_aggregate,__ATOMIC_ACQUIRE)?1:2;
     }
     return (unsigned)(v&3u);
 }
 void hakios_p125_usb_event(unsigned connected)
 {
+    hakios_p1273_event(connected?P1273_USB_UP:P1273_USB_DOWN,1);
     uint64_t v=__atomic_load_n(&hakios_p125_lease,__ATOMIC_ACQUIRE);
-    if((v&3u)!=3u)return;
+    if((v&3u)!=3u){
+        /* Planned fixed capture freezes before reconnect. Retain the
+         * later link-up timestamp without reopening the capture. */
+        if(connected && !v &&
+           __atomic_load_n(&hakios_p125_stop_reason,__ATOMIC_ACQUIRE)==10 &&
+           __atomic_load_n(&hakios_p1273_offline_deadline,__ATOMIC_ACQUIRE) &&
+           __atomic_load_n(&hakios_p125_usb_down_at,__ATOMIC_ACQUIRE)){
+            uint64_t zero=0,now=mach_absolute_time();
+            (void)__atomic_compare_exchange_n(&hakios_p125_usb_up_at,&zero,now,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);
+        }
+        return;
+    }
     uint64_t now=mach_absolute_time();
     if(now>=(v&~3ULL))return;
     uint64_t zero=0;
     if(!connected){
         /* First detected disconnect is the start. Repeated disconnects
          * never reset the capture. */
-        if(__atomic_compare_exchange_n(&hakios_p125_usb_down_at,&zero,now,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))
+        if(__atomic_compare_exchange_n(&hakios_p125_usb_down_at,&zero,now,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){
             __atomic_store_n(&hakios_p125_start,now,__ATOMIC_RELEASE);
+            if(__atomic_load_n(&hakios_p1273_offline_fixed,__ATOMIC_ACQUIRE)){
+                uint64_t duration=__atomic_load_n(&hakios_p1273_offline_duration,__ATOMIC_ACQUIRE);
+                uint64_t policy=__atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE)&~(uint64_t)P127_MASK;
+                uint64_t end=v&~3ULL;
+                /* Do not extend either lease. Short windows remain invalid
+                 * in the host's exact duration check. */
+                if(policy && policy<end)end=policy;
+                if(duration && now+duration<end)end=now+duration;
+                __atomic_store_n(&hakios_p1273_offline_deadline,end,__ATOMIC_RELEASE);
+            }
+        }
     }else if(__atomic_load_n(&hakios_p125_usb_down_at,__ATOMIC_ACQUIRE)){
         /* End before serial reconnect traffic; no rearm. */
         (void)__atomic_compare_exchange_n(&hakios_p125_usb_up_at,&zero,now,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);
@@ -129,6 +309,7 @@ void hakios_p125_usb_event(unsigned connected)
 void hakios_p125_display_event(unsigned on)
 {
     if(on){hakios_p126_stop(4);hakios_p127_stop(4);}
+    if(on)hakios_p1273_trace_stop(4,mach_absolute_time());
     if(on && (__atomic_load_n(&hakios_p125_lease,__ATOMIC_ACQUIRE)&3u))
         __atomic_fetch_add(&hakios_p125_display_events,1,__ATOMIC_RELAXED);
 }

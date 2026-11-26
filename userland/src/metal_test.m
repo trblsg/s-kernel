@@ -49,6 +49,9 @@
 #import <sys/wait.h>
 #import <time.h>
 #import <unistd.h>
+#include <stdatomic.h>
+#include <stdint.h>
+#include <string.h>
 
 extern CFTypeRef MGCopyAnswer(CFStringRef key);
 
@@ -609,6 +612,180 @@ blits(void)
 	printf("metal_test:   blits %s\n", cb.status == MTLCommandBufferStatusCompleted && handled == 1 && same && filled && edges ? "WORK" : "FAILED");
 }
 
+/* P12.7.3: exact SPI spellings already implemented by our frontend.
+ * No Apple-device or daemon experiment; explicit command only. */
+@protocol P1273LayoutSPI
+- (NSUInteger)size;
+- (NSUInteger)alignment;
+- (MTLSize)copyGranularity;
+- (void)copyFromLinearBytes:(const void *)source linearOffset:(NSUInteger)offset
+    linearBytesPerRow:(NSUInteger)row linearBytesPerImage:(NSUInteger)image
+    toTextureMemory:(void *)dest textureSlice:(NSUInteger)slice textureLevel:(NSUInteger)level textureRegion:(MTLRegion)region;
+- (void)copyFromTextureMemory:(const void *)source textureSlice:(NSUInteger)slice textureLevel:(NSUInteger)level
+    textureRegion:(MTLRegion)region toLinearBytes:(void *)dest linearOffset:(NSUInteger)offset
+    linearBytesPerRow:(NSUInteger)row linearBytesPerImage:(NSUInteger)image;
+@end
+@protocol P1273DeviceSPI
+- (id<P1273LayoutSPI>)newTextureLayoutWithDescriptor:(MTLTextureDescriptor *)d isHeapOrBufferBacked:(BOOL)backed;
+- (id<MTLTexture>)newTextureWithBytesNoCopy:(void *)bytes length:(NSUInteger)length
+    descriptor:(MTLTextureDescriptor *)d deallocator:(void (^)(void *,NSUInteger))release;
+@end
+static id<MTLDevice> p1273_device(void)
+{
+    id<MTLDevice> device=MTLCreateSystemDefaultDevice();
+    if(!device || strcmp(object_getClassName(device),"NativeBridgeMetalDevice") ||
+       ![device respondsToSelector:@selector(newTextureLayoutWithDescriptor:isHeapOrBufferBacked:)] ||
+       ![device respondsToSelector:@selector(newTextureWithBytesNoCopy:length:descriptor:deallocator:)]){
+        printf("p1273-metal-test: REFUSED backend not matched NativeBridgeMetalDevice\n");
+        return nil;
+    }
+    return device;
+}
+static MTLTextureDescriptor *p1273_descriptor(void)
+{
+    MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:16 height:16 mipmapped:NO];
+    d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageShaderRead;
+    return d;
+}
+static int p1273_log_child(void)
+{
+    id<MTLDevice> dev=p1273_device();
+    if(!dev)return 2;
+    id<P1273DeviceSPI> spi=(id<P1273DeviceSPI>)dev;
+    MTLTextureDescriptor *d=p1273_descriptor();
+    const char *mode=getenv("HAKIOS_METAL_LOG_AB");
+    if(!mode || (strcmp(mode,"0") && strcmp(mode,"1")))return 2;
+    uint64_t start=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    for(unsigned i=0;i<64;i++)@autoreleasepool {
+        if([spi newTextureLayoutWithDescriptor:d isHeapOrBufferBacked:NO]!=nil ||
+           [spi newTextureWithBytesNoCopy:NULL length:0 descriptor:d deallocator:nil]!=nil)return 3;
+    }
+    printf("p1273-metal-test: LOG PASS pid=%d mode=%s calls_per_selector=64 nil=128 elapsed_us=%llu\n",
+        getpid(),mode,(unsigned long long)((clock_gettime_nsec_np(CLOCK_UPTIME_RAW)-start)/1000));
+    return 0;
+}
+static uint64_t p1273_hash(const uint8_t *p,NSUInteger n)
+{
+    uint64_t h=14695981039346656037ULL;
+    for(NSUInteger i=0;i<n;i++){h^=p[i];h*=1099511628211ULL;}
+    return h;
+}
+static BOOL p1273_read_texture(id<MTLDevice> dev,id<MTLTexture> tex,uint8_t *out)
+{
+    const NSUInteger row=256,bytes=row*16;
+    id<MTLBuffer> buf=[dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+    id<MTLCommandQueue> q=[dev newCommandQueue];
+    id<MTLCommandBuffer> cb=[q commandBuffer];
+    id<MTLBlitCommandEncoder> enc=[cb blitCommandEncoder];
+    if(!buf || !buf.contents || !q || !cb || !enc)return NO;
+    memset(buf.contents,0xa5,bytes);
+    [enc copyFromTexture:tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
+        sourceSize:MTLSizeMake(16,16,1) toBuffer:buf destinationOffset:0
+        destinationBytesPerRow:row destinationBytesPerImage:bytes];
+    [enc endEncoding];[cb commit];[cb waitUntilCompleted];
+    if(cb.status!=MTLCommandBufferStatusCompleted || cb.error)return NO;
+    for(NSUInteger y=0;y<16;y++)memcpy(out+y*64,(uint8_t *)buf.contents+y*row,64);
+    return YES;
+}
+static BOOL p1273_render(id<MTLDevice> dev,id<MTLTexture> source,uint8_t *out)
+{
+    NSString *msl=@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "struct V {float4 p [[position]];};\n"
+        "vertex V vs(uint i [[vertex_id]]) {const float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return V{float4(p[i],0,1)};}\n"
+        "fragment float4 fs(V in [[stage_in]],texture2d<float,access::read> t [[texture(0)]]) {return t.read(uint2(in.p.xy));}";
+    NSError *err=nil;
+    id<MTLLibrary> lib=[dev newLibraryWithSource:msl options:nil error:&err];
+    if(!lib)return NO;
+    MTLRenderPipelineDescriptor *pd=[MTLRenderPipelineDescriptor new];
+    pd.vertexFunction=[lib newFunctionWithName:@"vs"];pd.fragmentFunction=[lib newFunctionWithName:@"fs"];
+    pd.colorAttachments[0].pixelFormat=MTLPixelFormatRGBA8Unorm;
+    id<MTLRenderPipelineState> pipeline=[dev newRenderPipelineStateWithDescriptor:pd error:&err];
+    if(!pipeline)return NO;
+    MTLTextureDescriptor *d=p1273_descriptor();d.usage=MTLTextureUsageRenderTarget;
+    id<MTLTexture> dst=[dev newTextureWithDescriptor:d];
+    MTLRenderPassDescriptor *pass=[MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture=dst;pass.colorAttachments[0].loadAction=MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction=MTLStoreActionStore;
+    id<MTLCommandQueue> q=[dev newCommandQueue];id<MTLCommandBuffer> cb=[q commandBuffer];
+    id<MTLRenderCommandEncoder> enc=[cb renderCommandEncoderWithDescriptor:pass];
+    if(!dst || !q || !cb || !enc)return NO;
+    [enc setRenderPipelineState:pipeline];[enc setFragmentTexture:source atIndex:0];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [enc endEncoding];[cb commit];[cb waitUntilCompleted];
+    return cb.status==MTLCommandBufferStatusCompleted && !cb.error && p1273_read_texture(dev,dst,out);
+}
+static int p1273_layout_child(void)
+{
+    id<MTLDevice> dev=p1273_device();if(!dev)return 2;
+    id<P1273DeviceSPI> spi=(id<P1273DeviceSPI>)dev;
+    __block _Atomic unsigned releases=0;
+    __block _Atomic unsigned release_bad=0;
+    uint8_t pixels[1024],roundtrip[1024],blit[1024],render[1024];
+    for(unsigned i=0;i<sizeof(pixels);i++)pixels[i]=(uint8_t)(i*37u+i/64u*11u);
+    MTLTextureDescriptor *d=p1273_descriptor();
+    id<P1273LayoutSPI> layout=[spi newTextureLayoutWithDescriptor:d isHeapOrBufferBacked:NO];
+    NSUInteger size=layout.size,align=layout.alignment;
+    MTLSize gran=layout.copyGranularity;
+    if(!layout || size<sizeof(pixels) || size>(1u<<20) || align<sizeof(void *) ||
+       (align&(align-1)) || gran.width!=1 || gran.height!=1 || gran.depth!=1)return 3;
+    if([spi newTextureLayoutWithDescriptor:d isHeapOrBufferBacked:YES]!=nil)return 4;
+    MTLTextureDescriptor *unsupported=[d copy];unsupported.mipmapLevelCount=2;
+    if([spi newTextureLayoutWithDescriptor:unsupported isHeapOrBufferBacked:NO]!=nil)return 4;
+    unsupported=[d copy];unsupported.storageMode=MTLStorageModePrivate;
+    if([spi newTextureLayoutWithDescriptor:unsupported isHeapOrBufferBacked:NO]!=nil)return 4;
+    void *raw=NULL;
+    if(posix_memalign(&raw,align,size)!=0)return 5;
+    memset(raw,0xa5,size);memset(roundtrip,0,sizeof(roundtrip));
+    [layout copyFromLinearBytes:pixels linearOffset:0 linearBytesPerRow:64 linearBytesPerImage:1024
+        toTextureMemory:raw textureSlice:0 textureLevel:0 textureRegion:MTLRegionMake2D(0,0,16,16)];
+    [layout copyFromTextureMemory:raw textureSlice:0 textureLevel:0 textureRegion:MTLRegionMake2D(0,0,16,16)
+        toLinearBytes:roundtrip linearOffset:0 linearBytesPerRow:64 linearBytesPerImage:1024];
+    if(memcmp(roundtrip,pixels,sizeof(pixels))){free(raw);return 6;}
+    uint64_t before=p1273_hash(raw,size);
+    [layout copyFromLinearBytes:pixels linearOffset:0 linearBytesPerRow:64 linearBytesPerImage:1024
+        toTextureMemory:raw textureSlice:0 textureLevel:0 textureRegion:MTLRegionMake2D(16,0,1,1)];
+    if(p1273_hash(raw,size)!=before){free(raw);return 6;}
+    @autoreleasepool {
+        id<MTLTexture> tex=[spi newTextureWithBytesNoCopy:raw length:size descriptor:d deallocator:^(void *ptr,NSUInteger n){
+            if(ptr!=raw || n!=size)atomic_store(&release_bad,1);
+            if(atomic_fetch_add(&releases,1)==0 && ptr==raw)free(ptr);
+        }];
+        /* On nil, exit the isolated process rather than guess ownership
+         * if the failed implementation has retained a reference. */
+        if(!tex)return 7;
+        if(atomic_load(&releases) || !p1273_read_texture(dev,tex,blit) || memcmp(blit,pixels,sizeof(pixels)))return 8;
+        if(!p1273_render(dev,tex,render) || memcmp(render,pixels,sizeof(pixels)) || atomic_load(&releases))return 9;
+        tex=nil;
+    }
+    for(unsigned i=0;i<100 && !atomic_load(&releases);i++)usleep(10000);
+    if(atomic_load(&releases)!=1 || atomic_load(&release_bad))return 10;
+    printf("p1273-metal-test: LAYOUT PASS pid=%d size=%lu align=%lu cpu_hash=%016llx gpu_hash=%016llx render_hash=%016llx releases=%u\n",
+        getpid(),(unsigned long)size,(unsigned long)align,(unsigned long long)p1273_hash(roundtrip,sizeof(roundtrip)),
+        (unsigned long long)p1273_hash(blit,sizeof(blit)),(unsigned long long)p1273_hash(render,sizeof(render)),atomic_load(&releases));
+    return 0;
+}
+static int p1273_spawn(const char *arg,const char *log,const char *layout,const char *phase)
+{
+    extern char **environ;
+    char *const av[]={(char *)"/redwood/bin/metal_test",(char *)arg,NULL};
+    if(setenv("HAKIOS_METAL_LOG_AB",log,1) || setenv("HAKIOS_METAL_LAYOUT",layout,1) ||
+       setenv("HAKIOS_METAL_LAYOUT_PLAN","1",1))return 2;
+    pid_t pid;int status=0;
+    if(posix_spawn(&pid,av[0],NULL,NULL,av,environ)!=0)return 3;
+    printf("p1273-metal-test: START phase=%s pid=%d\n",phase,pid);
+    for(unsigned i=0;i<300;i++){
+        pid_t r=waitpid(pid,&status,WNOHANG);
+        if(r==pid){
+            int rc=WIFEXITED(status)?WEXITSTATUS(status):99;
+            printf("p1273-metal-test: END phase=%s pid=%d rc=%d\n",phase,pid,rc);return rc;
+        }
+        if(r<0)return 4;
+        usleep(100000);
+    }
+    kill(pid,SIGKILL);waitpid(pid,&status,0);
+    printf("p1273-metal-test: TIMEOUT phase=%s pid=%d\n",phase,pid);
+    return 5;
+}
 int
 main(int argc, char **argv)
 {
@@ -627,6 +804,15 @@ main(int argc, char **argv)
 
 	/* one question, asked by a process of its own (see in_a_new_process) */
 	if (argc > 1) {
+		if(strcmp(argv[1],"p1273-log-child")==0)return p1273_log_child();
+		if(strcmp(argv[1],"p1273-layout-child")==0)return p1273_layout_child();
+		if(strcmp(argv[1],"p1273-metal-log-aba")==0){
+			int rc=p1273_spawn("p1273-log-child","0","0","A0");
+			if(!rc)rc=p1273_spawn("p1273-log-child","1","0","B");
+			if(!rc)rc=p1273_spawn("p1273-log-child","0","0","A1");
+			return rc;
+		}
+		if(strcmp(argv[1],"p1273-layout-check")==0)return p1273_spawn("p1273-layout-child","0","1","LAYOUT");
 		if (strcmp(argv[1], "ci-default") == 0) {
 			coreimage();
 		} else if (strcmp(argv[1], "ci-software") == 0) {

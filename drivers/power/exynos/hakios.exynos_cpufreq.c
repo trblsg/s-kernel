@@ -141,8 +141,10 @@
  * read for these facts, not one line copied.
  */
 #include <kern/clock.h>
+#include <kern/locks.h>
 #include <kern/hakios_p125.h>
 #include <sys/proc.h>
+#include <sys/random.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <mach/mach_time.h>
@@ -1010,6 +1012,7 @@ ceiling_now(struct cluster *c)
 		uint32_t p8_cap = __atomic_load_n(&p8_big_cap_khz,__ATOMIC_RELAXED);
 		if (p8_cap != 0) max = MIN(max,p8_cap); /* P8 explicit lower-only A/B */
 	}
+	max=p1273_cap_ceiling(c,max);
 	return c->levels[level_at_most(c, max)];
 }
 
@@ -1832,6 +1835,7 @@ summary(uint64_t seconds)
 
 	l->measured = measure_mhz(l);
 	b->measured = measure_mhz(b);
+	p1273_measured_sample(mach_absolute_time());
 	temp_text(tb, sizeof(tb), b->temp_mc);
 	temp_text(tl, sizeof(tl), l->temp_mc);
 	snprintf(ml, sizeof(ml), l->measured ? "%u" : "?", l->measured);
@@ -1906,6 +1910,8 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 			ramp_check(mach_absolute_time());
 		}
 		measure(now - then > 0 ? now - then : 1);
+		p1273_trace_tick(now); /* existing governor window, no additional timer */
+		p1273_cap_tick(now); /* lower-only, bounded, explicit OFF experiment */
 		p4_cpu_probe(now); /* on-demand 5s read-only, no new kernel thread */
 		p7_cpu_probe(now); /* P7 ring captures USB-disconnected samples */
 		p8_probe(now); /* P8 single-build unified ring, read only; no new worker */
