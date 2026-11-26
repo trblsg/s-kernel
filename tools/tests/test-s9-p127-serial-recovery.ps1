@@ -60,4 +60,34 @@ $script:failWrite=$true;$script:writes=0
 $failed=$false
 try{[void](P12-Query 'p127_mode' '3')}catch{if($_.Exception.Message -match 'Missing echo'){$failed=$true}else{throw}}
 if(-not $failed -or $script:writes -ne 1){throw 'WRITE was retried or accepted without ACK'}
+# Exercise the real P12-Query cleanup gate (not a replacement P12-Query mock).
+$script:failWrite=$false;$script:writes=0;$script:P12752IdleAllowed=$false
+function Assert-CleanupRefused([string]$Name,[string]$Value){
+    $before=$script:writes;$refused=$false
+    try{[void](P12-Query $Name $Value -Cleanup)}catch{
+        if($_.Exception.Message -match 'Cleanup bypass|only permits|disallowed'){$refused=$true}else{throw}
+    }
+    if(-not $refused -or $script:writes -ne $before){throw "cleanup escaped allowlist: $Name=$Value"}
+}
+Assert-CleanupRefused 'p12752_idle_mode' '0'
+$script:P12752IdleAllowed=$true
+Assert-CleanupRefused 'p12752_idle_mode' '1'
+Assert-CleanupRefused 'p12752_idle_mode' '2'
+Assert-CleanupRefused 'p12752_idle_mode' ''
+Assert-CleanupRefused 'p12752_idle_select' '0'
+# Simulate an existing thermal stop. Only the opted-in zero cleanup may
+# bypass Life-CheckSafety, and the real transport must verify its echo/ACK.
+function Life-CheckSafety([datetime]$Now){throw 'synthetic hot stop'}
+function Life-Pump {
+    if(-not $script:P12Command -or $script:sent){return}
+    $script:sent=1
+    if($script:P12Command -cne 'sysctl kern.hakios.p12752_idle_mode=0'){throw 'unexpected cleanup command'}
+    Life-Feed "usb> $($script:P12Command)" (Life-Now)
+    Life-Feed 'usb: sysctl kern.hakios.p12752_idle_mode=0: set (0)' (Life-Now)
+    Life-Feed 'usb: kern.hakios.p12752_idle_mode = 0' (Life-Now)
+}
+if((P12-Query 'p12752_idle_mode' '0' -Cleanup) -ne '0' -or $script:writes -ne 1){throw 'P12752 zero cleanup transport regression'}
+$script:P12752IdleAllowed=$false
+Assert-CleanupRefused 'p12752_idle_mode' '0'
+Write-Output 'P12752 real cleanup gate: opt-in zero ACK under hot stop; nonzero/read/cursor and opt-out denied PASS'
 Write-Output 'P12.7.1 exact 090722 mixed reply, strict typed readback, stale echo, bounded read retry and single write PASS'

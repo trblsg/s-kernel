@@ -310,6 +310,8 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
     if($script:P1272HostEnabled){$restore+='p1272_probe_request'}
     if($script:P1273HostEnabled){$restore+=@('p1273_trace_mode','p1273_cap_mode','p1273_offline_s','p1273_gate_begin')}
     if($script:P1274HostEnabled){$restore+='p12741_profile'}
+    # P12752 recorder cleanup is an opt-in zero-only restore, not a new bypass.
+    if($script:P12752IdleAllowed){$restore+='p12752_idle_mode'}
     $clockStop=(($script:P123ClockAllowed -or $script:P124ClockAllowed) -and $script:P123HostEnabled -and $Name -eq 'hi_cmd' -and $Value -eq '201')
     if($Cleanup -and -not $clockStop -and ($Name -notin $restore -or $Value -ne '0')){
         throw 'P12.1/P12.2 Cleanup bypass is reserved for bounded restore-to-zero writes only'
