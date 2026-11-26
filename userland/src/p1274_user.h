@@ -52,9 +52,9 @@ static inline int p1274_emit(uint64_t kind,uint64_t a,uint64_t b,uint64_t c,uint
 {
     if(p1274_user_mode()<0)return -1;
     uint64_t row[8]={kind,a,b,c,d,e,f,g};
-    int e=sysctlbyname("kern.hakios.p1274_user_event",NULL,NULL,row,sizeof(row));
-    if(e){static int warned; if(!__atomic_exchange_n(&warned,1,__ATOMIC_RELAXED))fprintf(stderr,"p1274 user event unavailable errno=%d\n",errno);}
-    return e;
+    int rc=sysctlbyname("kern.hakios.p1274_user_event",NULL,NULL,row,sizeof(row));
+    if(rc){static int warned; if(!__atomic_exchange_n(&warned,1,__ATOMIC_RELAXED))fprintf(stderr,"p1274 user event unavailable errno=%d\n",errno);}
+    return rc;
 }
 static inline uint64_t p1274_thread_ns(void)
 {
