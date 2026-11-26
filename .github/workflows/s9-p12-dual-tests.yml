@@ -29,6 +29,8 @@ jobs:
           node tools/tests/test-p127-contract.js
           node tools/tests/test-p1273-contract.js
           node tools/tests/test-p1274-contract.js
+          node tools/tests/test-p1275-contract.js
+          node tools/tests/test-p1275-macho.js
           cc -std=c11 -Wall -Wextra -Werror -O2 tools/tests/test_s9_p1274_policy.c -o /tmp/s9-p1274-policy
           /tmp/s9-p1274-policy
           cc -std=gnu11 -Wall -Wextra -Werror -O2 -Itools/tests/p12741_stubs tools/tests/test_s9_p12741_user.c -o /tmp/s9-p12741-user
@@ -181,6 +183,7 @@ jobs:
             -fsyntax-only userland/src/metal_test.m
           xcrun clang -target arm64-apple-ios16.0 -isysroot "$SDK" \
             -std=gnu11 -fsyntax-only userland/src/cputop.c userland/src/poster_retry.c
+          xcrun clang++ -target arm64-apple-ios16.0 -isysroot "$SDK" -std=gnu++17 -fno-objc-arc -fblocks -Wno-deprecated-declarations -fsyntax-only userland/src/metalvk/HakiosMetalVK.mm
           # eagl.c depends on the generated Mesa/EAGL slot table, built
           # by userland/build.sh in the paired installer. Do not falsely
           # report a standalone syntax pass with a missing/stub table.

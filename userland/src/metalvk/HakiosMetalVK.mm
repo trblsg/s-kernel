@@ -133,6 +133,8 @@ enum { LAZY, OPENING, OPEN, FAILED };
 
 static pthread_mutex_t gLock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
 static volatile int gState = LAZY;
+static bool p1275_layout_installed;
+static unsigned p1275_deferred;
 static Class gClass, gBase;             /* HakiosMetalDevice and _MTLDevice */
 static id gDevice;                      /* the process's one device object, kept */
 static uint64_t gRegistryID;
@@ -236,6 +238,18 @@ openDevice(SEL why)
 		return;
 	}
 	gState = OPENING;
+	unsigned p1275m=p1275_mode(),selectorCode=0;
+	uint64_t p1275Began=0;
+	if(p1275m && p1274_user_observing()){
+		const char *selectorName=sel_getName(why);
+		selectorCode=!strcmp(selectorName,"newTextureLayoutWithDescriptor:isHeapOrBufferBacked:")?1:
+		    !strcmp(selectorName,"iosurfaceTextureAlignmentBytes")?2:
+		    !strcmp(selectorName,"newCommandQueue")?3:
+		    !strcmp(selectorName,"newTextureWithDescriptor:")?4:5;
+		p1275Began=mach_absolute_time();
+		(void)p1274_emit(6,105,selectorCode,p1275_deferred,p1275m,p1275Began,0,0);
+	}
+	if(p1275_deferred && p1274_user_observing())(void)p1274_emit(6,101,p1275_deferred,0,0,0,0,0);
 	callers(from, sizeof(from));
 	say("opening the device for -%s, sent from %s", sel_getName(why), from);
 	began = nowMs();
@@ -262,6 +276,7 @@ openDevice(SEL why)
 				if(opened){
 			stopForwarding();
 			gState = OPEN;
+			if(p1275Began)(void)p1274_emit(6,106,selectorCode,1,mach_absolute_time()-p1275Began,p1275Began,0,0);
 			gPreviousPreprocessor = objc_setExceptionPreprocessor(sayException);
 			say("the device is opened, at -%s, in %llu ms: %s", sel_getName(why), nowMs() - began, gWhy);
 			pthread_mutex_unlock(&gLock);
@@ -271,9 +286,57 @@ openDevice(SEL why)
 		}
 	}
 	gState = FAILED;
+	if(p1275Began)(void)p1274_emit(6,106,selectorCode,0,mach_absolute_time()-p1275Began,p1275Began,0,0);
 	say("the device could not be opened (asked -%s, after %llu ms): %s; it answers nil or 0 from now on", sel_getName(why),
 	    nowMs() - began, gWhy);
 	pthread_mutex_unlock(&gLock);
+}
+
+/* Only the exact object-returning, descriptor + BOOL selector with a
+ * matching inherited ABI is eligible. Unknown bootargs/probes fail closed.
+ * We keep the original forwarding/open path for every other selector. */
+static bool p1275_layout_disabled(void){
+    const char *env=getenv("HAKIOS_METAL_LAYOUT");
+    const char *plan=getenv("HAKIOS_METAL_LAYOUT_PLAN");
+    if((env && !strcmp(env,"1")) || (plan && !strcmp(plan,"1")))return false;
+    static const bool disabled=[]{
+        char args[4096]={};size_t n=sizeof(args)-1;
+        if(sysctlbyname("kern.bootargs",args,&n,NULL,0)!=0 || n>=sizeof(args))return false;
+        args[n]=0;
+        /* Conservative: any mention of experimental layout/probe excludes it. */
+        return !strstr(args,"metal_layout=") && !strstr(args,"p_layout_probe=");
+    }();
+    return disabled;
+}
+static id p1275_layout_shim(id self,SEL sel,MTLTextureDescriptor *d,BOOL backed){
+    pthread_mutex_lock(&gLock);
+    if(gState==LAZY && gDevice==self && (p1275_cached_flags()&1u) && p1275_layout_disabled() && !hakios_metal_is_window_server()){
+        unsigned n=++p1275_deferred;
+        if(n==1 || n%32==0)(void)p1274_emit(6,100,n,(uint64_t)backed,0,0,0,0);
+        pthread_mutex_unlock(&gLock);return nil;
+    }
+    pthread_mutex_unlock(&gLock);
+    openDevice(sel);
+    /* The frontend replaces this method on successful adoption. Never
+     * recurse through a still-installed shim on a failed/reentrant open. */
+    IMP imp=class_getMethodImplementation(object_getClass(self),sel);
+    if(gState==OPEN && imp && imp!=(IMP)p1275_layout_shim && imp!=(IMP)_objc_msgForward)
+        return ((id(*)(id,SEL,MTLTextureDescriptor *,BOOL))imp)(self,sel,d,backed);
+    return nil;
+}
+static void p1275_install_layout_shim(void){
+    SEL sel=sel_registerName("newTextureLayoutWithDescriptor:isHeapOrBufferBacked:");
+    Method m=class_getInstanceMethod(gBase,sel);
+    if(!m || method_getNumberOfArguments(m)!=4)return;
+    char ret[16]={},arg[16]={},flag[16]={};
+    method_getReturnType(m,ret,sizeof(ret));method_getArgumentType(m,2,arg,sizeof(arg));method_getArgumentType(m,3,flag,sizeof(flag));
+    if(strcmp(ret,"@") || arg[0]!='@' || strcmp(flag,@encode(BOOL)))return;
+    /* Only replace an inherited selector already forwarded by this class.
+     * If a real implementation is present, leave its semantics untouched. */
+    Method forwarded=class_getInstanceMethod(gClass,sel);
+    if(!forwarded || method_getImplementation(forwarded)!=(IMP)_objc_msgForward)return;
+    class_replaceMethod(gClass,sel,(IMP)p1275_layout_shim,method_getTypeEncoding(m));
+    p1275_layout_installed=true;
 }
 
 /* whether MTLDevice or MTLDeviceSPI (or a protocol either takes in) declares SELECTOR as an instance method */
@@ -526,7 +589,9 @@ registerDevice(void)
 	forwardProtocol(@protocol(MTLDevice));
 	forwardProtocol(spi);
 	forwardBaseMethods();
+	if(p1275_user_boot())p1275_install_layout_shim();
 	objc_registerClassPair(gClass);
+	if(p1275_user_boot())say("P1275 typed layout shim ABI=%u",p1275_layout_installed?1:0);
 	say("the class HakiosMetalDevice is registered (Metal on Vulkan, opened at first use; %u of _MTLDevice's methods forwarded "
 	    "until then)", gForwardedCount);
 }

@@ -30,6 +30,8 @@
 #include <mach/mach_time.h>
 #include <thread>
 #include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include "bridge/NativeMetalObjects.h"   // Scion: tools/metal/bridge/ (the build gives -I tools/metal)
 #include "NativeBridgeMetalFrontend.h"
@@ -2687,17 +2689,67 @@ static void fillBaseLimits(id object) {
 }
 
 // Scion: the runtime's device, opened once per process (the first half of what native_bridge_metal_open did).
-static thread_local struct p1274_stage p1274OpenStages[2];
+static thread_local struct p1274_stage p1274OpenStages[23];
+static thread_local struct p1275_usage p1275OpenUsage[23];
+static thread_local int p1275LockFd=-1;
+static thread_local bool p1275Detailed;
+static void p1275Unlock(){if(p1275LockFd>=0){close(p1275LockFd);p1275LockFd=-1;}}
+/* Read-only advisory lock on the existing root-owned ICD inode. No
+ * shared writable path, no lock-file creation, no forced unlock. */
+static void p1275Coordinate(const char *loader,unsigned flags){
+ if(!(flags&4u) || !loader || strcmp(loader,"/redwood/lib/libvulkan_panfrost.dylib"))return;
+ const char *name=getprogname();if(!name)return;
+ const char *const eligible[]={"PosterBoard","CollectionsPoster","PridePosterExtension","EmojiPosterExtension","GradientPosterExtension"};
+ bool allowed=false;for(const char *p:eligible)if(!strcmp(name,p))allowed=true;
+ if(!allowed)return;
+ uint64_t start=mach_absolute_time(),began=nowUs();unsigned outcome=3;
+ int fd=open(loader,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
+ if(fd>=0){
+  struct stat st={};
+  if(!fstat(fd,&st) && S_ISREG(st.st_mode) && st.st_uid==0 && !(st.st_mode&0022)){
+   for(;;){
+    if(!(p1275_flags()&4u)){outcome=4;break;}
+    if(!flock(fd,LOCK_EX|LOCK_NB)){p1275LockFd=fd;fd=-1;outcome=1;break;}
+    if(errno!=EWOULDBLOCK && errno!=EAGAIN && errno!=EINTR)break;
+    if(nowUs()-began>=1800000ull){outcome=2;break;}
+    usleep(20000);
+   }
+  }
+  if(fd>=0)close(fd);
+ }
+ (void)p1274_emit(6,102,outcome,mach_absolute_time()-start,0,0,start,0);
+}
 static void p1274OpenObserver(uint32_t stage,uint32_t begin,uint32_t success) {
- if(stage<7 || stage>8)return;
- if(begin)p1274OpenStages[stage-7]=p1274_stage_begin();
- else p1274_stage_end(p1274OpenStages[stage-7],stage,success);
+ if(stage<7 || stage>22 || stage==20 || stage==21)return;
+ if(begin){
+  p1274OpenStages[stage]=p1274_stage_begin();
+  p1275OpenUsage[stage]={};
+  if(p1275Detailed && (stage==7 || stage==11 || stage==13 || stage==19)){
+   p1275OpenUsage[stage]=p1275_usage_now();
+   if(p1274OpenStages[stage].at)(void)p1274_emit(6,103,stage,p1274OpenStages[stage].at,0,0,0,0);
+  }
+ }else{
+  p1274_stage_end(p1274OpenStages[stage],stage,success);
+  if(p1275OpenUsage[stage].valid)p1275_usage_end(p1275OpenUsage[stage],stage,p1274OpenStages[stage].at);
+  if(stage==7)p1275Unlock();
+ }
 }
 static bool openRuntimeDevice(const char *loader,const char *cache,uint64_t registryID,void (*missing)(const char *,const char *)) {
  if(gDevice)return true;
  gMissing=missing;gInFlight=[NSMutableSet set];
  struct p1274_stage t=p1274_stage_begin();
- gDevice=t.at?nmb_device_open_observed(loader,cache,p1274OpenObserver):nmb_device_open(loader,cache);
+ unsigned mode=p1275_mode();unsigned flags=mode?mode-1:0;
+ p1275Detailed=mode && t.at;
+ if(p1275Detailed){
+  p1275Coordinate(loader,flags);
+  /* Recheck OFF lease after any wait. A wake/timeout must not start an
+   * experimental lazy load after the relevant mode has disappeared. */
+  unsigned current=p1275_mode();
+  flags=current?current-1:0;
+  (void)p1274_emit(6,104,mode,flags,0,0,0,0);
+  gDevice=nmb_device_open_observed_mode(loader,cache,p1274OpenObserver,flags|16u);
+ }else gDevice=t.at?nmb_device_open_observed(loader,cache,p1274OpenObserver):nmb_device_open(loader,cache);
+ p1275Unlock();p1275Detailed=false;
  p1274_stage_end(t,5,gDevice!=nullptr);
  if(!gDevice){NBLOG(@"native-metal: device refused: %s",nmb_last_error());return false;}
  gLoaderPath=loader;

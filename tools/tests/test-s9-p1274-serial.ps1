@@ -9,13 +9,25 @@ Check (-not (P12-ReplyShape 'p1274_status' ($st+' junk') $true)) 'bad status acc
 Check (P12-ReplyShape 'p1274_status' 'version=1 state=2 profile=4 now=120000' $true) 'active status'
 Check (P12-ReplyShape 'p1274_metal_log_mode' '-1' $true) 'signed mode'
 Check (P12-ReplyShape 'p12741_revision' '2' $true) 'revision'
+Check (P12-ReplyShape 'p1275_revision' '1' $true) 'P1275 revision'
+Check (P12-ReplyShape 'p1275_selected' '16' $true) 'P1275 selected'
+Check (-not (P12-ReplyShape 'p1275_selected' '17' $true)) 'P1275 invalid selected'
+Check (P12-ReplyShape 'p1275_focus' 'version=1 s=8192 s=12287' $true) 'P1275 focus'
+Check (-not (P12-ReplyShape 'p1275_focus' 'version=1 s=8192 junk' $true)) 'P1275 malformed focus'
 Check (-not (P12-ReplyShape 'p12741_revision' '1' $true)) 'old revision accepted'
 Check (P12-ReplyShape 'p12741_guard' 'version=2 armed=1 at=720001 big=64000 lit=63000 gpu=62000 age=1 battery=41 fast=0 lit_fast=0 peak_big=70000 peak_lit=64000 changes=2 last_change=500000 bcur=650000 lcur=1053000' $true) 'live guard shape'
 Check (P12-ReplyShape 'p1274_restore' 'version=1 state=3 profile=0 cores=4 actual=ff requested=ff fast=0 online=68 exit=0 display=1' $true) 'restore'
-foreach($bad in @(@('p1274_profile','4'),@('p12741_profile','4'),@('p12741_profile','10'),@('p1274_select','14280'),@('p12741_guard','1'),@('p1274_metal_log_mode','2'),@('p1274_user_event','1'))){
+foreach($bad in @(@('p1274_profile','4'),@('p12741_profile','4'),@('p12741_profile','10'),@('p1274_select','14280'),@('p12741_guard','1'),@('p1274_metal_log_mode','2'),@('p1274_user_event','1'),@('p1275_profile','4'),@('p1275_profile','17'),@('p1275_selected','4'),@('p1275_mode','4'))){
  $refused=$false;try{[void](P12-Query $bad[0] $bad[1])}catch{if($_.Exception.Message -match 'only permits|disallowed'){$refused=$true}else{throw}}
  Check $refused "unsafe write $bad"
 }
+$opts.Profile='LOG2';$opts.Experiment='EarlyLoad';$opts.Power='Connected';$opts.AllowIntervention=$false
+$refused=$false;try{Check-Prior}catch{if($_.Exception.Message -match 'requires -AllowIntervention'){$refused=$true}else{throw}}
+Check $refused 'P1275 missing opt-in accepted'
+$opts.AllowIntervention=$true;Check-Prior
+$opts.Power='Offline';$refused=$false;try{Check-Prior}catch{if($_.Exception.Message -match 'LOG2 Connected'){$refused=$true}else{throw}}
+Check $refused 'P1275 offline accepted'
+$opts.Experiment='Legacy'
 $opts.Profile='B2';$opts.AllowIntervention=$true;$opts.Power='Connected'
 $refused=$false;try{Check-Prior}catch{if($_.Exception.Message -match 'Prior reviewed'){$refused=$true}else{throw}}
 Check $refused 'B2 no prior accepted'
@@ -86,6 +98,7 @@ try{
  function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
   switch -Regex ($Name){
    '^p12741_guard$' {return 'version=2 armed=1 at=720001 big=64000 lit=63000 gpu=62000 age=1 battery=41 fast=0 lit_fast=0 peak_big=70000 peak_lit=64000 changes=2 last_change=500000 bcur=650000 lcur=1053000'}
+   '^p1275_focus$' {return 'version=1 s=8192'}
    '^p1274_select$' {$script:mockSelect=[int]$Value;return $Value}
    '^p1274_page$' {$script:mockOrder.Add("P$script:mockSelect");return $script:mockPages[$script:mockSelect]}
    '^p1273_gpu_status$' {return 'version=1 generation=1 submitted=0 completed=0 overwritten=0 first_wake=0 slots=1024'}
@@ -105,5 +118,12 @@ try{
  Dump $meta
  Check (Test-Path (Join-Path $opts.RunDir 'dump.complete')) 'resume failed'
  Check (@($script:mockOrder|Where-Object {$_ -eq 'P5100'}).Count -eq 1) 'resume reread checkpointed header'
+ $opts.RunDir=Join-Path $dir 'mock-p1275';[void](New-Item -ItemType Directory -Path $opts.RunDir)
+ $script:mockOrder.Clear();$meta|Add-Member -NotePropertyName p1275_mode -NotePropertyValue 4
+ $opts.MaxPages=16;$script:budget=16
+ $batch=$false;try{Dump $meta}catch{if($_.Exception.Message -eq 'P1274_BATCH_LIMIT'){$batch=$true}else{throw}}
+ Check ($batch -and (Test-Path (Join-Path $opts.RunDir 'p1275-focus.txt'))) 'P1275 focus checkpoint'
+ Check ($script:mockOrder[2] -eq 'P8192') 'P1275 focus priority'
+ Check (-not (Test-Path (Join-Path $opts.RunDir 'dump.complete'))) 'P1275 partial marked complete'
 }finally{Remove-Item -LiteralPath $dir -Recurse -Force}
 Write-Host 'P1274.1 typed ABI, refusal, episode coverage, partial peak, QH/energy, priority dump/resume and qualification mocks PASS; no serial'

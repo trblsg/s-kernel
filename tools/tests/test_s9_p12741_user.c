@@ -4,14 +4,17 @@
 #include <assert.h>
 #include "../../userland/src/p1274_user.h"
 static uint64_t fake_now=1000000000ull, payload[8];
-static int fake_state=0, writes=0;
+static int fake_state=0, fake_mode=0, writes=0;
 uint64_t mach_absolute_time(void){return fake_now;}
 int mach_timebase_info(mach_timebase_info_data_t *info){info->numer=info->denom=1;return 0;}
 int sysctlbyname(const char *name,void *oldp,size_t *oldlenp,void *newp,size_t newlen){
     if(!strcmp(name,"kern.bootargs")){
-        const char args[]="hi=2 p1274=1";
+        const char args[]="hi=2 p1274=1 p1275=1";
         assert(oldp && oldlenp && *oldlenp>=sizeof(args));
         memcpy(oldp,args,sizeof(args));*oldlenp=sizeof(args);return 0;
+    }
+    if(!strcmp(name,"kern.hakios.p1275_mode")){
+        assert(oldp && oldlenp && *oldlenp==sizeof(int));memcpy(oldp,&fake_mode,sizeof(fake_mode));return 0;
     }
     if(!strcmp(name,"kern.hakios.p12741_user_state")){
         assert(oldp && oldlenp && *oldlenp==sizeof(int));
@@ -24,6 +27,10 @@ int sysctlbyname(const char *name,void *oldp,size_t *oldlenp,void *newp,size_t n
     errno=ENOENT;return -1;
 }
 int main(void){
+    assert(p1275_user_boot() && p1275_mode()==0 && p1275_flags()==0);
+    fake_mode=4;assert(p1275_mode()==4 && p1275_flags()==3);
+    fake_mode=16;assert(p1275_flags()==15);
+    fake_mode=17;assert(p1275_flags()==0);
     assert(p1274_user_mode()==0 && p1274_user_observing());
     assert(p1274_emit(2,1,2,3,4,5,6,7)==0);
     assert(writes==1 && payload[0]==2);

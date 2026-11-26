@@ -12,6 +12,7 @@
 #include <time.h>
 #include <stdio.h>
 #include <errno.h>
+#include <sys/resource.h>
 static inline int p1274_user_boot(void)
 {
     static int cached=-1;
@@ -48,6 +49,34 @@ static inline int p12741_user_state(void)
     }
     return __atomic_load_n(&mode,__ATOMIC_ACQUIRE);
 }
+static inline int p1275_user_boot(void){
+    if(!p1274_user_boot())return 0;
+    static int cached=-1;
+    int old=__atomic_load_n(&cached,__ATOMIC_ACQUIRE);if(old>=0)return old;
+    char args[4096]={0};size_t n=sizeof(args)-1;int enabled=0;
+    if(sysctlbyname("kern.bootargs",args,&n,NULL,0)==0 && n<sizeof(args)){
+        args[n]=0;const char *s=args;
+        while((s=strstr(s,"p1275=1"))!=NULL){
+            if((s==args || s[-1]==' ') && (s[7]==0 || s[7]==' ')){enabled=1;break;}s++;
+        }
+    }
+    __atomic_store_n(&cached,enabled,__ATOMIC_RELEASE);return enabled;
+}
+static inline unsigned p1275_mode(void){
+    if(!p1275_user_boot())return 0;
+    int v=0;size_t n=sizeof(v);
+    return sysctlbyname("kern.hakios.p1275_mode",&v,&n,NULL,0)==0 && n==sizeof(v) && v>=1 && v<=16?(unsigned)v:0;
+}
+static inline unsigned p1275_flags(void){unsigned m=p1275_mode();return m?m-1:0;}
+static inline unsigned p1275_cached_flags(void){
+    static uint64_t next;static unsigned flags;
+    uint64_t now=mach_absolute_time(),old=__atomic_load_n(&next,__ATOMIC_RELAXED);
+    if(now>=old){mach_timebase_info_data_t t={0};mach_timebase_info(&t);
+        uint64_t ttl=t.numer?250000000ull*t.denom/t.numer:1;
+        if(__atomic_compare_exchange_n(&next,&old,now+ttl,0,__ATOMIC_ACQ_REL,__ATOMIC_RELAXED))
+            __atomic_store_n(&flags,p1275_flags(),__ATOMIC_RELEASE);
+    }return __atomic_load_n(&flags,__ATOMIC_ACQUIRE);
+}
 static inline int p1274_user_mode(void){int s=p12741_user_state();return s==3?2:s;}
 static inline int p1274_user_observing(void){int s=p12741_user_state();return s==0 || s==2;}
 static inline int p1274_emit(uint64_t kind,uint64_t a,uint64_t b,uint64_t c,uint64_t d,uint64_t e,uint64_t f,uint64_t g)
@@ -67,6 +96,22 @@ static inline uint64_t p1274_thread_ns(void)
     return UINT64_MAX; /* missing, not zero */
 }
 struct p1274_stage {uint64_t at,cpu;};
+/* Process-wide deltas, explicitly NOT the opener thread's own CPU. */
+struct p1275_usage {uint64_t user,sys,minflt,majflt;int valid;};
+static inline struct p1275_usage p1275_usage_now(void){
+    struct p1275_usage s={0,0,0,0,0};struct rusage r;
+    if(getrusage(RUSAGE_SELF,&r)==0){
+        s.user=(uint64_t)r.ru_utime.tv_sec*1000000ull+r.ru_utime.tv_usec;
+        s.sys=(uint64_t)r.ru_stime.tv_sec*1000000ull+r.ru_stime.tv_usec;
+        s.minflt=(uint64_t)r.ru_minflt;s.majflt=(uint64_t)r.ru_majflt;s.valid=1;
+    }return s;
+}
+static inline void p1275_usage_end(struct p1275_usage a,unsigned stage,uint64_t start){
+    if(!a.valid)return;
+    struct p1275_usage b=p1275_usage_now();
+    if(b.valid && b.user>=a.user && b.sys>=a.sys && b.minflt>=a.minflt && b.majflt>=a.majflt)
+        (void)p1274_emit(6,stage,b.user-a.user,b.sys-a.sys,b.minflt-a.minflt,b.majflt-a.majflt,start,1);
+}
 static inline struct p1274_stage p1274_stage_begin(void)
 {
     struct p1274_stage t={0,UINT64_MAX};

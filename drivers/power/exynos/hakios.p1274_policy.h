@@ -41,6 +41,12 @@ static inline unsigned s9_p12741_severity(unsigned bits,int32_t mc,unsigned sum)
     if((bits&2u) || ((bits&1u) && sum>=200 && mc>=67000))return 2;
     return bits?1u:0u;
 }
+/* Mode mask: early nil=1, workload cap=2, bounded coordination=4, lazy ICD=8.
+ * User-visible mode is 1+mask; zero is old lab/off. */
+static inline unsigned s9_p1275_load_level(unsigned sum,bool rising,int32_t big,int32_t lit){
+    if(sum>=400 || (sum>=200 && (rising || big>=67000 || lit>=65000)))return 2;
+    return sum>=200?1:0;
+}
 static inline unsigned s9_p1274_trigger(bool eligible,bool sustained,int32_t mc,bool rising) {
     if(!eligible)return 0;
     return (sustained?1u:0u)|((s9_p1274_temp_valid(mc)&&mc>=70000)?2u:0u)|(rising?4u:0u);

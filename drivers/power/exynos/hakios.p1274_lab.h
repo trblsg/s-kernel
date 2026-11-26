@@ -19,6 +19,8 @@ extern uint32_t hakios_p1274_recommended_mask(void);
 static uint32_t p1274_state,p1274_profile_id,p1274_cancel,p1274_reason,p1274_select,p1274_pending_finish;
 static uint32_t p1274_fast_limit,p12741_lit_limit,p12741_guard_armed,p1274_trigger_bits,p1274_count,p1274_event_count,p1274_event_drops;
 static uint32_t p12741_peak_select;
+static uint32_t p1275_selected,p1275_load_level;
+static uint64_t p1275_load_since,p1275_load_quiet;
 static int32_t p12741_peak_mc=-273000,p12741_lit_mc=-273000;
 static int32_t p12741_guard_big_peak=-273000,p12741_guard_lit_peak=-273000;
 static uint32_t p12741_guard_changes;
@@ -104,7 +106,23 @@ static unsigned p1274_active_profile(uint64_t now) {
     if(!end || now>=end)return 0;
     return __atomic_load_n(&p1274_profile_id,__ATOMIC_ACQUIRE);
 }
+static bool p1275_boot_enabled(void){int v=0;return PE_parse_boot_argn("p1275",&v,sizeof(v)) && v==1;}
+static unsigned p1275_mode_now(uint64_t now){
+    return p1274_active_profile(now)==P1274_LOG2?__atomic_load_n(&p1275_selected,__ATOMIC_ACQUIRE):0;
+}
+static bool p1275_load_enabled(uint64_t now){
+    unsigned mode=__atomic_load_n(&p1275_selected,__ATOMIC_ACQUIRE);
+    if(!mode || !((mode-1)&2u) || hakios_display_requested_on()!=0)return false;
+    if(__atomic_load_n(&fingers,__ATOMIC_ACQUIRE))return false;
+    uint64_t touch=__atomic_load_n(&touch_last,__ATOMIC_ACQUIRE);
+    /* Known recent input removes only the experiment; missing historic
+     * touch evidence does not defeat the independent lower-only guard. */
+    return !touch || (now>=touch && now-touch>=p1274_ticks_ms(500));
+}
 static uint32_t p1274_ceiling(struct cluster *c,uint32_t stock) {
+    unsigned level=p1275_load_enabled(mach_absolute_time())?__atomic_load_n(&p1275_load_level,__ATOMIC_ACQUIRE):0;
+    if(level && c==&clusters[1])stock=MIN(stock,level==2?1066000u:1261000u);
+    if(level && c==&clusters[0])stock=MIN(stock,level==2?1053000u:1248000u);
     if(c==&clusters[0]){
         uint32_t lit=__atomic_load_n(&p12741_lit_limit,__ATOMIC_ACQUIRE);
         return lit?MIN(stock,lit):stock;
@@ -167,14 +185,37 @@ static void p1274_rate_event(unsigned type,uint64_t began,uint32_t from,uint32_t
 static void p1274_dvfs_record(struct cluster *c,uint64_t began,uint32_t target,uint32_t max,int error) {
     if(__atomic_load_n(&p1274_state,__ATOMIC_ACQUIRE)!=2)return;
     if(c==&clusters[0]){
-        if(p12741_lit_mc>=65000 || __atomic_load_n(&p12741_lit_limit,__ATOMIC_ACQUIRE))
+        if(p12741_lit_mc>=65000 || __atomic_load_n(&p12741_lit_limit,__ATOMIC_ACQUIRE) || __atomic_load_n(&p1275_load_level,__ATOMIC_ACQUIRE))
             p1274_rate_event(4,began,target,c->cur,max,c->asked,error);
         return;
     }
     if(c!=&clusters[1])return;
-    if(p1274_mc>=65000 || __atomic_load_n(&p1274_fast_limit,__ATOMIC_ACQUIRE) ||
+    if(p1274_mc>=65000 || __atomic_load_n(&p1274_fast_limit,__ATOMIC_ACQUIRE) || __atomic_load_n(&p1275_load_level,__ATOMIC_ACQUIRE) ||
        (began>=p1274_ticks_ms(240000) && s9_p1274_cap(p1274_profile_id)))
         p1274_rate_event(2,began,target,c->cur,max,c->asked,error);
+}
+static void p1275_load_tick(uint64_t now){
+    unsigned old=__atomic_load_n(&p1275_load_level,__ATOMIC_ACQUIRE),level=old;
+    unsigned sum=clusters[1].sum_now+clusters[0].sum_now;
+    if(!p1275_load_enabled(now)){level=0;p1275_load_since=p1275_load_quiet=0;}
+    else if(sum>=200){
+        p1275_load_quiet=0;
+        if(!p1275_load_since)p1275_load_since=now;
+        if(now-p1275_load_since>=p1274_ticks_ms(250)){
+            unsigned want=s9_p1275_load_level(sum,p1274_rising,p1274_mc,p12741_lit_mc);
+            level=MAX(level,want);
+        }
+    }else{
+        p1275_load_since=0;
+        if(sum<100 && p1274_mc<=65000 && p12741_lit_mc<=65000){
+            if(!p1275_load_quiet)p1275_load_quiet=now;
+            if(now-p1275_load_quiet>=p1274_ticks_ms(3000))level=0;
+        }else p1275_load_quiet=0;
+    }
+    if(old!=level){
+        __atomic_store_n(&p1275_load_level,level,__ATOMIC_RELEASE);
+        p1274_rate_event(5,now,old,level,level,0,0);
+    }
 }
 static void p1274_fast_tick(uint64_t now,unsigned profile) {
     uint32_t old=__atomic_load_n(&p1274_fast_limit,__ATOMIC_ACQUIRE),before=old;
@@ -345,6 +386,7 @@ static void p1274_tick(uint64_t now) {
     unsigned state=__atomic_load_n(&p1274_state,__ATOMIC_ACQUIRE);
     unsigned p=state==2?__atomic_load_n(&p1274_profile_id,__ATOMIC_ACQUIRE):0;
     p1274_fast_tick(now,p);
+    p1275_load_tick(now);
     if(state!=2)return;
     uint64_t dt=p1274_last_tick&&now>p1274_last_tick?now-p1274_last_tick:0;
     p1274_last_tick=now;
@@ -416,10 +458,7 @@ static void p1274_tick(uint64_t now) {
     p1274_record(now,dt,reason!=0);
     if(reason){p1274_pending_finish=reason;__atomic_store_n(&p1274_cancel,1,__ATOMIC_RELEASE);}
 }
-static int p1274_profile_sysctl(__unused struct sysctl_oid *oidp,__unused void *a,__unused int b,struct sysctl_req *req) {
-    int v=(int)p1274_active_profile(mach_absolute_time());
-    int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
-    if(e || !req->newptr)return e;
+static int p1274_arm_profile(int v,unsigned mode) {
     if(v<0 || v>P1274_REC0)return EINVAL;
     if(!v){__atomic_store_n(&p1274_cancel,1,__ATOMIC_RELEASE);return 0;}
     uint64_t now=mach_absolute_time(),end=p1274_ticks_ms(720000);
@@ -442,10 +481,47 @@ static int p1274_profile_sysctl(__unused struct sysctl_oid *oidp,__unused void *
     __atomic_store_n(&p1274_profile_id,(unsigned)v,__ATOMIC_RELEASE);p1274_cancel=0;p1274_reason=0;
     __atomic_store_n(&hakios_p1274_trace_late,1,__ATOMIC_RELEASE);
     __atomic_store_n(&hakios_p1274_deadline,end,__ATOMIC_RELEASE);
+    __atomic_store_n(&p1275_selected,mode,__ATOMIC_RELEASE);
     __atomic_store_n(&p12741_guard_armed,1,__ATOMIC_RELEASE);
     __atomic_store_n(&p1274_state,2,__ATOMIC_RELEASE);
     return 0;
 }
+static int p1274_profile_sysctl(__unused struct sysctl_oid *oidp,__unused void *a,__unused int b,struct sysctl_req *req) {
+    int v=(int)p1274_active_profile(mach_absolute_time());
+    int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(e || !req->newptr)return e;
+    return p1274_arm_profile(v,0);
+}
+static int p1275_profile_sysctl(__unused struct sysctl_oid *oidp,__unused void *a,__unused int b,struct sysctl_req *req){
+    int v=(int)p1275_mode_now(mach_absolute_time());
+    int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(e || !req->newptr)return e;
+    if(v<0 || v>16)return EINVAL;
+    if(v && (!p1275_boot_enabled() || hakios_display_requested_on()!=0))return EPERM;
+    return p1274_arm_profile(v?P1274_LOG2:0,(unsigned)v);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1275_profile,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1275_profile_sysctl,"I","P1275 0 stop, 1+experiment mask");
+static int p1275_revision=1;
+SYSCTL_INT(_kern_hakios,OID_AUTO,p1275_revision,CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,&p1275_revision,0,"P1275 telemetry revision");
+static int p1275_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *a,__unused int b,struct sysctl_req *req){
+    unsigned selected=__atomic_load_n(&p1275_selected,__ATOMIC_ACQUIRE);
+    int v=(int)p1275_mode_now(mach_absolute_time());
+    /* On a hot OFF tail keep only the proven nil optimization; do not
+     * start new coordination/lazy experiments after recorder freeze. */
+    if(!v && selected>1 && ((selected-1)&1u) && hakios_display_requested_on()==0)v=2;
+    return SYSCTL_OUT(req,&v,sizeof(v));
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1275_mode,CTLTYPE_INT|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1275_mode_sysctl,"I","P1275 current OFF mode");
+static int p1275_load_state_sysctl(__unused struct sysctl_oid *oidp,__unused void *a,__unused int b,struct sysctl_req *req){
+    int v=p1275_load_enabled(mach_absolute_time())?(int)__atomic_load_n(&p1275_load_level,__ATOMIC_ACQUIRE):0;
+    return SYSCTL_OUT(req,&v,sizeof(v));
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1275_load_state,CTLTYPE_INT|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1275_load_state_sysctl,"I","P1275 effective experimental load ceiling level");
+static int p1275_selected_sysctl(__unused struct sysctl_oid *oidp,__unused void *a,__unused int b,struct sysctl_req *req){
+    int v=(int)__atomic_load_n(&p1275_selected,__ATOMIC_ACQUIRE);
+    return SYSCTL_OUT(req,&v,sizeof(v));
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1275_selected,CTLTYPE_INT|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1275_selected_sysctl,"I","P1275 selected boot mode");
 /* New write endpoint: old 420-second host cannot arm the 720-second lab. */
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p12741_profile,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1274_profile_sysctl,"I","P12.7.4.1 0 stop capture,1 protected BASE,2 LOG2,3 FAST,4-6 cap,7-9 recommended");
 static int p12741_revision=2;
@@ -473,7 +549,7 @@ static int p1274_event_sysctl(__unused struct sysctl_oid *oidp,__unused void *a,
     uint64_t v[8],now=mach_absolute_time(),tid=0,task=0;uint32_t pid=0;
     if(!req->newptr || req->newlen!=sizeof(v) || !p1274_active_profile(now))return EPERM;
     int e=SYSCTL_IN(req,v,sizeof(v));if(e)return e;
-    if(v[0]<1 || v[0]>5)return EINVAL;
+    if(v[0]<1 || v[0]>6 || (v[0]==6 && !p1275_mode_now(now)))return EINVAL;
     hakios_p1273_identity(&tid,&task,&pid);
     if(!pid)return EPERM;
     lck_spin_lock(&p1274_event_lock);
@@ -488,7 +564,7 @@ static int p1274_event_sysctl(__unused struct sysctl_oid *oidp,__unused void *a,
     }
     if(!prod || !task){p1274_event_drops++;lck_spin_unlock(&p1274_event_lock);return ENOSPC;}
     if(!prod->task || now-prod->at>=p1274_ticks_ms(1000)){prod->task=task;prod->at=now;prod->n=0;}
-    if(prod->n>=32){p1274_event_drops++;lck_spin_unlock(&p1274_event_lock);return EBUSY;}
+    if(prod->n>=(p1275_mode_now(now)?64u:32u)){p1274_event_drops++;lck_spin_unlock(&p1274_event_lock);return EBUSY;}
     prod->n++;
     unsigned n=p1274_event_count;
     if(n>=P1274_EVENTS){p1274_event_drops++;lck_spin_unlock(&p1274_event_lock);return ENOSPC;}
@@ -584,6 +660,22 @@ static int p1274_page_sysctl(__unused struct sysctl_oid *oidp,__unused void *a,_
     return SYSCTL_OUT(req,buf,(size_t)n+1);
 }
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p1274_page,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1274_page_sysctl,"A","P12.7.4.1 immutable timeline/FG/event/detail/WFI/episode rows");
+/* Compact newest stage index for the host: bounded immutable scalar
+ * selectors, so cputop/layout traffic cannot hide the expensive stages. */
+static int p1275_focus_sysctl(__unused struct sysctl_oid *oidp,__unused void *a,__unused int b,struct sysctl_req *req){
+    if(__atomic_load_n(&p1274_state,__ATOMIC_ACQUIRE)!=3 || !__atomic_load_n(&p1275_selected,__ATOMIC_ACQUIRE))return EBUSY;
+    char buf[512];size_t used=(size_t)snprintf(buf,sizeof(buf),"version=1");
+    unsigned count=0;
+    for(unsigned i=p1274_event_count;i>0 && count<48;i--){
+        const struct p1274_event *r=&p1274_events[i-1];
+        if(r->v[0]!=3 && r->v[0]!=6)continue;
+        int n=snprintf(buf+used,sizeof(buf)-used," s=%u",P12741_EVENT_SELECT+i-1);
+        if(n<0 || (size_t)n>=sizeof(buf)-used)break;
+        used+=(size_t)n;count++;
+    }
+    buf[used]=0;return SYSCTL_OUT(req,buf,used+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1275_focus,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1275_focus_sysctl,"A","P1275 newest stage selectors, bounded");
 static int p12741_info_sysctl(__unused struct sysctl_oid *oidp,__unused void *a,__unused int b,struct sysctl_req *req){
     if(__atomic_load_n(&p1274_state,__ATOMIC_ACQUIRE)!=3)return EBUSY;
     char buf[160];

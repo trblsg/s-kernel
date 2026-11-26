@@ -41,5 +41,11 @@ int main(void){
     assert(s9_p1274_trigger(false,true,80000,true)==0);
     assert(s9_p1274_trigger(true,false,69000,false)==0);
     assert(s9_p1274_trigger(true,true,70000,true)==7);
-    puts("P1274 exact portable policy PASS");return 0;
+    assert(s9_p1275_load_level(199,false,60000,60000)==0);
+    assert(s9_p1275_load_level(200,false,60000,60000)==1);
+    assert(s9_p1275_load_level(200,true,60000,60000)==2);
+    assert(s9_p1275_load_level(200,false,67000,60000)==2);
+    assert(s9_p1275_load_level(399,false,64000,65000)==2);
+    assert(s9_p1275_load_level(400,false,60000,60000)==2);
+    puts("P1274/P1275 exact portable policy PASS");return 0;
 }

@@ -42,6 +42,7 @@ NmbDevice *nmb_device_open(const char *loader, const char *cache);
  * Device::system_default_with. begin=1 before; begin=0 after with success. */
 typedef void (*NmbOpenObserver)(uint32_t stage, uint32_t begin, uint32_t success);
 NmbDevice *nmb_device_open_observed(const char *loader, const char *cache, NmbOpenObserver observer);
+NmbDevice *nmb_device_open_observed_mode(const char *loader,const char *cache,NmbOpenObserver observer,uint32_t flags);
 /* Scion: the driver in use, its entry and its negotiated loader-ICD interface version, as one line; the line's length. */
 size_t nmb_icd_describe(char *out, size_t size);
 /* Scion: what the runtime's copies of no-copy buffers it could not import moved (tools/metal/m2v/0002): bytes in, bytes out,

@@ -180,6 +180,11 @@ pub unsafe extern "C" fn nmb_device_open(loader: *const c_char, cache: *const c_
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nmb_device_open_observed(loader: *const c_char, cache: *const c_char,
     observer: Option<extern "C" fn(u32,u32,u32)>) -> *mut NmbDevice {
+    unsafe { nmb_device_open_observed_mode(loader,cache,observer,0) }
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nmb_device_open_observed_mode(loader:*const c_char,cache:*const c_char,
+    observer:Option<extern "C" fn(u32,u32,u32)>,flags:u32)->*mut NmbDevice{
     guard(std::ptr::null_mut(), || {
         if loader.is_null() || cache.is_null() {
             return Err("loader and cache are required".into());
@@ -189,7 +194,7 @@ pub unsafe extern "C" fn nmb_device_open_observed(loader: *const c_char, cache: 
         let mut options = DeviceOptions::default();
         // Scion: `loader` is a Vulkan driver (an ICD) by path; the runtime opens this library in its place (icd.rs).
         if let Some(f) = observer { f(7,1,0); }
-        let selected = crate::icd::select(loader);
+        let selected = crate::icd::select_observed(loader,if flags&16!=0{observer}else{None},flags&8!=0);
         if let Some(f) = observer { f(7,0,selected.is_ok() as u32); }
         options.loader = Some(selected?);
         options.metal_level = Some(MetalLevel::NEWEST);
@@ -213,7 +218,7 @@ pub unsafe extern "C" fn nmb_device_open_observed(loader: *const c_char, cache: 
         options.announce_each.insert(metal2vulkan_runtime::Degradation::ShadowedTexture);
         let _ = NOTICE_DIR.set(PathBuf::from(cache.to_string_lossy().into_owned()));
         if let Some(f) = observer { f(8,1,0); }
-        let device = Device::system_default_with(&options);
+        let device = crate::icd::with_observer(if flags&16!=0{observer}else{None},||Device::system_default_with(&options));
         if let Some(f) = observer { f(8,0,device.is_ok() as u32); }
         Ok(boxed(NmbDevice(device.map_err(e("device"))?, std::sync::OnceLock::new(), std::sync::Mutex::new(()))))
     })
