@@ -31,6 +31,8 @@ jobs:
           node tools/tests/test-p1274-contract.js
           cc -std=c11 -Wall -Wextra -Werror -O2 tools/tests/test_s9_p1274_policy.c -o /tmp/s9-p1274-policy
           /tmp/s9-p1274-policy
+          cc -std=gnu11 -Wall -Wextra -Werror -O2 -Itools/tests/p12741_stubs tools/tests/test_s9_p12741_user.c -o /tmp/s9-p12741-user
+          /tmp/s9-p12741-user
           cc -std=c11 -Wall -Wextra -Werror -O2 tools/tests/test_s9_p1273_gate.c -o /tmp/s9-p1273-gate
           /tmp/s9-p1273-gate
           cc -std=c11 -Wall -Wextra -Werror -O2 userland/tests/test_s9_texture_layout.c -o /tmp/s9-texture-layout

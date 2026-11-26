@@ -18,12 +18,28 @@ static inline bool s9_p1274_temp_valid(int32_t mc) {return mc>=0 && mc<=120000;}
 static inline uint32_t s9_p1274_fast_cap(unsigned p,int32_t mc,bool rising,uint32_t old) {
     if(!s9_p1274_temp_valid(mc))return old;
     uint32_t cap=0;
-    if(mc>=76000)cap=1066000; /* emergency even for observational profiles */
-    else if(p>=P1274_FAST){
-        if(mc>=73000 || (mc>=68000 && rising))cap=1261000;
-        else if(mc>=70000 || (mc>=65000 && rising))cap=1469000;
-    }
+    /* BASE and LOG2 share the same proactive safety envelope. FAST and
+     * the intervention profiles use earlier thresholds; p==0 is the
+     * common guard after the measurement lease ends. */
+    if(mc>=76000 || (p>=P1274_FAST && mc>=73000))cap=1066000;
+    else if(mc>=73000 || (mc>=68000 && rising) || (p>=P1274_FAST && mc>=70000))cap=1261000;
+    else if(mc>=70000 || (mc>=65000 && rising) || (p>=P1274_FAST && mc>=67000))cap=1469000;
     return !old?cap:!cap?old:old<cap?old:cap;
+}
+static inline uint32_t s9_p12741_little_cap(int32_t mc,int32_t big,bool rising,uint32_t old) {
+    if(!s9_p1274_temp_valid(mc) || !s9_p1274_temp_valid(big))
+        return old && old<1053000u?old:1053000u;
+    uint32_t cap=0;
+    if(mc>=70000 || big>=76000)cap=1053000u;
+    else if(mc>=67000 || (big>=68000 && rising))cap=1248000u;
+    return !old?cap:!cap?old:old<cap?old:cap;
+}
+/* A slope alone is evidence, not a reason to consume the only full
+ * per-thread owner ring. Moderate events have their own bounded samples. */
+static inline unsigned s9_p12741_severity(unsigned bits,int32_t mc,unsigned sum) {
+    if((bits&8u) || (s9_p1274_temp_valid(mc)&&mc>=76000))return 3;
+    if((bits&2u) || ((bits&1u) && sum>=200 && mc>=67000))return 2;
+    return bits?1u:0u;
 }
 static inline unsigned s9_p1274_trigger(bool eligible,bool sustained,int32_t mc,bool rising) {
     if(!eligible)return 0;

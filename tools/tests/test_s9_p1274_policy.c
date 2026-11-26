@@ -18,10 +18,26 @@ int main(void){
             assert(cap && cap<=old);
         }
     }
-    assert(s9_p1274_fast_cap(P1274_BASE,73000,true,0)==0);
+    /* All profiles and the post-lease p==0 guard share proactive safety. */
+    assert(s9_p1274_fast_cap(P1274_BASE,73000,true,0)==1261000);
+    assert(s9_p1274_fast_cap(P1274_LOG2,73000,true,0)==1261000);
+    assert(s9_p1274_fast_cap(0,73000,true,0)==1261000);
+    assert(s9_p1274_fast_cap(0,65000,true,0)==1469000);
     assert(s9_p1274_fast_cap(P1274_FAST,69000,true,0)==1261000);
-    assert(s9_p1274_fast_cap(P1274_FAST,70000,false,0)==1469000);
-    assert(s9_p1274_fast_cap(P1274_FAST,73000,false,0)==1261000);
+    assert(s9_p1274_fast_cap(P1274_FAST,70000,false,0)==1261000);
+    assert(s9_p1274_fast_cap(P1274_FAST,73000,false,0)==1066000);
+    assert(s9_p12741_little_cap(64000,64000,false,0)==0);
+    assert(s9_p12741_little_cap(67000,68000,false,0)==1248000);
+    assert(s9_p12741_little_cap(70000,69000,false,0)==1053000);
+    assert(s9_p12741_little_cap(64000,76000,false,0)==1053000);
+    assert(s9_p12741_little_cap(-273000,64000,false,0)==1053000);
+    assert(s9_p12741_little_cap(64000,64000,false,1053000)==1053000);
+    assert(s9_p12741_severity(4,67000,60)==1);
+    assert(s9_p12741_severity(1,67000,199)==1);
+    assert(s9_p12741_severity(1,67000,200)==2);
+    assert(s9_p12741_severity(2,70000,50)==2);
+    assert(s9_p12741_severity(8,64000,50)==3);
+    assert(s9_p12741_severity(0,64000,0)==0);
     assert(s9_p1274_trigger(false,true,80000,true)==0);
     assert(s9_p1274_trigger(true,false,69000,false)==0);
     assert(s9_p1274_trigger(true,true,70000,true)==7);

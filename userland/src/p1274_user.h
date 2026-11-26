@@ -29,7 +29,7 @@ static inline int p1274_user_boot(void)
     __atomic_store_n(&cached,enabled,__ATOMIC_RELEASE);
     return enabled;
 }
-static inline int p1274_user_mode(void)
+static inline int p12741_user_state(void)
 {
     if(!p1274_user_boot())return -1;
     static uint64_t next=0;
@@ -41,16 +41,18 @@ static inline int p1274_user_mode(void)
         uint64_t ttl=t.numer?250000000ull*t.denom/t.numer:1;
         if(__atomic_compare_exchange_n(&next,&old,now+ttl,0,__ATOMIC_ACQ_REL,__ATOMIC_RELAXED)){
             int v=-1;size_t n=sizeof(v);
-            if(sysctlbyname("kern.hakios.p1274_metal_log_mode",&v,&n,NULL,0)!=0 ||
-               n!=sizeof(v) || (v!=0 && v!=2))v=-1;
+            if(sysctlbyname("kern.hakios.p12741_user_state",&v,&n,NULL,0)!=0 ||
+               n!=sizeof(v) || (v!=0 && v!=2 && v!=3))v=-1;
             __atomic_store_n(&mode,v,__ATOMIC_RELEASE);
         }
     }
     return __atomic_load_n(&mode,__ATOMIC_ACQUIRE);
 }
+static inline int p1274_user_mode(void){int s=p12741_user_state();return s==3?2:s;}
+static inline int p1274_user_observing(void){int s=p12741_user_state();return s==0 || s==2;}
 static inline int p1274_emit(uint64_t kind,uint64_t a,uint64_t b,uint64_t c,uint64_t d,uint64_t e,uint64_t f,uint64_t g)
 {
-    if(p1274_user_mode()<0)return -1;
+    if(!p1274_user_observing())return -1;
     uint64_t row[8]={kind,a,b,c,d,e,f,g};
     int rc=sysctlbyname("kern.hakios.p1274_user_event",NULL,NULL,row,sizeof(row));
     if(rc){static int warned; if(!__atomic_exchange_n(&warned,1,__ATOMIC_RELAXED))fprintf(stderr,"p1274 user event unavailable errno=%d\n",errno);}
@@ -68,7 +70,7 @@ struct p1274_stage {uint64_t at,cpu;};
 static inline struct p1274_stage p1274_stage_begin(void)
 {
     struct p1274_stage t={0,UINT64_MAX};
-    if(p1274_user_mode()>=0){t.at=mach_absolute_time();t.cpu=p1274_thread_ns();}
+    if(p1274_user_observing()){t.at=mach_absolute_time();t.cpu=p1274_thread_ns();}
     return t;
 }
 static inline void p1274_stage_end(struct p1274_stage t,unsigned stage,unsigned ok)

@@ -323,6 +323,7 @@ static void p1273Unsupported(unsigned selector,bool baselinePrint,NSString *mess
  const int liveMode=envMode<0?p1274_user_mode():-1;
  const int mode=envMode>=0?envMode:liveMode;
  if(mode<0) {if(baselinePrint)NBLOG(@"%@",message);return;}
+ if(envMode<0 && liveMode==2 && !p1274_user_observing())return; /* hot tail: suppress only, no sysctl events */
  P1273LogStats &s=p1273LogStats[selector];
  const uint64_t start=nowUs(),n=++s.calls;
  const NSUInteger fmt=d?d.pixelFormat:0;

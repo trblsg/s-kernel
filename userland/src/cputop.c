@@ -126,7 +126,7 @@ main(int argc, char **argv)
 		}
 		if (look > 0) {
 			int n = 0;
-			const bool p1274_observe=p1274_user_mode()>=0;
+			const bool p1274_observe=p1274_user_observing();
 
 			for (int i = 0; i < count; i++) {
 				int found;
