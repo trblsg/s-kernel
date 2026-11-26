@@ -30,6 +30,7 @@ p126_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     int v=(int)hakios_p126_active(P126_MASK);
     int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
     if(e || req->newptr==USER_ADDR_NULL)return e;
+    if(__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE))return EBUSY;
     if(v<0 || v>(int)P126_MASK)return EINVAL;
     if(!v){hakios_p126_stop(0);return 0;}
     if(__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE))return EBUSY;
@@ -669,6 +670,7 @@ p1273_gate_begin_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__u
     lck_spin_unlock(&p1273_gate_lock);
     int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
     if(e || !req->newptr)return e;
+    if(__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE))return EBUSY;
     if(v && !p1273_gate_bit((unsigned)v))return EINVAL;
     bool enabled=p1273_gate_enabled(),idle=p1273_gate_idle();
     unsigned thermal=p125_thermal_reason();
@@ -828,13 +830,8 @@ p127_guard(void)
     if(reason)hakios_p127_stop(reason);
 }
 static int
-p127_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
-    __unused int arg2,struct sysctl_req *req)
+p127_arm_mode(int v)
 {
-    p127_guard();
-    int v=(int)hakios_p127_mode();
-    int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
-    if(e || req->newptr==USER_ADDR_NULL)return e;
     if(v<0 || v>(int)P127_MASK || P127_FLOOR(v)>5)return EINVAL;
     if(!v){hakios_p127_stop(0);return 0;}
     if(__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE))return EBUSY;
@@ -891,6 +888,17 @@ p127_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     lck_spin_unlock(&p1273_gate_lock);
     if(hakios_display_requested_on()!=0){hakios_p127_stop(4);return EPERM;}
     return 0;
+}
+static int
+p127_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
+    __unused int arg2,struct sysctl_req *req)
+{
+    p127_guard();
+    int v=(int)hakios_p127_mode();
+    int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(e || req->newptr==USER_ADDR_NULL)return e;
+    if(__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE))return EBUSY;
+    return p127_arm_mode(v);
 }
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p127_mode,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,
     p127_mode_sysctl,"I","P12.7 base1 USB2 ABOX4 PSR8 LITTLE selector bits4..6, WiFi INTx128 BT256 ticker512, bounded OFF lease");
@@ -1118,6 +1126,7 @@ static int p1273_offline_s_sysctl(__unused struct sysctl_oid *oidp,__unused void
     int v=tps?(int)(__atomic_load_n(&hakios_p1273_offline_duration,__ATOMIC_ACQUIRE)/tps):0;
     int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
     if(e || !req->newptr)return e;
+    if(__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE))return EBUSY;
     if(v!=0 && v!=60)return EINVAL; /* first hardware qualification only */
     if(__atomic_load_n(&hakios_p125_lease,__ATOMIC_ACQUIRE) ||
        __atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE) ||
@@ -1177,6 +1186,8 @@ p125_guard(void)
     if(__atomic_load_n(&hakios_p125_display_events,__ATOMIC_ACQUIRE)){p125_finish(4);return;}
     unsigned reason=p125_thermal_reason();
     if(reason){p125_finish(reason);return;}
+    /* Keep legacy hard guards; P12753 owns normal deadline finalization. */
+    if(__atomic_load_n(&hakios_p12753_observe,__ATOMIC_ACQUIRE))return;
     if(__atomic_load_n(&hakios_p1273_offline_fixed,__ATOMIC_ACQUIRE)){
         uint64_t now=mach_absolute_time();
         uint64_t deadline=__atomic_load_n(&hakios_p1273_offline_deadline,__ATOMIC_ACQUIRE);
@@ -1197,6 +1208,7 @@ p125_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     int v=(int)(__atomic_load_n(&hakios_p125_lease,__ATOMIC_ACQUIRE)&3u);
     int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
     if(e || req->newptr==USER_ADDR_NULL)return e;
+    if(__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE))return EBUSY;
     if(v<0 || v>3)return EINVAL;
     if(!v){p125_finish(0);return 0;}
     if(__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE))return EBUSY;

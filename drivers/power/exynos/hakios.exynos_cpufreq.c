@@ -971,6 +971,7 @@ big_busy(const struct cluster *c)
 }
 
 #include "hakios.p1274_lab.h"
+#include "hakios.p12753.h"
 
 static uint32_t
 ceiling_now(struct cluster *c)
@@ -1018,6 +1019,7 @@ ceiling_now(struct cluster *c)
 	}
 	max=p1273_cap_ceiling(c,max);
 	max=p1274_ceiling(c,max);
+	max=p12753_ceiling(c,max);
 	return c->levels[level_at_most(c, max)];
 }
 
@@ -1925,7 +1927,9 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 			ramp_check(mach_absolute_time());
 		}
 		measure(now - then > 0 ? now - then : 1);
+		p12753_guard_tick(now); /* opt-in independent boot guard, no profile ownership */
 		p1274_tick(now); /* bounded direct TMU, recorder and lower-only OFF policy */
+		p12753_audit_tick(now); /* delayed battery audit; bounded legacy policy leases */
 		p12752_idle_tick(now); /* explicit independent quiet-window evidence */
 		if(!__atomic_load_n(&hakios_p1274_trace_late,__ATOMIC_ACQUIRE))
 			p1273_trace_tick(now); /* existing legacy governor window */

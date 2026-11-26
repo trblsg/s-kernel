@@ -141,7 +141,7 @@ hakios_p124_irq_observe(int cpu,uint32_t intid,bool timer)
 {
     if(cpu>=0 && cpu<8 && intid<1020 && hakios_p125_active()){
         if(timer)hakios_p125_inc((unsigned)cpu,P125_IRQ27,1);
-        if(hakios_p127_mode())__atomic_fetch_add(&hakios_p127_irq[cpu][intid<16?0:intid<32?1:2],1,__ATOMIC_RELAXED);
+        if(hakios_p127_mode() || (__atomic_load_n(&hakios_p12753_observe,__ATOMIC_ACQUIRE) && hakios_p125_active()))__atomic_fetch_add(&hakios_p127_irq[cpu][intid<16?0:intid<32?1:2],1,__ATOMIC_RELAXED);
     }
     if(!__atomic_load_n(&hakios_p12_wfi_probe_enable,__ATOMIC_RELAXED) ||
         cpu<0 || cpu>=8 || intid>=1020)return;
@@ -564,7 +564,7 @@ cpu_idle(void)
 	uint64_t        new_idle_timeout_ticks = 0x0ULL, lastPop;
 	bool idle_disallowed = false;
 	const bool p12_probe = __atomic_load_n(&hakios_p12_wfi_probe_enable, __ATOMIC_RELAXED) != 0;
-	const bool p127_probe = hakios_p127_mode() && hakios_p125_active();
+	const bool p127_probe = (hakios_p127_mode() || __atomic_load_n(&hakios_p12753_observe,__ATOMIC_ACQUIRE)) && hakios_p125_active();
 	const uint64_t p127_start = p127_probe?__atomic_load_n(&hakios_p125_start,__ATOMIC_ACQUIRE):0;
 	const unsigned p12_id = (unsigned)cpu_data_ptr->cpu_number; /* cpu_id is an opaque PE object, not an index */
 	if (p12_probe) {

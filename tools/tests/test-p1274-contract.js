@@ -26,7 +26,7 @@ has(user,'kern.hakios.p12741_user_state','if(!p1274_user_observing())return -1;'
 has(lab,'p12741_user_state','p12741_guard_big_peak','p12741_guard_last_change');
 has(cpu,'max=p1274_ceiling(c,max)','cores_set(p1274_cores(stock_cores,now), now)','b->measured = skip_big?0:measure_mhz(b)','p1274_tick(now)','p1274_dvfs_record');
 has(x,'p1274_fg_record(ua,avg_ua,uv,external,charger,qh)','hakios_p1274_deadline','p1274_writer_enter','p1274_writer_leave');
-assert(x.indexOf('p1274_fg_record(ua,avg_ua,uv,external,charger,qh)')<x.indexOf('if(!hakios_p127_mode() || !hakios_p125_active())return;',x.indexOf('void hakios_p127_fg_record')));
+assert(x.indexOf('p1274_fg_record(ua,avg_ua,uv,external,charger,qh)')<x.indexOf('if((!hakios_p127_mode() && !__atomic_load_n(&hakios_p12753_observe,__ATOMIC_ACQUIRE)) || !hakios_p125_active())return;',x.indexOf('void hakios_p127_fg_record')));
 has(idle,'p1274_writer_enter(p12_began)','hakios_p1274_wfi_ticks');
 has(metal,'p1274_user_mode()','mode!=2','p1274_emit(selector+1','nmb_device_open_observed');
 has(r('tools/metal/bridge/NativeMetalObjects.rs'),'nmb_device_open_observed','f(7,1,0)','f(8,1,0)');

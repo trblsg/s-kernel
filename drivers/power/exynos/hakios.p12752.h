@@ -52,7 +52,7 @@ static int p12752_idle_mode_sysctl(__unused struct sysctl_oid *oidp,__unused voi
     int v; lck_spin_lock(&p12752_lock);v=(int)p12752_idle_mode;lck_spin_unlock(&p12752_lock);
     int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);if(e||!req->newptr)return e;
     if(v<0 || v>2)return EINVAL;
-    if(__atomic_load_n(&hakios_p125_lease,__ATOMIC_ACQUIRE))return EBUSY;
+    if(__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE) || __atomic_load_n(&hakios_p125_lease,__ATOMIC_ACQUIRE))return EBUSY;
     if(v && (!p12752_boot_enabled() || (__atomic_load_n(&p12751_latched,__ATOMIC_ACQUIRE)<0 || (__atomic_load_n(&p12751_latched,__ATOMIC_ACQUIRE)&3)!=3) ||
        __atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE) ||
        p125_thermal_reason() || hakios_battery_temperature()<=0))return EPERM;
@@ -118,7 +118,7 @@ static void p12752_idle_tick(uint64_t now){
         p12752_idle_append_locked(&r);p12752_idle_last=now;
     }
     if(reason){p12752_idle_reason=reason;p12752_idle_mode=0;}
-    else if(mode==2 && r.policy==1 && !r.driver && p12752_bus_next<13 &&
+    else if(mode==2 && r.policy==1 && r.driver==15u && p12752_bus_next<13 &&
        (!p12752_bus_last || now-p12752_bus_last>=p1274_ticks_ms(4000))){
         index=p12752_bus_next++;p12752_bus_last=now;
     }

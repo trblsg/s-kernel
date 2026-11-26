@@ -11,6 +11,8 @@ uint64_t hakios_p125_thread_map_drops;
 uint64_t hakios_p125_intervals[P125_CPUS][5];
 uint64_t hakios_p125_lease, hakios_p125_start, hakios_p125_end;
 uint32_t hakios_p125_stop_reason;
+uint32_t hakios_p12753_busy,hakios_p12753_observe;
+uint64_t hakios_p12753_fg_link,hakios_p12753_usb_down,hakios_p12753_usb_up,hakios_p12753_display_on;
 uint64_t hakios_p125_usb_down_at,hakios_p125_usb_up_at;
 uint64_t hakios_p1273_offline_duration,hakios_p1273_offline_deadline;
 uint32_t hakios_p1273_offline_fixed;
@@ -206,7 +208,9 @@ done:
 void hakios_p127_fg_record(int32_t ua,int32_t avg_ua,uint32_t uv,unsigned external,unsigned charger,unsigned qh)
 {
     p1274_fg_record(ua,avg_ua,uv,external,charger,qh);
-    if(!hakios_p127_mode() || !hakios_p125_active())return;
+    /* One atomic word: fresh gauge timestamp + valid/external bits. */
+    __atomic_store_n(&hakios_p12753_fg_link,(mach_absolute_time()&~3ULL)|2u|(external?1u:0u),__ATOMIC_RELEASE);
+    if((!hakios_p127_mode() && !__atomic_load_n(&hakios_p12753_observe,__ATOMIC_ACQUIRE)) || !hakios_p125_active())return;
     uint64_t seq=__atomic_load_n(&hakios_p127_fg_seq,__ATOMIC_RELAXED)+1;
     struct p127_fg_row *r=&hakios_p127_fg_rows[(seq-1)%P127_FG_SLOTS];
     __atomic_store_n(&r->seq,0,__ATOMIC_RELEASE);
@@ -254,7 +258,7 @@ void hakios_p127_stop(unsigned reason)
 }
 void hakios_p127_wfi(unsigned cpu,uint64_t ticks)
 {
-    if(cpu>=8 || !hakios_p127_mode() || !hakios_p125_active())return;
+    if(cpu>=8 || (!hakios_p127_mode() && !__atomic_load_n(&hakios_p12753_observe,__ATOMIC_ACQUIRE)) || !hakios_p125_active())return;
     unsigned b=0;
     while(b<8 && ticks>=__atomic_load_n(&hakios_p127_bounds[b],__ATOMIC_RELAXED))b++;
     __atomic_fetch_add(&hakios_p127_wfi_n[cpu][b],1,__ATOMIC_RELAXED);
@@ -314,6 +318,8 @@ hakios_p125_active(void)
 }
 void hakios_p125_usb_event(unsigned connected)
 {
+    /* Retain physical link timestamps even after audit freeze. */
+    __atomic_store_n(connected?&hakios_p12753_usb_up:&hakios_p12753_usb_down,mach_absolute_time(),__ATOMIC_RELEASE);
     hakios_p1273_event(connected?P1273_USB_UP:P1273_USB_DOWN,1);
     if(p1274_live(mach_absolute_time()) && p1274_writer_enter(mach_absolute_time())){
         uint64_t zero=0,at=mach_absolute_time();
@@ -361,6 +367,7 @@ void hakios_p125_usb_event(unsigned connected)
 }
 void hakios_p125_display_event(unsigned on)
 {
+    if(on)__atomic_store_n(&hakios_p12753_display_on,mach_absolute_time(),__ATOMIC_RELEASE);
     if(on && p1274_live(mach_absolute_time()) && p1274_writer_enter(mach_absolute_time())){
         uint64_t zero=0,at=mach_absolute_time();
         (void)__atomic_compare_exchange_n(&hakios_p1274_display_on_at,&zero,at,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);

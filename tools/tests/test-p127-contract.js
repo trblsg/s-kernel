@@ -5,7 +5,7 @@ const read=f=>fs.readFileSync(path.join(__dirname,'../..',f),'utf8');
 const has=(s,...v)=>v.forEach(x=>a(s.includes(x),x));
 const h=read('xnu/files/hakios_p125.h'), c=read('xnu/files/hakios_p125_impl.h'), sys=read('drivers/power/exynos/hakios.p125_sysctl.h');
 has(h,'P127_MASK 1023u','P127_FG_SLOTS 64');
-has(c,'hakios_p127_stop(4)','hakios_p127_offline_aggregate','hakios_p127_wfi_ticks','(seq-1)%P127_FG_SLOTS','if(!hakios_p127_mode() || !hakios_p125_active())return');
+has(c,'hakios_p127_stop(4)','hakios_p127_offline_aggregate','hakios_p127_wfi_ticks','(seq-1)%P127_FG_SLOTS','if((!hakios_p127_mode() && !__atomic_load_n(&hakios_p12753_observe,__ATOMIC_ACQUIRE)) || !hakios_p125_active())return');
 has(sys,'120ULL:420ULL','360ULL:180ULL','extras&(extras-1)','extras && P127_FLOOR(v)','{100,500,1000,2000,3500,10000,20000,50000}','949000,832000,715000,598000,455000','!hakios_p124_ufs_safe())reason|=1u<<6','hakios_p124_ufs_busy())reason|=1u<<7','p127_bus_poll','hakios_acpm_dvfs_get','p127_fg_page_sysctl');
 a(!sys.includes('hakios_acpm_dvfs_set'));
 const bt=read('drivers/bluetooth/bcm4361/hakios.bcm4361_bt.c');

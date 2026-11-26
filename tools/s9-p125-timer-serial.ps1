@@ -4,7 +4,7 @@
 param(
  [ValidatePattern('^COM[0-9]+$')][string]$Port='COM125',
  [string]$ReconnectPort='',
- [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump','DriverTrials','EnergyTrials','EnergyOffline','Idle52','Idle52Offline','Idle52Recover','GpuCacheCheck','P1273Diagnostics','BusTrace','ThermalTrace','ThermalTraceDump','ThermalGpuDump','OffBurstCapABA','OfflineABA','FunctionalGate','CombinedConnected')][string]$Scenario='Trace',
+ [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump','DriverTrials','EnergyTrials','EnergyOffline','Idle52','Idle52Offline','Idle52Recover','Audit53','Audit53Recover','Audit53Compare','Guard53','GpuCacheCheck','P1273Diagnostics','BusTrace','ThermalTrace','ThermalTraceDump','ThermalGpuDump','OffBurstCapABA','OfflineABA','FunctionalGate','CombinedConnected')][string]$Scenario='Trace',
  [ValidateRange(30,90)][int]$TraceSeconds=60,
  [ValidateRange(12,40)][int]$AggregateSeconds=20,
  [string]$SymbolMap='',
@@ -21,6 +21,10 @@ param(
  [switch]$P12752Idle,
  [string]$P12752PriorReport='',
  [uint64]$ExpectedStart=0,
+ [ValidateSet('STOCK120','STOCK60','BASE15','PSR','LITTLE949','ABOX','BT','WIFI','TICKER','BUS')][string]$Audit53Module='STOCK120',
+ [string]$Audit53Checkpoint='',
+ [string[]]$Audit53Reports=@(),
+ [string]$Audit53PriorReport='',
  [switch]$AllowOffCap,
  [switch]$AllowStrongerCap,
  [ValidateSet('ABOX','BT','WIFI','TICKER','LITTLE949','COMBINED5','COMBINED6')][string]$OfflineModule='LITTLE949',
@@ -42,7 +46,9 @@ $script:P127HostEnabled=$true
 $script:P1272HostEnabled=$true
 $script:P12752IdleAllowed=[bool]$P12752Idle
 $script:P12752IdleDirty=$false
-$script:P1273HostEnabled=([bool]$P1273Telemetry -or [bool]$P12752Idle -or $Scenario -in @('P1273Diagnostics','BusTrace','ThermalTrace','ThermalTraceDump','ThermalGpuDump','OffBurstCapABA','OfflineABA','FunctionalGate','CombinedConnected'))
+$script:P12753HostEnabled=$Scenario -in @('Audit53','Audit53Recover','Guard53')
+$script:P12753ArmAllowed=$Scenario -eq 'Audit53' -and [bool]$AllowOfflineTrial
+$script:P1273HostEnabled=([bool]$P1273Telemetry -or [bool]$P12752Idle -or $script:P12753HostEnabled -or $Scenario -in @('P1273Diagnostics','BusTrace','ThermalTrace','ThermalTraceDump','ThermalGpuDump','OffBurstCapABA','OfflineABA','FunctionalGate','CombinedConnected'))
 $script:P1273GateDirty=$false
 $script:P1273OfflineDirty=$false
 $script:P1273CapDirty=$false
@@ -149,7 +155,7 @@ function P125-ReadSnapshot([string]$Label,[switch]$CountsOnly){
             # P127 has independent USB cadence counters. Only exhausted
             # READ timeout is optional; refusal, transport and safety
             # failures still stop the suite. Never substitute zero.
-            if($Scenario -notin @('EnergyTrials','EnergyOffline','OfflineABA') -or $_.Exception.Message -ne "Missing echo and sysctl readback sysctl kern.hakios.$k"){throw}
+            if($Scenario -notin @('EnergyTrials','EnergyOffline','OfflineABA','Audit53','Audit53Recover') -or $_.Exception.Message -ne "Missing echo and sysctl readback sysctl kern.hakios.$k"){throw}
             $msg="P127 USB_OPTIONAL_MISSING $Label $k (no delta for this counter)"
             $script:P125Report.Add($msg);Life-Say $msg
         }
@@ -328,14 +334,16 @@ function P125-Offline([int]$WaitSeconds=$TraceSeconds) {
     # P12752 Idle52Offline is a kernel-timestamped measurement. A Windows
     # COM name is registry/enumeration metadata, not a USB link witness.
     # Other callers retain their old strict host enumeration behavior.
-    $kernelLinkProof=($P12752Idle -and $Scenario -in @('Idle52Offline','EnergyOffline'))
-    Life-Say 'P125 USB OFFLINE ARMED: disconnect USB now; do NOT wake screen'
+    $audit53=$Scenario -eq 'Audit53'
+    $kernelLinkProof=($P12752Idle -and $Scenario -in @('Idle52Offline','EnergyOffline')) -or $audit53
+    if($audit53){Life-Say 'P12753 OFFLINE ARMED: unplug USB now; if screen wakes, turn it OFF once, then leave device alone'}
+    else{Life-Say 'P125 USB OFFLINE ARMED: disconnect USB now; do NOT wake screen'}
     $until=(Life-Now).AddSeconds(20)
     while((P125-PortNames) -contains $source){
         if((Life-Now) -ge $until){throw 'P125 disconnect not observed; stop probe'}
         # Do not catch thermal, display or parser errors as link loss.
         Life-CheckSafety (Life-Now);P12-EarlyThermalGuard
-        if($script:LifeState -ne 'OFF'){throw 'P125 display woke before USB disconnect'}
+        if(-not $audit53 -and $script:LifeState -ne 'OFF'){throw 'P125 display woke before USB disconnect'}
         try{Life-Pump}
         catch{
             if(-not (P125-IsReadDisconnect $_.Exception)){throw}
@@ -343,7 +351,7 @@ function P125-Offline([int]$WaitSeconds=$TraceSeconds) {
             break
         }
         Life-CheckSafety (Life-Now);P12-EarlyThermalGuard
-        if($script:LifeState -ne 'OFF'){throw 'P125 display woke before USB disconnect'}
+        if(-not $audit53 -and $script:LifeState -ne 'OFF'){throw 'P125 display woke before USB disconnect'}
         Start-Sleep -Milliseconds 100
     }
     # Release the old handle immediately, before consulting Windows.
@@ -393,7 +401,7 @@ function P125-Offline([int]$WaitSeconds=$TraceSeconds) {
                 $script:LifePartial='';$script:LifeSynced=$false;$script:LifeFenceSent=$false;$script:LifeFenceEcho=$false
                 $script:LifeState='UNKNOWN';$script:LifeScene='UNKNOWN'
                 Life-SyncReadOnly
-                if($script:LifeState -ne 'OFF'){throw 'P125 reconnected while screen ON'}
+                if(-not $audit53 -and $script:LifeState -ne 'OFF'){throw 'P125 reconnected while screen ON'}
                 $script:Port=$target
                 return
             }catch{
@@ -1269,10 +1277,154 @@ function P12752-CheckOptions{
     if($Scenario -in @('EnergyOffline','Idle52Offline') -and ($EnergySeconds -ne 60 -or -not $AllowOfflineTrial)){throw 'P12752 offline requires explicit -AllowOfflineTrial and 60s'}
     if($Scenario -eq 'Idle52' -and $EnergySeconds -gt 90){throw 'P12752 baseline <=90s'}
 }
+function P12753-Power($S,$Rows,$FG,[int]$Seconds){
+    $hz=[double]$S.hz
+    $span=if($hz -gt 0){([double]$S.end-[double]$S.start)/$hz}else{0}
+    $ok=$hz -gt 0 -and $S.state -eq '3' -and $S.reason -eq '10' -and $S.mask -eq '0' -and $S.drops -eq '0' -and [uint64]$S.start -gt 0 -and $S.end -eq $S.until -and [uint64]$S.down -gt [uint64]$S.arm -and [uint64]$S.up -ge [uint64]$S.end -and ([double]$S.start-[double]$S.down) -ge 20*$hz -and [Math]::Abs($span-$Seconds) -lt 0.01
+    $t=@($Rows|Where-Object {$_.kind -eq '1'}|Sort-Object {[uint64]$_.at})
+    $driver=if([int]$S.policy){15}else{0}
+    if($t.Count -lt 2){$ok=$false}
+    else{
+        if(([double]$t[-1].at-[double]$t[0].at) -lt 0.8*$span*$hz){$ok=$false}
+        foreach($r in $t){
+            if($r.valid -ne '1' -or $r.mask -ne '0' -or $r.policy -ne $S.policy -or [int]$r.driver -ne $driver -or [uint64]$r.g3d -eq 4294967295 -or ([uint64]$r.g3d -band 15) -ne 0 -or [uint64]$r.at -lt [uint64]$S.start -or [uint64]$r.at -gt [uint64]$S.end){$ok=$false}
+        }
+        for($i=1;$i -lt $t.Count;$i++){if(([double]$t[$i].at-[double]$t[$i-1].at) -gt 4*$hz){$ok=$false}}
+    }
+    $w=@($FG|Where-Object {[uint64]$_.ticks -ge [uint64]$S.start -and [uint64]$_.ticks -le [uint64]$S.end}|Sort-Object {[uint64]$_.ticks})
+    $joules=0.0;$covered=0.0
+    foreach($v in $w){if([int]$v.external -ne 0 -or [int]$v.current_ua -ge 0 -or [uint64]$v.voltage_uv -lt 2500000 -or [uint64]$v.voltage_uv -gt 5000000){$ok=$false}}
+    for($i=1;$i -lt $w.Count;$i++){
+        $dt=if($hz -gt 0){([double]$w[$i].ticks-[double]$w[$i-1].ticks)/$hz}else{0}
+        if($dt -le 0 -or $dt -gt 15 -or ([uint64]$w[$i].seq-[uint64]$w[$i-1].seq) -ne 1){$ok=$false;continue}
+        $covered+=$dt
+        $joules-=([double]$w[$i].current_ua*[double]$w[$i].voltage_uv+[double]$w[$i-1].current_ua*[double]$w[$i-1].voltage_uv)*$dt/2e12
+    }
+    if($w.Count -lt 2 -or $covered -lt 0.8*$span -or $covered -le 0){$ok=$false}
+    return [pscustomobject]@{version=1;power_verified=[bool]$ok;window_s=$span;covered_s=$covered;samples=$w.Count;mean_discharge_w=if($ok){$joules/$covered}else{$null};discharge_wh=if($ok){$joules/3600}else{$null};start_big_mc=if($t.Count){[int]$t[0].big}else{0};start_lit_mc=if($t.Count){[int]$t[0].lit}else{0};mean_voltage_uv=if($w.Count){($w|Measure-Object voltage_uv -Average).Average}else{0}}
+}
+function P12753-Diff($A,$B,[string]$Key){return P125-Sub ([uint64]$B[$Key]) ([uint64]$A[$Key])}
+function P12753-ReadAudit([string]$Stem,$CP){
+    if((P12-Query 'p1273_boot_identity') -ne $CP.Nonce){throw 'P12753 recovery boot identity changed'}
+    $s=P125-Fields (P12-Query 'p12753_status')
+    if($s.state -ne '3' -or $s.request -ne [string]$CP.Request -or $s.arm -ne $CP.Arm -or [int]$s.count -gt 96){throw 'P12753 frozen identity missing; no new arm'}
+    $s|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath "$Stem.audit53-status.json"
+    $out="$Stem.audit53-power.json"
+    [pscustomobject]@{version=1;power_verified=$false;module=$CP.Module;reason=$s.reason;stop_mask=$s.mask;note='Frozen readback incomplete'}|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath $out
+    $rows=@()
+    for($i=0;$i -lt [int]$s.count;$i++){
+        [void](P12-Query 'p12753_select' "$i")
+        $r=P125-Fields (P12-Query 'p12753_page')
+        if($r.select -ne [string]$i -or $r.phase -ne $s.start){throw 'P12753 row identity changed'}
+        $rows+=[pscustomobject]$r
+        $rows|Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath "$Stem.audit53-rows.csv"
+    }
+    $again=P125-Fields (P12-Query 'p12753_status')
+    foreach($k in @('state','request','arm','start','end','count','reason','mask')){if($again[$k] -ne $s[$k]){throw 'P12753 frozen phase changed'}}
+    if([uint64]$s.start -eq 0 -or [uint64]$s.end -le [uint64]$s.start){throw "P12753 never entered measurement: reason=$($s.reason) mask=$($s.mask)"}
+    $t=P125-ReadSnapshot 'AUDIT53-POST' -CountsOnly
+    $e=P127-Read
+    $d=P126-Status
+    $ps=P125-Fields (P12-Query 'p1273_psr')
+    [pscustomobject]@{Timer=$t;Energy=$e;Driver=$d;PSR=$ps}|Export-Clixml -Depth 12 -LiteralPath "$Stem.audit53-post.clixml"
+    if($t.Status.start -ne $s.start -or $t.Status.end -ne $s.end){throw 'P12753 P125 interval differs (legacy stop or another probe); retained frozen evidence only'}
+    $counts=@()
+    for($cpu=0;$cpu -lt 8;$cpu++){
+        $c=[ordered]@{cpu=$cpu}
+        for($i=0;$i -lt $script:P125Counters.Count;$i++){$c[$script:P125Counters[$i]]=P125-Sub $t.Counts[$cpu][$i] $CP.BeforeTimer.Counts[$cpu][$i]}
+        $counts+=[pscustomobject]$c
+    }
+    $counts|Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath "$Stem.audit53-counters.csv"
+    P127-Delta $CP.BeforeEnergy $e $s 'AUDIT53' $Stem
+    $fg=@();if(Test-Path -LiteralPath "$Stem.AUDIT53.fg.csv"){$fg=@(Import-Csv -LiteralPath "$Stem.AUDIT53.fg.csv")}
+    $summary=P12753-Power $s $rows $fg $CP.Seconds
+    $a=$CP.BeforeEnergy;$m=$e.Metrics
+    $restore=$e.Status.mode -eq '0' -and $d.mode -eq '0' -and $ps.owner -ne '2' -and $ps.governor -eq '0' -and $ps.drained -eq '0' -and $ps.faults -eq $CP.BeforePSR.faults
+    foreach($pair in @(@('abox_stop','abox_resume'),@('psr_mask','psr_unmask'))){
+        if((P12753-Diff $a.Metrics $m $pair[0]) -ne (P12753-Diff $a.Metrics $m $pair[1])){$restore=$false}
+    }
+    foreach($group in @('BT','Wifi')){
+        if((P12753-Diff $a.$group $e.$group 'attach') -ne (P12753-Diff $a.$group $e.$group 'detach')){$restore=$false}
+    }
+    foreach($key in @('abox_fault','psr_fault')){if($m[$key] -ne $a.Metrics[$key]){$restore=$false}}
+    $hits=[ordered]@{}
+    foreach($key in @('haptic','wifi_worker','gnss','touch','touch_leeway','shub')){$hits[$key]=P12753-Diff $CP.Before126 $d $key}
+    $applied=switch($CP.Module){
+        'BASE15' {($hits.haptic+$hits.wifi_worker+$hits.gnss+$hits.touch) -gt 0}
+        'PSR' {(P12753-Diff $a.Metrics $m 'psr_mask') -gt 0}
+        'LITTLE949' {(P12753-Diff $a.Status $e.Status 'floor_hits') -gt 0 -and @($rows|Where-Object {$_.kind -eq '1' -and [uint64]$_.lmeas -ge 921 -and [uint64]$_.lmeas -le 977}).Count -ge 2 -and [uint64]$e.Status.little_cur -ge 1053000}
+        'ABOX' {(P12753-Diff $a.Metrics $m 'abox_stop') -gt 0 -and (P12753-Diff $a.Metrics $m 'abox_idle_wait') -gt 0}
+        'BT' {(P12753-Diff $a.BT $e.BT 'attach') -gt 0 -and $a.BT.fallback -eq $e.BT.fallback}
+        'WIFI' {(P12753-Diff $a.Wifi $e.Wifi 'attach') -gt 0 -and $a.Wifi.fallback -eq $e.Wifi.fallback}
+        'TICKER' {(P12753-Diff $a.Ticker $e.Ticker 'wait') -gt 0}
+        default {$true}
+    }
+    $names=@('MIF','INT','CPUCL0','CPUCL1','G3D','INTCAM','FSYS0','CAM','DISP','AUD','IVA','SCORE','CP')
+    $bus=@($rows|Where-Object {$_.kind -eq '2'}|ForEach-Object {
+        [pscustomobject]@{domain=$names[[int]$_.index];index=$_.index;at=$_.at;errno=$_.errno;raw=$_.raw;rate_khz=if($_.valid -eq '1'){$_.raw}else{$null};opp_table_uv=if($_.opp_valid -eq '1'){$_.opp_uv}else{$null};latency=$_.latency}
+    })
+    if($bus.Count){$bus|Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath "$Stem.audit53-bus.csv"}
+    $summary.power_verified=$summary.power_verified -and $restore -and $t.Status.reason -eq '10' -and ((P12-Query 'p1273_boot_identity') -eq $CP.Nonce)
+    if(-not $summary.power_verified){$summary.mean_discharge_w=$null;$summary.discharge_wh=$null}
+    $extra=[ordered]@{boot=$CP.Nonce;module=$CP.Module;request=$s.request;arm=$s.arm;start=$s.start;end=$s.end;policy=$s.policy;reason=$s.reason;stop_mask=$s.mask;applied=[bool]$applied;restored=[bool]$restore;driver_hits=$hits;bus_attempted=$bus.Count;bus_valid=@($bus|Where-Object {$null -ne $_.rate_khz}).Count;diagnostic=$CP.Module -eq 'BUS';note='Battery only, no extrapolation; driver deltas include setup/restore; sampled residency, not rail power'}
+    foreach($k in $extra.Keys){$summary|Add-Member -NotePropertyName $k -NotePropertyValue $extra[$k]}
+    $summary|ConvertTo-Json -Depth 6|Set-Content -Encoding UTF8 -LiteralPath $out
+    Life-Say "P12753 $($CP.Module) verified=$($summary.power_verified) applied=$applied restored=$restore mean_W=$($summary.mean_discharge_w)"
+    if(-not $summary.power_verified){throw 'P12753 incomplete or unsafe interval; retained data, not a power result'}
+}
+function P12753-RunAudit([string]$Stem){
+    if((P12-Query 'p12753_revision') -ne '1'){throw 'P12753 ABI mismatch'}
+    $g=P125-Fields (P12-Query 'p12753_guard')
+    if($g.enabled -ne '1' -or $g.at -eq '0'){throw 'P12753 boot guard not running'}
+    $s=P125-Fields (P12-Query 'p12753_status')
+    if($s.state -notin @('0','3') -or (P126-Status).mode -ne '0' -or (P127-Status).mode -ne '0'){throw 'P12753 previous lease or audit active'}
+    $codes=@{STOCK120=1;BASE15=2;PSR=3;LITTLE949=4;ABOX=5;BT=6;WIFI=7;TICKER=8;BUS=9;STOCK60=10}
+    $code=$codes[$Audit53Module];$seconds=if($code -in @(1,9)){120}else{60}
+    $cp=[pscustomobject]@{Nonce=(P12-Query 'p1273_boot_identity');Module=$Audit53Module;Request=$code;Seconds=$seconds;Arm='0';BeforeTimer=(P125-ReadSnapshot 'AUDIT53-PRE' -CountsOnly);BeforeEnergy=(P127-Read);Before126=(P126-Status);BeforePSR=(P125-Fields (P12-Query 'p1273_psr'))}
+    $cp|Export-Clixml -Depth 12 -LiteralPath "$Stem.audit53-checkpoint.clixml"
+    [void](P12-Query 'p12753_arm' "$code")
+    $s=P125-Fields (P12-Query 'p12753_status')
+    if($s.state -ne '1' -or $s.request -ne [string]$code -or $s.arm -eq '0'){throw 'P12753 arm not confirmed; bounded expiry'}
+    $cp.Arm=$s.arm
+    $cp|Export-Clixml -Depth 12 -LiteralPath "$Stem.audit53-checkpoint.clixml"
+    P125-Offline (95+$seconds)
+    P12753-ReadAudit $Stem $cp
+}
+function P12753-Compare($A,$B,$C){
+    foreach($r in @($A,$B,$C)){
+        if($r.version -ne 1 -or -not $r.power_verified -or -not $r.applied -or -not $r.restored -or $r.diagnostic -or $r.mean_discharge_w -le 0){throw 'P12753 comparison requires three verified applied restored non-diagnostic reports'}
+    }
+    $base=if($B.module -eq 'BASE15'){'STOCK60'}elseif($B.module -in @('PSR','LITTLE949','ABOX','BT','WIFI','TICKER')){'BASE15'}else{throw 'P12753 unsupported B module'}
+    if($A.module -ne $base -or $C.module -ne $base -or $A.boot -ne $B.boot -or $B.boot -ne $C.boot -or [uint64]$A.end -ge [uint64]$B.start -or [uint64]$B.end -ge [uint64]$C.start){throw 'P12753 wrong A/B/A order, baseline or boot'}
+    foreach($r in @($B,$C)){
+        if([Math]::Abs($r.window_s-$A.window_s) -gt 0.01 -or [Math]::Abs($r.start_big_mc-$A.start_big_mc) -gt 2000 -or [Math]::Abs($r.start_lit_mc-$A.start_lit_mc) -gt 2000 -or [Math]::Abs($r.mean_voltage_uv-$A.mean_voltage_uv) -gt 150000){throw 'P12753 unmatched thermal/voltage/window conditions'}
+    }
+    $baseW=($A.mean_discharge_w+$C.mean_discharge_w)/2
+    if([Math]::Abs($A.mean_discharge_w-$C.mean_discharge_w) -gt 0.1*$baseW){throw 'P12753 baseline drift >10%; repeat'}
+    [pscustomobject]@{module=$B.module;baseline=$base;A0_W=$A.mean_discharge_w;B_W=$B.mean_discharge_w;A1_W=$C.mean_discharge_w;delta_mW=1000*($baseW-$B.mean_discharge_w);note='Marginal measured difference, not additive or isolated rail power'}
+}
+function P12753-Options {
+    if($Scenario -eq 'Audit53'){
+        if(-not $AllowOfflineTrial -or $P12752Idle){throw 'Audit53 requires -AllowOfflineTrial, without -P12752Idle'}
+        if($Audit53Module -eq 'PSR'){
+            if(-not $Audit53PriorReport){throw 'PSR requires reviewed same-boot connected PSR A/B/A and wake/no-tear confirmation'}
+            $r=Get-Content -Raw -LiteralPath $Audit53PriorReport
+            if($r -notmatch '(?m)^P127 MODULE PSR ABA_COMPLETE applied=True\s*$' -or $r -notmatch '(?m)^STOP=COMPLETE\s*$'){throw 'PSR prior report lacks completed applied A/B/A'}
+        }
+    }
+    if($Scenario -eq 'Audit53Recover' -and -not $Audit53Checkpoint){throw 'Audit53Recover requires -Audit53Checkpoint'}
+}
 function P125-Run {
     P12752-CheckOptions
+    P12753-Options
+    if($Scenario -eq 'Audit53Compare'){
+        if($Audit53Reports.Count -ne 3){throw 'Provide A0,B,A1 JSON paths in order'}
+        $r=@($Audit53Reports|ForEach-Object {Get-Content -Raw -LiteralPath $_|ConvertFrom-Json})
+        P12753-Compare $r[0] $r[1] $r[2]|ConvertTo-Json
+        return
+    }
     if(-not $Execute){
-        Write-Host 'P12.5 preview: -Execute to measure OFF timer source. Trace=aggregate+detail; UsbCrossover=aggregate+A0/B/A1; OfflineOnly=B; AggregateOnly=aggregate; FrozenSummary=read-only counters; FrozenDump=read-only counters and pages on fixed firmware. No automatic cooling wait. DriverTrials=selective bounded A/B/A without page dumps; default COMBINED. ResumeSnapshot=FrozenDump checkpoint. EnergyTrials=guarded P12.7 A/B/A; EnergyOffline=connected/unplug/reconnect aggregate+WFI+FG. P1273Diagnostics=read-only floor/bus/WFIv2; BusTrace=90s baseline-only ACPM observation.'
+        Write-Host 'P12.5 preview: -Execute to measure OFF timer source. Trace=aggregate+detail; UsbCrossover=aggregate+A0/B/A1; OfflineOnly=B; AggregateOnly=aggregate; FrozenSummary=read-only counters; FrozenDump=read-only counters and pages on fixed firmware. No automatic cooling wait. DriverTrials=selective bounded A/B/A without page dumps; default COMBINED. ResumeSnapshot=FrozenDump checkpoint. EnergyTrials=guarded P12.7 A/B/A; EnergyOffline=connected/unplug/reconnect aggregate+WFI+FG. P1273Diagnostics=read-only floor/bus/WFIv2; BusTrace=90s baseline-only ACPM observation. Guard53=read-only boot thermal guard; Audit53=delayed battery window; Audit53Recover=frozen checkpoint; Audit53Compare=local A/B/A.'
         return
     }
     if($env:OS -ne 'Windows_NT'){throw 'Windows serial runner only'}
@@ -1286,6 +1438,16 @@ function P125-Run {
         $script:LifeRaw=[IO.FileStream]::new($raw,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
         P125-Open $Port
         Life-SyncReadOnly
+        if($Scenario -eq 'Guard53'){
+            if((P12-Query 'p12753_revision') -ne '1'){throw 'P12753 ABI mismatch'}
+            foreach($key in @('p12753_guard','p12753_status','p1273_boot_identity')){$v=P12-Query $key;Add-Content -LiteralPath "$stem.guard53.txt" -Encoding UTF8 -Value "$key $v";Write-Host "$key $v"}
+            return
+        }
+        if($Scenario -eq 'Audit53Recover'){
+            if((P12-Query 'p12753_revision') -ne '1'){throw 'P12753 ABI mismatch'}
+            P12753-ReadAudit $stem (Import-Clixml -LiteralPath $Audit53Checkpoint)
+            return
+        }
         $s=P125-Status
         if($s.armed -ne '0'){throw 'P125 previous probe still armed; bounded expiry required'}
         if($P12752Idle){
@@ -1333,6 +1495,10 @@ function P125-Run {
         P125-PumpOff 25
         $g=P12-Query 'g3d_lab_stats'
         if($g -notmatch ' domain=0 pll=0 ' -or $g -notmatch ' fault=0 '){throw 'P125 independent GPU OFF evidence missing'}
+        if($Scenario -eq 'Audit53'){
+            P12753-RunAudit $stem
+            return
+        }
         if($Scenario -eq 'OffBurstCapABA'){
             P1273-CapABA $stem
             return

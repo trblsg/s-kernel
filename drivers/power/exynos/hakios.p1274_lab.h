@@ -92,7 +92,7 @@ static bool p1274_boot_enabled(void) {
 }
 static bool p1274_conflict(void) {
     unsigned cap=__atomic_load_n(&p1273_cap_state,__ATOMIC_ACQUIRE);
-    return !gov_running || gov_policy!=2 || clusters[0].online!=4 || clusters[1].online!=4 ||
+    return __atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE) || !gov_running || gov_policy!=2 || clusters[0].online!=4 || clusters[1].online!=4 ||
         hakios_cpu_exit_mask || __atomic_load_n(&p12_cpu_mode,__ATOMIC_ACQUIRE) ||
         __atomic_load_n(&p124_cpu_until,__ATOMIC_ACQUIRE) ||
         __atomic_load_n(&p8_big_cap_khz,__ATOMIC_ACQUIRE) ||

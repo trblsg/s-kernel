@@ -87,6 +87,7 @@ power/exynos bsd/dev/hakios.p1274_policy.h
 power/exynos bsd/dev/hakios.p1274_lab.h
 power/exynos bsd/dev/hakios.p12751.h
 power/exynos bsd/dev/hakios.p12752.h
+power/exynos bsd/dev/hakios.p12753.h
 power/exynos bsd/dev/hakios.scion_gov.c
 power/exynos bsd/dev/hakios.exynos_tmu.c
 power/exynos bsd/dev/hakios.exynos_tmu.h

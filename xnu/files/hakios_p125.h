@@ -43,6 +43,9 @@ extern uint64_t hakios_p125_thread_map_drops;
 extern uint64_t hakios_p125_intervals[P125_CPUS][5];
 extern uint64_t hakios_p125_lease, hakios_p125_start, hakios_p125_end;
 extern uint32_t hakios_p125_stop_reason;
+/* P12753 passive audit owns observation separately from P127 policy. */
+extern uint32_t hakios_p12753_busy,hakios_p12753_observe;
+extern uint64_t hakios_p12753_fg_link,hakios_p12753_usb_down,hakios_p12753_usb_up,hakios_p12753_display_on;
 extern uint64_t hakios_p125_usb_down_at,hakios_p125_usb_up_at;
 /* Fixed OFFLINE window: active only for the new opt-in mode3 path. */
 extern uint64_t hakios_p1273_offline_duration,hakios_p1273_offline_deadline;
