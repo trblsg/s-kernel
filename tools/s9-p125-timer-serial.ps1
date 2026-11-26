@@ -4,7 +4,7 @@
 param(
  [ValidatePattern('^COM[0-9]+$')][string]$Port='COM125',
  [string]$ReconnectPort='',
- [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump','DriverTrials','EnergyTrials','EnergyOffline','Idle52','Idle52Offline','GpuCacheCheck','P1273Diagnostics','BusTrace','ThermalTrace','ThermalTraceDump','ThermalGpuDump','OffBurstCapABA','OfflineABA','FunctionalGate','CombinedConnected')][string]$Scenario='Trace',
+ [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump','DriverTrials','EnergyTrials','EnergyOffline','Idle52','Idle52Offline','Idle52Recover','GpuCacheCheck','P1273Diagnostics','BusTrace','ThermalTrace','ThermalTraceDump','ThermalGpuDump','OffBurstCapABA','OfflineABA','FunctionalGate','CombinedConnected')][string]$Scenario='Trace',
  [ValidateRange(30,90)][int]$TraceSeconds=60,
  [ValidateRange(12,40)][int]$AggregateSeconds=20,
  [string]$SymbolMap='',
@@ -20,6 +20,7 @@ param(
  [switch]$P1273Telemetry,
  [switch]$P12752Idle,
  [string]$P12752PriorReport='',
+ [uint64]$ExpectedStart=0,
  [switch]$AllowOffCap,
  [switch]$AllowStrongerCap,
  [ValidateSet('ABOX','BT','WIFI','TICKER','LITTLE949','COMBINED5','COMBINED6')][string]$OfflineModule='LITTLE949',
@@ -433,7 +434,7 @@ function P125-Offline([int]$WaitSeconds=$TraceSeconds) {
     Life-SyncReadOnly
     if($script:LifeState -ne 'OFF'){throw 'P125 reconnected while screen ON'}
 }
-function P12752-ReadIdle([string]$Stem,[string]$Label,$status){
+function P12752-ReadIdle([string]$Stem,[string]$Label,$status,[switch]$FrozenOnly){
     $line=P12-Query 'p12752_idle_info';$info=P125-Fields $line
     Set-Content -Encoding UTF8 -LiteralPath "$Stem.$Label.idle-info.txt" -Value $line
     if($info.phase -ne $status.start -or [int]$info.count -gt 96 -or [int]$info.bus -gt 13){throw 'P12752 idle phase identity/coverage mismatch'}
@@ -454,12 +455,60 @@ function P12752-ReadIdle([string]$Stem,[string]$Label,$status){
     if($valid -and ($thermal[-1].seconds-$thermal[0].seconds) -lt 0.8*$duration){$valid=$false}
     $summary=[pscustomobject]@{label=$Label;phase=$info.phase;count=$info.count;drops=$info.drops;reason=$info.reason;timer_reason=$status.reason;thermal_valid=$valid;bus_rows=$bus.Count;bus_valid=@($bus|Where-Object valid -eq '1').Count;peak_big_mc=if($thermal.Count){($thermal|Measure-Object big_mc -Maximum).Maximum}else{$null};peak_lit_mc=if($thermal.Count){($thermal|Measure-Object little_mc -Maximum).Maximum}else{$null}}
     $summary|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath "$Stem.$Label.idle-summary.json"
-    [void](P12-Query 'p12752_idle_mode' '0' -Cleanup)
-    $script:P12752IdleDirty=$false
+    if(-not $FrozenOnly){
+        [void](P12-Query 'p12752_idle_mode' '0' -Cleanup)
+        $script:P12752IdleDirty=$false
+    }
     $script:P125Report.Add("P12752 IDLE $Label thermal_valid=$valid rows=$($rows.Count) bus=$($bus.Count) cutoff=$($info.reason)")
     # Don't qualify a partial window, but preserve all evidence before
     # caller decides whether to stop the A/B/A.
     return $summary
+}
+function P12752-RecoverFrozen([string]$Stem,[uint64]$Start){
+    # No new arm, policy writes or screen requirements. Ordinary host
+    # thermal checks remain in force. Only the bounded idle cursor writes.
+    $script:P12Phase='P12752-RECOVER'
+    $s=P125-Status
+    if(!$Start -or [uint64]$s.start -ne $Start -or [uint64]$s.end -le $Start -or
+       $s.armed -ne '0' -or $s.active -ne '0'){throw 'P12752 recovery requires the exact stopped phase; no new trial'}
+    $s|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath "$Stem.RECOVERED.timer.json"
+    if((P127-Status).mode -ne '0' -or (P126-Status).mode -ne '0' -or
+       (P12-Query 'p12752_idle_mode') -ne '0'){throw 'P12752 recovery requires stopped policy and recorder'}
+    $info=P125-Fields (P12-Query 'p12752_idle_info')
+    if($info.mode -ne '0' -or [uint64]$info.phase -ne $Start){throw 'P12752 recovery recorder phase mismatch'}
+    [void](P12752-ReadIdle $Stem 'RECOVERED' $s -FrozenOnly)
+    # FG ring is time-keyed; retain only actual in-window samples.
+    # No inference of complete offline power from a cutoff.
+    $seq=P125-Fields (P12-Query 'p127_fg_seq')
+    $samples=@()
+    for($page=0;$page -lt 16;$page++){
+        $line=P12-Query "p127_fg$page"
+        Add-Content -Encoding UTF8 -LiteralPath "$Stem.RECOVERED.fg-pages.txt" -Value $line
+        foreach($m in [regex]::Matches($line,'(?:^| )r=(\d+)/(\d+)/(-?\d+)/(-?\d+)/(\d+)/(\d+)/(\d+)/(\d+)')){
+            $ticks=[uint64]$m.Groups[2].Value
+            if($ticks -lt $Start -or $ticks -gt [uint64]$s.end){continue}
+            $ua=[int]$m.Groups[3].Value;$uv=[uint32]$m.Groups[5].Value
+            $samples+=[pscustomobject]@{seq=[uint64]$m.Groups[1].Value;ticks=$ticks;seconds=([double]$ticks-$Start)/[double]$s.hz;current_ua=$ua;avg_ua=[int]$m.Groups[4].Value;voltage_uv=$uv;external=[int]$m.Groups[6].Value;charger_state=[int]$m.Groups[7].Value;qh_raw=[uint32]$m.Groups[8].Value;net_battery_w=[double]$ua*$uv/1e12}
+        }
+        if($samples.Count){$samples|Sort-Object seq|Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath "$Stem.RECOVERED.fg.csv"}
+    }
+    $last=P125-Fields (P12-Query 'p127_fg_seq')
+    if($last.seq -ne $seq.seq){throw 'P12752 recovery FG ring changed'}
+    [pscustomobject]@{verified=$false;reason=$s.reason;phase=$s.start;sample_count=$samples.Count;note='Recovery only; no complete power qualification'}|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath "$Stem.RECOVERED.power.json"
+    # Raw cumulative counters require original before snapshot for deltas.
+    for($cpu=0;$cpu -lt 8;$cpu++){
+        foreach($key in @("p125_counts$cpu","p125_coverage$cpu","p1273_wfi$cpu")){
+            $line=P12-Query $key
+            Add-Content -Encoding UTF8 -LiteralPath "$Stem.RECOVERED.cumulative.txt" -Value "$key=$line"
+        }
+    }
+    $after=P125-Status
+    foreach($key in @('start','end','reason','anchor','hz','down','up')){
+        if($s[$key] -ne $after[$key]){throw 'P12752 recovery phase changed; partial evidence only'}
+    }
+    if($after.armed -ne '0' -or $after.active -ne '0'){throw 'P12752 recovery no longer frozen'}
+    $script:P125Report.Add("P12752 RECOVERY_ONLY phase=$Start reason=$($s.reason) fg_samples=$($samples.Count) cumulative_only=1 power_verified=False")
+    Life-Say 'P12752 frozen evidence recovered; no new trial or power qualification'
 }
 function P125-RejoinMatches($Armed,$Rejoined){
     return ($Rejoined.anchor -eq $Armed.anchor -and $Rejoined.hz -eq $Armed.hz -and
@@ -505,6 +554,15 @@ function P125-Phase([string]$Label,[int]$Mode,[int]$Seconds,[string]$Stem,$Befor
     }else{P125-PumpOff $Seconds}
     [void](P12-Query 'p125_mode' '0' -Cleanup)
     $script:P125Dirty=$false
+    if($P12752Idle -and $Mode -eq 3 -and $rejoined.reason -ne '0'){
+        # Already frozen before reconnect; don't demand another OFF
+        # window. Preserve cutoff data if cool, then stop the suite.
+        [void](P12-Query 'p127_mode' '0' -Cleanup)
+        $script:P127Dirty=$false
+        P12752-RecoverFrozen $Stem ([uint64]$rejoined.start)
+        $script:P12752IdleDirty=$false
+        throw "P12752 offline cutoff reason=$($rejoined.reason); frozen evidence retained"
+    }
     P125-PumpOff 2
     $after=P125-ReadSnapshot "$Label-END" -CountsOnly:$CountsOnly
     $idle=$null
@@ -1194,8 +1252,9 @@ function P1273-CombinedConnected([string]$Stem){
     $script:P125Report.Add("P1273 combined $mask A/B/A restored; actual module application must be verified from B counters, connected battery not energy evidence")
 }
 function P12752-CheckOptions{
-    if(-not $P12752Idle){if($Scenario -in @('Idle52','Idle52Offline')){throw 'Idle52 needs -P12752Idle'};return}
-    if($Scenario -notin @('Idle52','Idle52Offline','BusTrace','EnergyTrials','EnergyOffline','DriverTrials')){throw 'P12752Idle supports only independent idle scenarios'}
+    if(-not $P12752Idle){if($Scenario -in @('Idle52','Idle52Offline','Idle52Recover')){throw 'Idle52 needs -P12752Idle'};return}
+    if($Scenario -eq 'Idle52Recover' -and -not $ExpectedStart){throw 'Idle52Recover requires -ExpectedStart from original P125 REJOIN'}
+    if($Scenario -notin @('Idle52','Idle52Offline','Idle52Recover','BusTrace','EnergyTrials','EnergyOffline','DriverTrials')){throw 'P12752Idle supports only independent idle scenarios'}
     if($Scenario -eq 'EnergyTrials'){
         $m=$EnergyModules.Trim().ToUpperInvariant()
         if($m -notin @('PSR','USB','ABOX','BT','WIFI','TICKER','LITTLE949','LITTLE832','LITTLE715','LITTLE598') -or $EnergySeconds -gt 60){throw 'P12752 requires one idle module, <=60s'}
@@ -1235,6 +1294,10 @@ function P125-Run {
             if($latch -notin @(3,7)){throw 'P12752 idle requires OptEarly boot latch'}
             $elig=P125-Fields (P12-Query 'p12752_eligibility')
             if($elig.enabled -ne '1' -or $elig.conflict -ne '0'){throw 'P12752 idle conflict/ineligible'}
+        }
+        if($Scenario -eq 'Idle52Recover'){
+            P12752-RecoverFrozen $stem $ExpectedStart
+            return
         }
         P125-Symbols $SymbolMap $s.anchor
         if($ResumeSnapshot -and $Scenario -ne 'FrozenDump'){throw 'ResumeSnapshot requires FrozenDump'}

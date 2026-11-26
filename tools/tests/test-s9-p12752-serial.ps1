@@ -41,6 +41,40 @@ try{
  $status.reason='2';$out=P12752-ReadIdle (Join-Path $dir 'run2') 'A0' $status
  Check (-not $out.thermal_valid) 'thermal cutoff accepted'
  $status.start='2000';Refuse {P12752-ReadIdle (Join-Path $dir 'run3') 'A0' $status} 'identity'
+ # Frozen recovery after actual thermal cutoff + screen wake: no arm,
+ # zero policy writes, only bounded row selector and reads.
+ $script:frozen52=@{start='1000';end='11000';hz='1000';reason='2';display_on='0';armed='0';active='0';anchor='abcd';down='1000';up='0'}
+ $script:recoveryWrites=0
+ function P125-Status{return $script:frozen52}
+ function P127-Status{return @{mode='0'}}
+ function P126-Status{return @{mode='0'}}
+ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
+    if($Cleanup -or ($Value -ne '' -and $Name -ne 'p12752_idle_select')){throw 'unexpected recovery policy write'}
+    switch -Regex ($Name){
+     '^p12752_idle_mode$'{return '0'}
+     '^p12752_idle_info$'{return 'version=1 mode=0 phase=1000 count=6 drops=0 reason=2 bus=0'}
+     '^p12752_idle_select$'{$script:sel52=[int]$Value;$script:recoveryWrites++;return $Value}
+     '^p12752_idle_page$'{return ($row -replace 'select=0',("select="+$script:sel52) -replace 'at=1000',("at="+(1000+2000*$script:sel52)))}
+     '^p127_fg_seq$'{return 'version=1 seq=3 slots=64'}
+     '^p127_fg0$'{return 'version=1 page=0 r=1/500/-300000/-300000/4000000/0/0/100 r=2/3000/-300000/-300000/4000000/0/0/99 r=3/12000/50000/50000/4000000/1/1/99'}
+     '^p127_fg(\d+)$'{return "version=1 page=$($Matches[1])"}
+     '^(p125_counts|p125_coverage|p1273_wfi)[0-7]$'{return 'mock cumulative'}
+     default{throw "unexpected recovery $Name"}
+    }
+ }
+ $script:LifeState='ON'
+ $rec=Join-Path $dir 'recover'
+ Refuse {P12752-RecoverFrozen $rec 999} 'exact stopped phase'
+ Check ($script:recoveryWrites -eq 0) 'wrong phase wrote cursor'
+ P12752-RecoverFrozen $rec 1000
+ $recoveredPower=Get-Content -Raw -LiteralPath "$rec.RECOVERED.power.json"|ConvertFrom-Json
+ $fg=@(Import-Csv -LiteralPath "$rec.RECOVERED.fg.csv")
+ Check ($script:recoveryWrites -eq 6 -and -not $recoveredPower.verified -and $recoveredPower.sample_count -eq 1 -and $fg[0].seq -eq '2') 'frozen cutoff recovery or FG filter failed'
+ Check ((Get-Content -LiteralPath "$rec.RECOVERED.cumulative.txt").Count -eq 24) 'missing cumulative counters'
+ $script:frozen52.armed='3';Refuse {P12752-RecoverFrozen (Join-Path $dir 'armed') 1000} 'exact stopped phase'
+ $script:frozen52.armed='0'
+ $script:LifeState='OFF'
+ Write-Host 'P12752 frozen recovery: reason2, screen ON, exact start, no policy writes, in-window FG only, no power qualification PASS'
  Set-Content -LiteralPath (Join-Path $dir 'Capture-test.log') -Value @('P12752 sample at=300000 pid=42 name=PosterBoard tid=12 usage=300 pc=ImageIO+0x123 lr=CoreGraphics+0x55','P12752 sample_done pid=42 looks=1 kept=1 failures=0','P12752 layout at=300001 n=32 format=80','P12752 mem at=300000 pid=42 code=1 rss=100','launchd spawn PosterBoard')
  $raw=P12752-RawEvidence $dir 1000
  Check ($raw.samples -eq 1 -and $raw.processes[0] -eq 'PosterBoard' -and $raw.layout_lines -eq 1 -and $raw.memory_lines -eq 1 -and $raw.lifecycle_lines -eq 1) 'raw evidence parser'
