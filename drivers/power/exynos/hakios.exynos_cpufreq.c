@@ -1926,6 +1926,7 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 		}
 		measure(now - then > 0 ? now - then : 1);
 		p1274_tick(now); /* bounded direct TMU, recorder and lower-only OFF policy */
+		p12752_idle_tick(now); /* explicit independent quiet-window evidence */
 		if(!__atomic_load_n(&hakios_p1274_trace_late,__ATOMIC_ACQUIRE))
 			p1273_trace_tick(now); /* existing legacy governor window */
 		p1273_cap_tick(now); /* lower-only, bounded, explicit OFF experiment */

@@ -62,6 +62,7 @@
 #include "../hakios_metal_shown.h"
 #include "../p1274_user.h"
 #include "p12751_layout_abi.h"
+#include "../p12752_sampler.h"
 
 #if __has_feature(objc_arc)
 #error "HakiosMetalVK.mm keeps its device by hand: build it without ARC"
@@ -326,7 +327,21 @@ static id p1275_layout_shim(id self,SEL sel,MTLTextureDescriptor *d,BOOL backed)
             if(p12751_user_boot())say("P12751 layout early_nil=%u backed=%u",n,(unsigned)backed);
             (void)p1274_emit(6,100,n,(uint64_t)backed,0,0,0,0);
         }
-        pthread_mutex_unlock(&gLock);return nil;
+        pthread_mutex_unlock(&gLock);
+        /* Natural selector evidence: at most 12 descriptors/process,
+         * only when the independent busy-window probe is armed. */
+        static unsigned sampled52=0;
+        if(p12752_user_boot() && (n==1 || n%32==0) && d &&
+           __atomic_load_n(&sampled52,__ATOMIC_RELAXED)<12 && p12752_window() &&
+           __atomic_fetch_add(&sampled52,1,__ATOMIC_RELAXED)<12){
+            char caller[384];callers(caller,sizeof(caller));
+            say("P12752 layout at=%llu n=%u format=%lu type=%lu w=%lu h=%lu depth=%lu mip=%lu array=%lu samples=%lu storage=%lu usage=%lu backed=%u callers=%s",
+                (unsigned long long)mach_absolute_time(),n,(unsigned long)d.pixelFormat,(unsigned long)d.textureType,
+                (unsigned long)d.width,(unsigned long)d.height,(unsigned long)d.depth,(unsigned long)d.mipmapLevelCount,
+                (unsigned long)d.arrayLength,(unsigned long)d.sampleCount,(unsigned long)d.storageMode,(unsigned long)d.usage,
+                (unsigned)backed,caller);
+        }
+        return nil;
     }
     pthread_mutex_unlock(&gLock);
     openDevice(sel);
@@ -408,6 +423,12 @@ static void p12751_install_alignment_observer(void){
     if(!imp || imp==(IMP)_objc_msgForward || imp==(IMP)p12751_alignment_observer ||
        method_getNumberOfArguments(m)!=2 || strcmp(type,@encode(NSUInteger))){
         say("P12751 alignment ABI refused encoding=%s",encoding?:"-");return;
+    }
+    if(p12752_user_boot()){
+        Method bm=class_getInstanceMethod(gBase,sel);
+        IMP base=bm?method_getImplementation(bm):NULL;
+        char where[128];p12752_addr(where,sizeof(where),(uintptr_t)imp);
+        say("P12752 alignment origin=%s inherited_same=%u encoding=%s",where,base==imp?1:0,encoding?:"-");
     }
     p12751_alignment_original=imp;
     class_replaceMethod(gClass,sel,(IMP)p12751_alignment_observer,encoding);
@@ -666,6 +687,7 @@ registerDevice(void)
 	forwardBaseMethods();
 	if(p1275_user_boot()){@autoreleasepool {p1275_install_layout_shim();}}
 	objc_registerClassPair(gClass);
+	p12752_start_sampler(0);
 	if(p1275_user_boot())say("P1275 typed layout shim ABI=%u",p1275_layout_installed?1:0);
 	say("the class HakiosMetalDevice is registered (Metal on Vulkan, opened at first use; %u of _MTLDevice's methods forwarded "
 	    "until then)", gForwardedCount);

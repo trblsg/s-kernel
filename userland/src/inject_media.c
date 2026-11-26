@@ -53,6 +53,7 @@
 #include <signal.h>
 #include <sys/ucontext.h>
 #include <unistd.h>
+#include "p12752_sampler.h"
 
 static void
 say(const char *format, ...)
@@ -965,6 +966,7 @@ hakios_media_init(void)
 	}
 	slide = (uintptr_t)_dyld_get_shared_cache_range(&length) - CACHE_BASE;
 	crash_watch();
+	p12752_start_sampler(1);
 	metal_left_alone = boot_arg("mediamtl=1");
 	if (metal_left_alone) {
 		say("hakios: mediaserverd: mediamtl=1: the capture stack may have the Metal device (it "

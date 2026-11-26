@@ -43,6 +43,8 @@ $script:P1272HostEnabled=$false
 $script:P1273HostEnabled=$false
 $script:P1274HostEnabled=$false
 $script:P1274ProfileAllowed=$false
+$script:P12752IdleAllowed=$false
+$script:P12752ProfileAllowed=$false
 $script:P12751NextAllowed=$false
 $script:P1273GateAllowed=$false
 $script:P1273CombinedAllowed=$false
@@ -91,7 +93,7 @@ function P12-ReplyShape([string]$Name,[string]$Reply,[bool]$Mixed){
         p127_ticker='wait due wake'
         p127_fg_seq='seq slots'
     }
-    if($Name -match '^(?:p125_(?:mode|select)|p126_mode|p127_mode|p1272_probe_request|p1273_trace_(?:mode|select)|p1273_gpu_select|p1273_gov_select|p1273_cap_mode|p1273_offline_s|p12741_profile|p1275_profile|p1274_select|p12751_stage_select|p1273_gate_(?:begin|review|ack)|p6_usb_(?:ticks|connected_ticks)|p69_usb_disconnected_ticks)$'){
+    if($Name -match '^(?:p125_(?:mode|select)|p126_mode|p127_mode|p1272_probe_request|p1273_trace_(?:mode|select)|p1273_gpu_select|p1273_gov_select|p1273_cap_mode|p1273_offline_s|p12741_profile|p1275_profile|p12752_profile|p12752_idle_mode|p12752_idle_select|p1274_select|p12751_stage_select|p1273_gate_(?:begin|review|ack)|p6_usb_(?:ticks|connected_ticks)|p69_usb_disconnected_ticks)$'){
         $n=[uint64]0
         return ($Reply -cmatch "^$dec$" -and [uint64]::TryParse($Reply,[ref]$n))
     }
@@ -121,6 +123,10 @@ function P12-ReplyShape([string]$Name,[string]$Reply,[bool]$Mixed){
         '^p12741_revision$' {return ($Reply -ceq '2')}
         '^p1275_revision$' {return ($Reply -ceq '1')}
         '^p12751_revision$' {return ($Reply -ceq '1')}
+        '^p12752_revision$' {return ($Reply -ceq '1')}
+        '^p12752_eligibility$' {return ($Reply -cmatch "^version=1 enabled=[01] conflict=[01] ocp=[01] ufs_safe=[01] ufs_busy=[01] quiet=[01] thermal=$dec cores=[0-4] online=$dec exit=$hex$")}
+        '^p12752_idle_info$' {return ($Reply -cmatch "^version=1 mode=[012] phase=$dec count=$dec drops=$dec reason=$dec bus=$dec$")}
+        '^p12752_idle_page$' {return ($Reply -cmatch "^version=1 select=$dec phase=$dec at=$dec kind=[12] index=$dec raw=$dec valid=[01] errno=-?$dec latency=$dec big=-?$dec lit=-?$dec gpu=-?$dec bat=-?$dec age=$dec bs=$dec ls=$dec bkhz=$dec lkhz=$dec bmeas=$dec lmeas=$dec policy=$dec driver=$dec refresh=$dec$")}
         '^p12751_boot_latch$' {return ($Reply -cmatch '^(?:-1|[0-7])$')}
         '^p12751_(?:next|ack)$' {return ($Reply -cmatch '^(?:-1|[0-3])$')}
         '^p12751_stage_info$' {return ($Reply -cmatch "^version=1 sealed=[01] count=$dec done=$dec drops=$dec$")}
@@ -257,6 +263,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
     if($script:P1274HostEnabled){
         $allowed+=@('p12741_profile','p1274_status','p1274_restore','p1274_select','p1274_page','p1274_metal_log_mode','p12741_revision','p12741_info','p12741_guard','p1275_profile','p1275_revision','p1275_selected','p1275_mode','p1275_focus','p1275_load_state','p12751_revision','p12751_boot_latch','p12751_next','p12751_ack','p12751_stage_info','p12751_stage_focus','p12751_stage_select','p12751_stage_page')
     }
+    if($script:P12752IdleAllowed -or $script:P1274HostEnabled){$allowed+=@('p12751_boot_latch','p12752_revision','p12752_eligibility','p12752_idle_mode','p12752_idle_info','p12752_idle_select','p12752_idle_page','p12752_profile')}
     if($Name -notin $allowed){throw "P12 sysctl disallowed $Name"}
     if($script:P124HostEnabled -and $Name -eq 'p1231_hash_mode' -and $Value -eq '1'){throw 'P12.4 rejects scalar thermal trial'}
     if($Value -ne '' -and -not (
@@ -268,6 +275,9 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
         ($script:P123HostEnabled -and $script:P123ClockAllowed -and $Name -eq 'hi_cmd' -and $Value -eq '252') -or
         ($script:P1272HostEnabled -and $Name -eq 'p1272_probe_request' -and $Value -in @('0','1')) -or
         ($script:P1274HostEnabled -and $Name -eq 'p12741_profile' -and $Value -eq '0') -or
+        ($script:P1274HostEnabled -and $script:P12752ProfileAllowed -and $Name -eq 'p12752_profile' -and $Value -cmatch '^[1-4]$') -or
+        ($script:P12752IdleAllowed -and $Name -eq 'p12752_idle_mode' -and $Value -cmatch '^[0-2]$') -or
+        ($script:P12752IdleAllowed -and $Name -eq 'p12752_idle_select' -and $Value -cmatch '^\d{1,2}$' -and [int]$Value -lt 96) -or
         ($script:P1274HostEnabled -and $script:P1274ProfileAllowed -and $Name -eq 'p1275_profile' -and $Value -match '^(?:[1-9]|1[0-6])$') -or
         ($script:P1274HostEnabled -and $script:P1274ProfileAllowed -and $Name -eq 'p12741_profile' -and $Value -match '^[1-9]$') -or
         ($script:P1274HostEnabled -and $Name -eq 'p1274_select' -and $Value -match '^\d{1,5}$' -and [int]$Value -le 14279) -or

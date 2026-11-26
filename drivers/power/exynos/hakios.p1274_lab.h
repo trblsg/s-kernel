@@ -21,6 +21,7 @@ static uint32_t p1274_fast_limit,p12741_lit_limit,p12741_guard_armed,p1274_trigg
 static uint32_t p12741_peak_select;
 static uint32_t p1275_selected,p1275_load_level;
 static int p12751_latched=-1;
+static unsigned p12752_selected;
 static uint64_t p1275_load_since,p1275_load_quiet;
 static int32_t p12741_peak_mc=-273000,p12741_lit_mc=-273000;
 static int32_t p12741_guard_big_peak=-273000,p12741_guard_lit_peak=-273000;
@@ -108,8 +109,18 @@ static unsigned p1274_active_profile(uint64_t now) {
     return __atomic_load_n(&p1274_profile_id,__ATOMIC_ACQUIRE);
 }
 static bool p1275_boot_enabled(void){int v=0;return PE_parse_boot_argn("p1275",&v,sizeof(v)) && v==1;}
+static bool p12752_boot_enabled(void){
+    static int cached=-1;int v=__atomic_load_n(&cached,__ATOMIC_ACQUIRE);
+    if(v<0){int flag=0;v=p1274_boot_enabled() && p1275_boot_enabled() &&
+        PE_parse_boot_argn("p12752",&flag,sizeof(flag)) && flag==1;
+        int base=0;v=v && PE_parse_boot_argn("p12751",&base,sizeof(base)) && base==1;
+        __atomic_store_n(&cached,v,__ATOMIC_RELEASE);}
+    return v!=0;
+}
 static unsigned p1275_mode_now(uint64_t now){
-    return p1274_active_profile(now)==P1274_LOG2?__atomic_load_n(&p1275_selected,__ATOMIC_ACQUIRE):0;
+    unsigned p=p1274_active_profile(now);
+    return (p==P1274_LOG2 || (p && __atomic_load_n(&p12752_selected,__ATOMIC_ACQUIRE)))?
+        __atomic_load_n(&p1275_selected,__ATOMIC_ACQUIRE):0;
 }
 static bool p1275_load_enabled(uint64_t now){
     unsigned mode=__atomic_load_n(&p1275_selected,__ATOMIC_ACQUIRE);
@@ -140,7 +151,12 @@ static uint32_t p1274_ceiling(struct cluster *c,uint32_t stock) {
 }
 static uint32_t p1274_cores(uint32_t stock,uint64_t now) {
     unsigned p=p1274_active_profile(now);
-    if(p>=P1274_REC2 && !p1274_conflict() && hakios_p123_input_quiet(now))return s9_p1274_cores(p);
+    if(p>=P1274_REC2 && !p1274_conflict() && hakios_p123_input_quiet(now)){
+        if(__atomic_load_n(&p12752_selected,__ATOMIC_ACQUIRE) &&
+           (ocp_on || !hakios_p124_ufs_safe() || hakios_p124_ufs_busy() ||
+            p125_thermal_reason()))return stock;
+        return s9_p1274_cores(p);
+    }
     return stock;
 }
 static bool p1274_skip_big_measure(void) {
@@ -474,6 +490,9 @@ static void p1274_tick(uint64_t now) {
 }
 static int p1274_arm_profile(int v,unsigned mode) {
     if(v<0 || v>P1274_REC0)return EINVAL;
+    unsigned p52=mode>>8;
+    if(p52 && (!p12752_boot_enabled() || p52>4 || (mode&255u)!=4u))return EINVAL;
+    if(p52)mode=4;
     if(!v){__atomic_store_n(&p1274_cancel,1,__ATOMIC_RELEASE);return 0;}
     uint64_t now=mach_absolute_time(),end=p1274_ticks_ms(720000);
     if(!p1274_boot_enabled() || now>=p1274_ticks_ms(225000) || p125_thermal_reason() ||
@@ -481,6 +500,7 @@ static int p1274_arm_profile(int v,unsigned mode) {
        __atomic_load_n(&hakios_p1273_trace_state,__ATOMIC_ACQUIRE)!=0)return EPERM;
     if(v>=P1274_FAST && (!hakios_p123_input_quiet(now) || !hakios_p124_ufs_safe()))return EPERM;
     if(v>=P1274_REC2 && ocp_on)return EPERM; /* never disable OCP to park scheduler cores */
+    if(v>=P1274_REC2 && (p52 && hakios_p124_ufs_busy()))return EPERM;
     uint32_t cap=s9_p1274_cap(v);
     if(cap && !p1273_cap_rate_present(&clusters[1],cap))return EPERM;
     uint32_t expected=0;
@@ -496,6 +516,7 @@ static int p1274_arm_profile(int v,unsigned mode) {
     __atomic_store_n(&hakios_p12751_trace_replace,mode && __atomic_load_n(&p12751_latched,__ATOMIC_ACQUIRE)>=0?1u:0u,__ATOMIC_RELEASE);
     __atomic_store_n(&hakios_p1274_trace_late,1,__ATOMIC_RELEASE);
     __atomic_store_n(&hakios_p1274_deadline,end,__ATOMIC_RELEASE);
+    __atomic_store_n(&p12752_selected,p52,__ATOMIC_RELEASE);
     __atomic_store_n(&p1275_selected,mode,__ATOMIC_RELEASE);
     __atomic_store_n(&p12741_guard_armed,1,__ATOMIC_RELEASE);
     __atomic_store_n(&p1274_state,2,__ATOMIC_RELEASE);
@@ -711,4 +732,5 @@ static int p12741_guard_sysctl(__unused struct sysctl_oid *oidp,__unused void *a
 }
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p12741_guard,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p12741_guard_sysctl,"A","P1274.1 live direct thermal guard and both caps");
 #include "hakios.p12751.h"
+#include "hakios.p12752.h"
 #endif

@@ -54,8 +54,8 @@ int proc_name(int pid, void *buffer, uint32_t buffersize);
 struct sample {
 	int pid;
 	uint64_t time;                  /* user + system, mach_absolute_time's units */
-    uint64_t user,sys;
-    int32_t faults,pageins,csw,threads,running;
+    uint64_t user,sys,resident,virt;
+    int32_t faults,pageins,csw,threads,running,cow,sent,received;
 };
 
 static struct sample last[MAX_PROCS], now[MAX_PROCS];
@@ -154,6 +154,8 @@ main(int argc, char **argv)
             now[count].user=info.pti_total_user;now[count].sys=info.pti_total_system;
             now[count].faults=info.pti_faults;now[count].pageins=info.pti_pageins;now[count].csw=info.pti_csw;
             now[count].threads=info.pti_threadnum;now[count].running=info.pti_numrunning;
+            now[count].resident=info.pti_resident_size;now[count].virt=info.pti_virtual_size;
+            now[count].cow=info.pti_cow_faults;now[count].sent=info.pti_messages_sent;now[count].received=info.pti_messages_received;
 			count++;
 		}
 		if (look > 0) {
@@ -170,7 +172,7 @@ main(int argc, char **argv)
 					char name[64]={0};
 					if(proc_name(now[i].pid,name,sizeof(name))>0){
 						unsigned code=p1274_process_code(name);
-						if(p12751_observe && detailed<12 && (code<=9 || code==23 || code==24) && code &&
+						if(p12751_observe && detailed<12 && (code<=9 || code==13 || code==14 || code==23 || code==24) && code &&
                             now[i].time>then && now[i].time-then>(at-before)/20){
                             bool valid=prior && now[i].user>=prior->user && now[i].sys>=prior->sys &&
                               prior->faults>=0 && prior->pageins>=0 && prior->csw>=0 &&
@@ -180,7 +182,11 @@ main(int argc, char **argv)
                               (unsigned long long)(valid?now[i].user-prior->user:0),
                               (unsigned long long)(valid?now[i].sys-prior->sys:0),
                               valid?now[i].faults-prior->faults:0,valid?now[i].pageins-prior->pageins:0,valid?now[i].csw-prior->csw:0,
-                              now[i].threads,now[i].running,valid?1:0);detailed++;
+                              now[i].threads,now[i].running,valid?1:0);
+                            printf("P12752 mem at=%llu pid=%d code=%u rss=%llu vsize=%llu cow_total=%d sent_total=%d recv_total=%d\n",
+                                (unsigned long long)at,now[i].pid,code,(unsigned long long)now[i].resident,
+                                (unsigned long long)now[i].virt,now[i].cow,now[i].sent,now[i].received);
+                            detailed++;
                         }
                         if(p1274_observe && code && (!found || now[i].time>then))
 							(void)p1274_emit(4,code,(uint64_t)now[i].pid,

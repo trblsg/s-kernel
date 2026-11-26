@@ -1,0 +1,48 @@
+#requires -Version 5.1
+$ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot '../s9-p1274-serial.ps1') -LibraryOnly
+function Check($ok,[string]$why){if(-not $ok){throw $why}}
+function Refuse([scriptblock]$b,[string]$pattern){$refused=$false;try{& $b}catch{if($_.Exception.Message -match $pattern){$refused=$true}else{throw}};Check $refused "missing refusal $pattern"}
+Check (P12-ReplyShape 'p12752_revision' '1' $true) 'revision'
+Check (P12-ReplyShape 'p12752_eligibility' 'version=1 enabled=1 conflict=0 ocp=0 ufs_safe=1 ufs_busy=0 quiet=1 thermal=0 cores=4 online=68 exit=0' $true) 'eligibility shape'
+Check (P12-ReplyShape 'p12752_idle_info' 'version=1 mode=0 phase=1000 count=6 drops=0 reason=0 bus=0' $true) 'idle info'
+$row='version=1 select=0 phase=1000 at=1000 kind=1 index=0 raw=0 valid=1 errno=0 latency=0 big=62000 lit=60500 gpu=55000 bat=37 age=10 bs=4 ls=10 bkhz=650000 lkhz=1053000 bmeas=650 lmeas=1053 policy=1 driver=0 refresh=300'
+Check (P12-ReplyShape 'p12752_idle_page' $row $true) 'idle page'
+Check (-not (P12-ReplyShape 'p12752_idle_page' ($row+' junk') $true)) 'malformed page'
+foreach($bad in @(@('p12752_profile','2'),@('p12752_idle_mode','1'),@('p12752_idle_select','0'),@('p12752_eligibility','1'))){
+ Refuse { [void](P12-Query $bad[0] $bad[1]) } 'only permits|disallowed'
+}
+$opts.P12752=$true;$opts.Profile='R2';$opts.Power='Connected';$opts.BootVariant='OptEarly';$opts.Experiment='EarlyLoad';$opts.AllowIntervention=$true
+Check-Prior
+$opts.Profile='R1';Refuse {Check-Prior} 'prior qualified'
+$opts.Profile='R2';$opts.BootVariant='StockEarly';Refuse {Check-Prior} 'OptEarly'
+$P12752Idle=$true;$Scenario='Idle52Offline';$EnergySeconds=60;$AllowOfflineTrial=$false
+Refuse {P12752-CheckOptions} 'explicit'
+$AllowOfflineTrial=$true;P12752-CheckOptions
+$Scenario='EnergyTrials';$EnergyModules='PSR,USB';Refuse {P12752-CheckOptions} 'one idle module'
+$EnergyModules='LITTLE598';$AllowLowerFloor=$false;Refuse {P12752-CheckOptions} 'prior reviewed'
+$dir=Join-Path $env:TEMP ('p12752-test-'+[guid]::NewGuid())
+[void](New-Item -ItemType Directory -Path $dir)
+try{
+ $script:sel52=0;$script:info52='version=1 mode=0 phase=1000 count=6 drops=0 reason=0 bus=0'
+ function P12-EarlyThermalGuard{}
+ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
+  switch($Name){
+   'p12752_idle_info'{return $script:info52}
+   'p12752_idle_select'{$script:sel52=[int]$Value;return $Value}
+   'p12752_idle_page'{return ($row -replace 'select=0',("select="+$script:sel52) -replace 'at=1000',("at="+(1000+2000*$script:sel52)))}
+   'p12752_idle_mode'{return '0'}
+   default{throw "unexpected $Name"}
+  }
+ }
+ $status=@{start='1000';end='11000';hz='1000';reason='0';display_on='0';armed='0'}
+ $out=P12752-ReadIdle (Join-Path $dir 'run') 'A0' $status
+ Check ($out.thermal_valid -and $out.count -eq 6) 'valid mock not accepted'
+ $status.reason='2';$out=P12752-ReadIdle (Join-Path $dir 'run2') 'A0' $status
+ Check (-not $out.thermal_valid) 'thermal cutoff accepted'
+ $status.start='2000';Refuse {P12752-ReadIdle (Join-Path $dir 'run3') 'A0' $status} 'identity'
+ Set-Content -LiteralPath (Join-Path $dir 'Capture-test.log') -Value @('P12752 sample at=300000 pid=42 name=PosterBoard tid=12 usage=300 pc=ImageIO+0x123 lr=CoreGraphics+0x55','P12752 sample_done pid=42 looks=1 kept=1 failures=0','P12752 layout at=300001 n=32 format=80','P12752 mem at=300000 pid=42 code=1 rss=100','launchd spawn PosterBoard')
+ $raw=P12752-RawEvidence $dir 1000
+ Check ($raw.samples -eq 1 -and $raw.processes[0] -eq 'PosterBoard' -and $raw.layout_lines -eq 1 -and $raw.memory_lines -eq 1 -and $raw.lifecycle_lines -eq 1) 'raw evidence parser'
+}finally{Remove-Item -LiteralPath $dir -Recurse -Force}
+Write-Host 'P12752 host shapes/refusals/idle identity/cutoff/raw evidence mocks PASS; no serial I/O'
