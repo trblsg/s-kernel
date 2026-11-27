@@ -33,4 +33,16 @@ $a=Report 'STOCK60' 100000 2.2;$b=Report 'BASE15' 200000 1.9;$c=Report 'STOCK60'
 $r=P12753-Compare $a $b $c;Check ([Math]::Abs($r.delta_mW-250) -lt 0.01) 'ABA delta'
 $c.boot='other';Refuse {P12753-Compare $a $b $c} 'boot'
 $c.boot='same';$c.mean_discharge_w=3;Refuse {P12753-Compare $a $b $c} 'drift'
-Write-Host 'P12753 parser, stock evidence, FG integration, cutoff, reconnect and A/B/A validation PASS'
+$a=Report 'STOCK60' 100000 2.2;$b=Report 'COMPOSITE544' 200000 1.9;$c=Report 'STOCK60' 300000 2.1
+foreach($r in @($a,$b,$c)){
+    $r|Add-Member -NotePropertyName warm -NotePropertyValue $true
+    $r|Add-Member -NotePropertyName start_gpu_mc -NotePropertyValue 59000
+    $r|Add-Member -NotePropertyName start_bat_c -NotePropertyValue 37
+}
+Check ((P12753-Compare $a $b $c).warm) 'warm composite ABA'
+$b.warm=$false;Refuse {P12753-Compare $a $b $c} 'cannot mix warm'
+$b.warm=$true;$b.start_gpu_mc=62000;Refuse {P12753-Compare $a $b $c} 'GPU/battery temperature'
+$b.start_gpu_mc=59000;$b.restored=$false;Refuse {P12753-Compare $a $b $c} 'verified applied restored'
+Check (P12-ReplyShape 'p12753_status' ($status+' warm=1') $true) 'warm status'
+Check (-not (P12-ReplyShape 'p12753_status' ($status+' warm=2') $true)) 'invalid profile'
+Write-Host 'P12753 parser, stock evidence, FG integration, cutoff, reconnect and warm/cold A/B/A validation PASS'

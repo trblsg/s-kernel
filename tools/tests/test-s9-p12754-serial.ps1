@@ -36,6 +36,13 @@ Check (-not (P12-ReplyShape 'p127541_stats' ($stat -replace ' t2048=260000$','')
 Check (P12-ReplyShape 'p12754_revision' '2' $true) 'revision 2 shape'
 Check (P12-ReplyShape 'p12754_revision' '3' $true) 'revision 3 shape'
 Check (P12-ReplyShape 'p12754_revision' '4' $true) 'revision 4 shape'
+Check (P12-ReplyShape 'p12754_revision' '5' $true) 'revision 5 shape'
+Check ((P127543-ThermalExcess @{big=61000;lit=59576;gpu=59000}) -gt 0) '063643 cold blocker'
+Check ((P127543-ThermalExcess @{big=61000;lit=59576;gpu=59000} -Warm) -le 0) '063643 warm admission'
+Check ((P127543-ThermalExcess @{big=63000;lit=62000;gpu=62000} -Warm) -eq 0) 'warm boundary inclusive'
+Check ((P127543-ThermalExcess @{big=63001;lit=62000;gpu=62000} -Warm) -eq 1) 'warm above boundary'
+Check (P12-ReplyShape 'p127544_window' 'version=1 valid=1 arm=1000 start=25000 end=85000 irq27=300 wfi_n=100 wfi_ticks=200 ge_n=5 ge_ticks=50' $true) 'window shape'
+Check (-not (P12-ReplyShape 'p127544_window' 'version=1 valid=1 arm=1000' $true)) 'truncated window'
 Check (P12-ReplyShape 'p127543_wait' 'version=1 deadline=123456 plateau=1' $true) 'plateau disposition'
 Check (P12-ReplyShape 'p127543_rail' 'version=1 generation=2 count=2 attempts=2 uv0=731250 uv1=731250' $true) 'rail gate evidence'
 Check (-not (P12-ReplyShape 'p127543_rail' 'version=1 generation=2 count=3 attempts=2 uv0=731250 uv1=731250' $true)) 'reject extra samples'
@@ -87,7 +94,12 @@ function Life-Pump {$script:fakeNow=$script:fakeNow.AddSeconds(1)}
 function Life-CheckSafety([datetime]$At){}
 function P12-EarlyThermalGuard {}
 function P127542-ReadKey {return $script:mockKey}
-function P12-Query([string]$Name,[string]$Value=''){
+function P12-Query([string]$Name,[string]$Value='',[int]$ReadTimeoutSeconds=12,[switch]$NoReadRetry){
+    if($Name -eq 'p1273_gate_status'){
+        Check ($ReadTimeoutSeconds -eq 2 -and $NoReadRetry) 'floor read bounded and no retry'
+        $script:mockGateReads++
+        return "phase=3 generation=$script:mockGateGeneration missing=$script:mockGateMissing"
+    }
     if($Name -eq 'p127542_audio' -and $Value -eq '17'){$script:mockAudioWrites++;return $Value}
     if($Name -eq 'p127542_audio_result'){return $script:mockResult}
     throw "unexpected headless query $Name"
@@ -113,9 +125,9 @@ function P1273-GateStatus {
 $script:LifeState='OFF';$script:mockKey=[ConsoleKey]::Y
 Refuse {P127543-FloorReview '17'} 'screen changed'
 $script:LifeState='ON';$script:mockGateMissing='32'
-Refuse {P127543-FloorReview '17'} 'measured stock evidence missing'
+Refuse {P127543-FloorReview '17'} 'fresh kernel evidence'
 $script:mockGateMissing='0';$script:mockKey=$null
-Refuse {P127543-FloorReview '17'} 'operator or measured stock'
+Refuse {P127543-FloorReview '17'} 'operator confirmation missing'
 $script:mockKey=[ConsoleKey]::Y;$script:mockGateGeneration='18'
 Refuse {P127543-FloorReview '17'} 'identity changed'
 $script:mockGateGeneration='17'

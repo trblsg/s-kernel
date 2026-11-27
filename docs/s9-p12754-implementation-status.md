@@ -1,4 +1,16 @@
-# S9 P12.7.5.4.3: staged idle power audit
+# S9 P127544: revision 5 guarded warm/composite audit
+
+## Revision 5 implementation and boundaries
+
+Same boot args. All policies still default OFF. Cold admission stays 60/59/60 C; explicit warm arm encodes 16+request, admission 63/62/62 C at preflight and WAIT, 20 s continuous quiet, existing 90 s post-disconnect bound and plateau checks. Battery below 45 C, existing soft 67/66/68 and hard 76/70/72/47 C remain. No mandatory boot age. 063643 had 89.658 s thermal WAIT and zero quiet; 65/66 sampled CPU temperatures meet proposed warm headroom, but new device qualification is required.
+
+Warm request 31 (canonical 15) is COMPOSITE544, exact policy 965: BASE15 + LITTLE598 + ABOX + BT IRQ + Wi-Fi INTx + deadline ticker. No BUS DVFS, PSR, USB trial, physical CPU state or additional gate bit. Only audit ownership may arm it, and all seven live individual qualification bits (7230) are required. Expiry, faults, display/USB/thermal/ownership revocation retain existing rollback. Host requires floor readback, both 637500 uV configured VSEL samples, ABOX/BT/WIFI/ticker/BASE evidence, balanced restore and no UFS error delta. Compare only verified Warm STOCK60 / COMPOSITE544 / STOCK60, same boot and temperature/voltage/windows. Cold and warm cannot mix. BIG IRQ27/WFI deltas in p127544_window are sampled at kernel window boundaries (not atomic multi-core snapshots); host bracket driver counters remain separate. Connected LITTLE598 assist can last up to 240 s host / 300 s lease; others stay 90/120 s. No renewal. Floor review waits for operator before bounded 2 s read-only requests; qualified JSON checked for required fields. Host never retries arm.
+
+Existing ABOX DMA stop/resume and existing BT/WIFI IRQ paths are reused, not presumed faster or qualified. BT TX failure now latches fallback in trial, WIFI fallback latch is atomic and counted once, ticker lateness >50 ms or two consecutive >20 ms dispatches falls back to 2 ms stock polling without dropping due work. Runtime/device fault behavior needs validation. Existing wake guard and true battery external reporting retained; no new system daemon suppression.
+
+ACPM transport refuses MIF SET and LITTLE455 SET with p12754=1. Validated FVMAP boot metadata is logged separately from live readback: INTCAM/CAM already at minima in prior device logs, DISP and INT have possible steps. No new bus SET, because live rate and all client/MMIO restore fences are not established. No new forced clock/power gating of MFC/ISPPRE or DCS panel sleep path; P1 deferred until ownership/handshake and fresh-frame generation can be proven. Do not call the composite a full eleven-module implementation. No additional mW or temperature claim before matched device audit. CI source and host regressions do not establish native build or physical safety.
+
+## Historical revision 4 design (retained for comparison)
 
 Boot opt-in: p12754=1 requires p12753=1 and the existing P12752 chain. No new policy enabled at boot. Existing thermal guard remains lower-only; severe wake-tail cap applies for hot display wake (10 s in revision 3) and USB disconnect (10 s). CPU and storage interlocks unchanged.
 

@@ -952,6 +952,14 @@ p1273_gate_events_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,in
 }
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p1273_gate_active,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1273_gate_events_sysctl,"A","P12.7.3 active policy evidence");
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p1273_gate_post,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,1,p1273_gate_events_sysctl,"A","P12.7.3 post-restore evidence");
+/* P127544 composite is audit-owned only. No new generic mode or gate bit.
+ * Individual real functional gates must all remain valid this boot. */
+#define P127544_COMPOSITE 965u /* BASE + ABOX + LITTLE598 + WIFI + BT + TICKER */
+#define P127544_NEED (P1273_G_ABOX|P1273_G_BT|P1273_G_WIFI|P1273_G_TICKER|P1273_G_FLOOR|P12754_G_832|P12754_G_715|P12754_G_598)
+static bool p127544_composite_locked(void){
+    return p12754_optin() && p1273_gate_phase==0 &&
+        (p1273_gate_qualified&P127544_NEED)==P127544_NEED;
+}
 static void
 p127_guard(void)
 {
@@ -973,7 +981,18 @@ p127_guard(void)
     }
     if(!reason && !hakios_p127_mode())reason=1;
     unsigned mode=hakios_p127_mode();
-    if(!reason && p12754_optin() && P127_FLOOR(mode)>=2){
+    if(!reason && mode==P127544_COMPOSITE){
+        lck_spin_lock(&p1273_gate_lock);p1273_gate_refresh_locked(mach_absolute_time());
+        bool allowed=__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE) && p127544_composite_locked();
+        lck_spin_unlock(&p1273_gate_lock);if(!allowed)reason=11;
+    }
+    if(!reason && p12754_optin() && (mode==5 || mode==17 || mode==129 || mode==257 || mode==513)){
+        lck_spin_lock(&p1273_gate_lock);p1273_gate_refresh_locked(mach_absolute_time());
+        bool allowed=(p1273_gate_phase==2 && p1273_gate_mode==mode && p1273_gate_lease==lease) ||
+            (p1273_gate_phase==0 && (p1273_gate_qualified&p1273_gate_bit(mode)));
+        lck_spin_unlock(&p1273_gate_lock);if(!allowed)reason=11;
+    }
+    if(!reason && p12754_optin() && P127_FLOOR(mode)>=2 && mode!=P127544_COMPOSITE){
         lck_spin_lock(&p1273_gate_lock);p1273_gate_refresh_locked(mach_absolute_time());
         unsigned prior=p12754_floor_prereq(mode);
         bool allowed=prior && (p1273_gate_qualified&prior)==prior &&
@@ -1009,16 +1028,18 @@ p127_guard(void)
     if(reason)hakios_p127_stop(reason);
 }
 static int
-p127_arm_mode_internal(int v,bool assist)
+p127_arm_mode_internal(int v,bool assist,bool audit_composite)
 {
     if(v<0 || v>(int)P127_MASK || P127_FLOOR(v)>5)return EINVAL;
+    if(p12754_optin() && P127_FLOOR(v)>4)return EPERM;
+    if(audit_composite!=(v==(int)P127544_COMPOSITE) || (audit_composite && (assist || !__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE))))return EPERM;
     if(!v){hakios_p127_stop(0);return 0;}
     if(__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE))return EBUSY;
     if(!(v&P127_BASE))return EINVAL;
     /* Only exact combined masks can pass the same-boot gate. */
     unsigned extras=(unsigned)v&~(P127_BASE|0x70u);
     bool combined=p1273_gate_required((unsigned)v)!=0;
-    if(!combined && ((extras && (extras&(extras-1))) || (extras && P127_FLOOR(v))))return EINVAL;
+    if(!combined && !audit_composite && ((extras && (extras&(extras-1))) || (extras && P127_FLOOR(v))))return EINVAL;
     bool enabled=p1273_gate_enabled();
     if(__atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE) ||
        __atomic_load_n(&hakios_p126_lease,__ATOMIC_ACQUIRE) ||
@@ -1032,7 +1053,7 @@ p127_arm_mode_internal(int v,bool assist)
         return EPERM;
     }
     uint64_t span=0,expected=0;
-    nanoseconds_to_absolutetime(((assist || (v&(P127_ABOX|P127_PSR|P127_WIFI|P127_BT|P127_TICKER)) || P127_FLOOR(v))?120ULL:420ULL)*NSEC_PER_SEC,&span);
+    nanoseconds_to_absolutetime((assist?(v==65?300ULL:120ULL):((v&(P127_ABOX|P127_PSR|P127_WIFI|P127_BT|P127_TICKER)) || P127_FLOOR(v))?120ULL:420ULL)*NSEC_PER_SEC,&span);
     const unsigned us[]={100,500,1000,2000,3500,10000,20000,50000};
     for(unsigned i=0;i<8;i++){
         uint64_t ticks=0;
@@ -1049,6 +1070,9 @@ p127_arm_mode_internal(int v,bool assist)
         lck_spin_unlock(&p1273_gate_lock);return EPERM;
     }
     unsigned prior=p12754_floor_prereq((unsigned)v);
+    if(audit_composite && (!p127544_composite_locked() || !enabled || !gov_running || gov_policy!=2 || hakios_cpu_exit_mask || big_cores!=SCION_BIG_CORES || clusters[0].online!=4 || clusters[1].online!=4)){
+        lck_spin_unlock(&p1273_gate_lock);return EPERM;
+    }
     if(assist){
         unsigned need=p1273_gate_bit(v)|prior;
         if((v!=1 && (!need || (p1273_gate_qualified&need)!=need)) || p1273_gate_phase ||
@@ -1057,7 +1081,11 @@ p127_arm_mode_internal(int v,bool assist)
             lck_spin_unlock(&p1273_gate_lock);return EPERM;
         }
     }
-    if(p12754_optin() && P127_FLOOR(v)>=2 && (!prior || (p1273_gate_qualified&prior)!=prior ||
+    if(p12754_optin() && (v==5 || v==17 || v==129 || v==257 || v==513) &&
+       (p1273_gate_phase!=1 && !(p1273_gate_qualified&p1273_gate_bit(v)))){
+        lck_spin_unlock(&p1273_gate_lock);return EPERM;
+    }
+    if(!audit_composite && p12754_optin() && P127_FLOOR(v)>=2 && (!prior || (p1273_gate_qualified&prior)!=prior ||
        (p1273_gate_phase!=1 && !(p1273_gate_qualified&p1273_gate_bit(v))))){lck_spin_unlock(&p1273_gate_lock);return EPERM;}
     if(p1273_gate_phase && (p1273_gate_phase!=1 || p1273_gate_mode!=(unsigned)v)){
         lck_spin_unlock(&p1273_gate_lock);return EBUSY;
@@ -1080,7 +1108,7 @@ p127_arm_mode_internal(int v,bool assist)
     if(hakios_display_requested_on()!=0){hakios_p127_stop(4);return EPERM;}
     return 0;
 }
-static int p127_arm_mode(int v){return p127_arm_mode_internal(v,false);}
+static int p127_arm_mode(int v){return p127_arm_mode_internal(v,false,false);}
 /* Explicit connected cooldown assistance. Reuse the original single-module
  * lease, never extend it and never share it with a stock measurement. */
 static int p127543_assist_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unused int arg2,struct sysctl_req *req){
@@ -1098,7 +1126,7 @@ static int p127543_assist_sysctl(__unused struct sysctl_oid *oidp,__unused void 
        __atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE) ||
        __atomic_load_n(&hakios_p12753_usb_down,__ATOMIC_ACQUIRE)>__atomic_load_n(&hakios_p12753_usb_up,__ATOMIC_ACQUIRE) ||
        hakios_display_requested_on()!=0)return EPERM;
-    return p127_arm_mode_internal(v,true);
+    return p127_arm_mode_internal(v,true,false);
 }
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p127543_assist,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p127543_assist_sysctl,"I","P127543 qualified connected idle assist");
 static int
@@ -1190,7 +1218,7 @@ p127_status_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     p127_guard();
     char buf[320];unsigned mode=hakios_p127_mode();
     snprintf(buf,sizeof(buf),"version=1 mode=%u reason=%u lease_s=%u little_request=%u little_cur=%u ufs_safe=%u ufs_busy=%u floor_hits=%llu floor_bypass=%llu",
-        mode,__atomic_load_n(&hakios_p127_reason,__ATOMIC_ACQUIRE),((mode && __atomic_load_n(&p127543_assist_lease,__ATOMIC_ACQUIRE)==__atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE)) || (mode&(P127_ABOX|P127_PSR|P127_WIFI|P127_BT|P127_TICKER)) || P127_FLOOR(mode))?120u:420u,p127_floor_khz(mode),clusters[0].cur,
+        mode,__atomic_load_n(&hakios_p127_reason,__ATOMIC_ACQUIRE),(mode && __atomic_load_n(&p127543_assist_lease,__ATOMIC_ACQUIRE)==__atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE))?(mode==65?300u:120u):((mode&(P127_ABOX|P127_PSR|P127_WIFI|P127_BT|P127_TICKER)) || P127_FLOOR(mode))?120u:420u,p127_floor_khz(mode),clusters[0].cur,
         hakios_p124_ufs_safe()?1u:0u,hakios_p124_ufs_busy()?1u:0u,
         (unsigned long long)__atomic_load_n(&hakios_p127_floor[0],__ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&hakios_p127_floor[1],__ATOMIC_RELAXED));

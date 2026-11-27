@@ -1240,7 +1240,8 @@ p127_bt_attach(void)
 static void
 p127_bt_fallback(void)
 {
-    p127_bt_fault=true;hakios_p127_metric(5,3,1);p127_bt_detach();
+    if(!p127_bt_fault)hakios_p127_metric(5,3,1);
+    p127_bt_fault=true;p127_bt_detach();
 }
 static bool
 p127_bt_rx_ready(void)
@@ -1322,6 +1323,7 @@ bt_tty_pump(__unused void *arg, __unused wait_result_t w)
 		tty_unlock(tp);
 		if (out > 0 && !bt_write(buf, (size_t)out, 2000)) {
 			say("bt: tty: %d bytes not sent\n", out);
+			if(wanted)p127_bt_fallback();
 		}
 		tty_lock(tp);
 		if (out > 0) {

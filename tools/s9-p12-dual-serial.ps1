@@ -47,6 +47,8 @@ $script:P12752IdleAllowed=$false
 $script:P12753HostEnabled=$false
 $script:P12754HostEnabled=$false
 $script:P12753ArmAllowed=$false
+$script:P127544WarmAllowed=$false
+$script:P127544CompositeAllowed=$false
 $script:P12752ProfileAllowed=$false
 $script:P12751NextAllowed=$false
 $script:P1273GateAllowed=$false
@@ -130,8 +132,9 @@ function P12-ReplyShape([string]$Name,[string]$Reply,[bool]$Mixed){
         '^p12751_revision$' {return ($Reply -ceq '1')}
         '^p12752_revision$' {return ($Reply -ceq '1')}
         '^p12753_revision$' {return ($Reply -ceq '1')}
-        '^p12754_revision$' {return ($Reply -cmatch '^[1234]$')}
+        '^p12754_revision$' {return ($Reply -cmatch '^[12345]$')}
         '^(mali_irq|p127542_g2)$' {return ($Reply -cmatch '^[01]$')}
+        '^p127544_window$' {return ($Reply -cmatch "^version=1 valid=[01] arm=$dec start=$dec end=$dec irq27=$dec wfi_n=$dec wfi_ticks=$dec ge_n=$dec ge_ticks=$dec$")}
         '^p127543_wait$' {return ($Reply -cmatch "^version=1 deadline=$dec plateau=[01]$")}
         '^p127543_rail$' {return ($Reply -cmatch "^version=1 generation=$dec count=[0-2] attempts=[0-4] uv0=$dec uv1=$dec$")}
         '^p127543_assist$' {return ($Reply -cmatch '^(0|1|5|17|33|49|65|129|257|513)$')}
@@ -146,7 +149,7 @@ function P12-ReplyShape([string]$Name,[string]$Reply,[bool]$Mixed){
         '^p12754_rate$' {return ($Reply -cmatch "^version=1 fresh=[01] cur=$dec meas=$dec$")}
         '^p12754_wait$' {return ($Reply -cmatch "^version=1 enabled=[01] preflight=$dec wait=$dec seen=$dec quiet_ticks=$dec input_seen=[01] fingers=$dec$")}
         '^p12753_guard$' {return ($Reply -cmatch "^version=1 enabled=[01] at=$dec mask=$dec big=-?$dec lit=-?$dec gpu=-?$dec bat=-?$dec age=$dec slope=-?$dec bcap=$dec lcap=$dec peak_big=-?$dec peak_lit=-?$dec changes=$dec$")}
-        '^p12753_status$' {return ($Reply -cmatch "^version=1 state=[0-3] request=$dec arm=$dec down=$dec start=$dec end=$dec until=$dec up=$dec now=$dec hz=$dec reason=$dec mask=$dec count=$dec drops=$dec bus=$dec stop_big=-?$dec stop_lit=-?$dec stop_gpu=-?$dec stop_bat=-?$dec stop_age=$dec policy=$dec$")}
+        '^p12753_status$' {return ($Reply -cmatch "^version=1 state=[0-3] request=$dec arm=$dec down=$dec start=$dec end=$dec until=$dec up=$dec now=$dec hz=$dec reason=$dec mask=$dec count=$dec drops=$dec bus=$dec stop_big=-?$dec stop_lit=-?$dec stop_gpu=-?$dec stop_bat=-?$dec stop_age=$dec policy=$dec(?: warm=[01])?$")}
         '^p12753_page$' {return ($Reply -cmatch "^version=1 select=$dec phase=$dec at=$dec kind=[12] index=$dec raw=$dec valid=[01] errno=-?$dec latency=$dec big=-?$dec lit=-?$dec gpu=-?$dec bat=-?$dec age=$dec bs=$dec ls=$dec bkhz=$dec lkhz=$dec bmeas=$dec lmeas=$dec policy=$dec driver=$dec refresh=$dec g3d=$dec dpu=$dec isppre=$dec mfc=$dec aud=$dec mask=$dec opp_uv=$dec opp_valid=[01]$")}
         '^p12752_eligibility$' {return ($Reply -cmatch "^version=1 enabled=[01] conflict=[01] ocp=[01] ufs_safe=[01] ufs_busy=[01] quiet=[01] thermal=$dec cores=[0-4] online=$dec exit=$hex$")}
         '^p12752_idle_info$' {return ($Reply -cmatch "^version=1 mode=[012] phase=$dec count=$dec drops=$dec reason=$dec bus=$dec$")}
@@ -269,7 +272,8 @@ $script:LifeLineObserver={
         $b.Max=[Math]::Max($b.Max,[double][int]$Matches[3])
     }
 }
-function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
+function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup,[ValidateRange(1,12)][int]$ReadTimeoutSeconds=12,[switch]$NoReadRetry){
+    if(($ReadTimeoutSeconds -ne 12 -or $NoReadRetry) -and ($Value -ne '' -or $Cleanup)){throw 'Short timeout only for read-only query'}
     $allowed=@('hi_cmd','p12_cpu_mode','p12_cpu_stats','p12_wfi_probe','p12_wfi_stats','p12_idle_diag',
         'p12_gpu_boot_stats','p9_auto_gpu','p9_panel_stats','g3d_lab_stats',
         'p122_diag_mode','p122_gpu_stats',
@@ -289,7 +293,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
     }
     if($script:P12752IdleAllowed -or $script:P1274HostEnabled){$allowed+=@('p12751_boot_latch','p12752_revision','p12752_eligibility','p12752_idle_mode','p12752_idle_info','p12752_idle_select','p12752_idle_page','p12752_profile')}
     if($script:P12753HostEnabled){$allowed+=@('p12753_revision','p12753_guard','p12753_status','p12753_arm','p12753_select','p12753_page')}
-    if($script:P12754HostEnabled){$allowed+=@('p12754_revision','p12754_wait','p12754_rate','p127541_stats','p1231_ufs_stats','p127542_audio','p127542_audio_result','mali_irq','p127542_g2','p127543_wait','p127543_rail','p127543_assist')}
+    if($script:P12754HostEnabled){$allowed+=@('p12754_revision','p12754_wait','p12754_rate','p127541_stats','p1231_ufs_stats','p127542_audio','p127542_audio_result','mali_irq','p127542_g2','p127543_wait','p127543_rail','p127543_assist','p127544_window')}
     if($Name -notin $allowed){throw "P12 sysctl disallowed $Name"}
     if($script:P124HostEnabled -and $Name -eq 'p1231_hash_mode' -and $Value -eq '1'){throw 'P12.4 rejects scalar thermal trial'}
     if($Value -ne '' -and -not (
@@ -304,6 +308,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
         ($script:P1274HostEnabled -and $script:P12752ProfileAllowed -and $Name -eq 'p12752_profile' -and $Value -cmatch '^[1-4]$') -or
         ($script:P12753HostEnabled -and $script:P12753ArmAllowed -and $Name -eq 'p12753_arm' -and $Value -cmatch '^(?:[0-9]|10)$') -or
         ($script:P12754HostEnabled -and $script:P12753HostEnabled -and $script:P12753ArmAllowed -and $Name -eq 'p12753_arm' -and $Value -cmatch '^1[1-4]$') -or
+        ($script:P12754HostEnabled -and $script:P12753HostEnabled -and $script:P12753ArmAllowed -and $script:P127544WarmAllowed -and $Name -eq 'p12753_arm' -and ($Value -cmatch '^(?:1[7-9]|2[0-4]|2[6-9])$' -or ($Value -eq '31' -and $script:P127544CompositeAllowed))) -or
         ($script:P12753HostEnabled -and $Name -eq 'p12753_select' -and $Value -cmatch '^\d{1,2}$' -and [int]$Value -lt 96) -or
         ($script:P12752IdleAllowed -and $Name -eq 'p12752_idle_mode' -and $Value -cmatch '^[0-2]$') -or
         ($script:P12752IdleAllowed -and $Name -eq 'p12752_idle_select' -and $Value -cmatch '^\d{1,2}$' -and [int]$Value -lt 96) -or
@@ -360,7 +365,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
     if($Name -eq 'p12_wfi_probe' -and $Value -eq '1'){$script:P12WfiDirty=$true}
     if($Name -eq 'hi_cmd' -and $Value -in @('201','252','253')){$script:P12HiDirty=$true}
     $bytes=[Text.Encoding]::ASCII.GetBytes($cmd+[char]13)
-    $attempts=if($Value -eq '' -and -not $Cleanup){$script:P12ReadAttempts}else{1}
+    $attempts=if($Value -eq '' -and -not $Cleanup -and -not $NoReadRetry){$script:P12ReadAttempts}else{1}
     for($attempt=1;$attempt -le $attempts;$attempt++){
         $script:P12Command=''
         # Drain briefly before retry so late data cannot satisfy a new echo.
@@ -374,7 +379,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
         $script:P12Command=$cmd
         $script:LifeSerial.Write($bytes,0,$bytes.Length)
         Life-Say ('P12 '+$(if($Value -eq ''){'READ '}else{'WRITE '})+$cmd)
-        $deadline=(Life-Now).AddSeconds(12)
+        $deadline=(Life-Now).AddSeconds($ReadTimeoutSeconds)
         while((Life-Now) -lt $deadline -and $null -eq $script:P12Reply -and $null -eq $script:P12Refusal){
             Life-Pump
             # During cleanup, do not mask the restore ACK with old heat.

@@ -232,29 +232,29 @@ poller(void *argument)
 	lp.polls = true;
 	while (lp.polling) {
 		bool wanted=lx_os_option("p127_intx")!=0;
-		if(!wanted && !lp.exp_line)lp.exp_fault=false;
-		if(lp.exp_line && (!wanted || lp.exp_fault)){
+		if(!wanted && !lp.exp_line)__atomic_store_n(&lp.exp_fault,false,__ATOMIC_RELEASE);
+		if(lp.exp_line && (!wanted || __atomic_load_n(&lp.exp_fault,__ATOMIC_ACQUIRE))){
 			/* Stop all line callbacks before touching the mailbox here. */
 			lx_os_irq_line_detach();
 			lp.exp_line=false;
 			(void)lx_os_option("p127_intx_detach");
 		}
-		if(wanted && !lp.exp_fault && !lp.exp_line && lx_brcmf_reached(5)){
+		if(wanted && !__atomic_load_n(&lp.exp_fault,__ATOMIC_ACQUIRE) && !lp.exp_line && lx_brcmf_reached(5)){
 			lp.exp_line=true;lp.exp_empty=0;__atomic_store_n(&lp.exp_irqs,0,__ATOMIC_RELAXED);
 			if(lx_os_irq_line_attach(line_fired,NULL)==0){
 				(void)lx_os_option("p127_intx_attach");
 				lx_os_irq_line_enable();
 			}else{
-				lp.exp_line=false;lp.exp_fault=true;
-				(void)lx_os_option("p127_intx_fallback");
+				lp.exp_line=false;
+				if(!__atomic_exchange_n(&lp.exp_fault,true,__ATOMIC_ACQ_REL))(void)lx_os_option("p127_intx_fallback");
 			}
 		}
 		if(lp.exp_line){
 			/* 20ms watchdog detects missed interrupts while quiet; a
 			 * nonempty check or empty IRQ storm latches stock fallback. */
 			lx_pause_ms(20);
-			if(__atomic_exchange_n(&lp.exp_irqs,0,__ATOMIC_RELAXED)>100){lp.exp_fault=true;(void)lx_os_option("p127_intx_fallback");}
-			if(lp.polling && !lp.exp_fault && lx_os_option("p127_intx"))
+			if(__atomic_exchange_n(&lp.exp_irqs,0,__ATOMIC_RELAXED)>100){if(!__atomic_exchange_n(&lp.exp_fault,true,__ATOMIC_ACQ_REL))(void)lx_os_option("p127_intx_fallback");}
+			if(lp.polling && !__atomic_load_n(&lp.exp_fault,__ATOMIC_ACQUIRE) && lx_os_option("p127_intx"))
 				lx_os_irq_line_watchdog();
 			continue;
 		}
@@ -288,9 +288,9 @@ line_fired(void *argument)
 	if(experimental){
 		(void)lx_os_option(watchdog?"p127_intx_watchdog":"p127_intx_irq");
 		if(!watchdog && r!=IRQ_NONE)(void)lx_os_option("p1273_wifi_handled");
-		if(!watchdog && __atomic_fetch_add(&lp.exp_irqs,1,__ATOMIC_RELAXED)>=100){lp.exp_fault=true;(void)lx_os_option("p127_intx_fallback");}
+		if(!watchdog && __atomic_fetch_add(&lp.exp_irqs,1,__ATOMIC_RELAXED)>=100){if(!__atomic_exchange_n(&lp.exp_fault,true,__ATOMIC_ACQ_REL))(void)lx_os_option("p127_intx_fallback");}
 		if((watchdog && r!=IRQ_NONE) || (!watchdog && r==IRQ_NONE && ++lp.exp_empty>=8)){
-			lp.exp_fault=true;(void)lx_os_option("p127_intx_fallback");
+			if(!__atomic_exchange_n(&lp.exp_fault,true,__ATOMIC_ACQ_REL))(void)lx_os_option("p127_intx_fallback");
 		}else if(!watchdog && r!=IRQ_NONE)lp.exp_empty=0;
 	}
 
@@ -302,7 +302,7 @@ line_fired(void *argument)
 		lp.handled++;
 	}
 	if(experimental)lp.exp_self=NULL;
-	if(lp.line || (lp.exp_line && lp.polling && !lp.exp_fault))lx_os_irq_line_enable();
+	if(lp.line || (lp.exp_line && lp.polling && !__atomic_load_n(&lp.exp_fault,__ATOMIC_ACQUIRE)))lx_os_irq_line_enable();
 }
 
 int
@@ -339,7 +339,7 @@ lkpi_request_irq(struct device *dev, unsigned int irq, irq_handler_t handler, ir
 	}
 	lp.polling = true;
 	lp.polls=true; /* publish before starting to close the free/start race */
-	lp.exp_fault=false;
+	__atomic_store_n(&lp.exp_fault,false,__ATOMIC_RELEASE);
 	lx_tell("lx: pci: %s's interrupt handler is called by a thread every brcmfmac_poll_ms (INTx from brcmfmac=5)\n",
 	    name);
 	if (lx_os_thread("brcmfmac-irq", poller, NULL) != 0) {

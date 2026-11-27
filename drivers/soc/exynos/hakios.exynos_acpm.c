@@ -387,6 +387,14 @@ hakios_acpm_request(uint32_t id, uint32_t cmd[4])
 {
 	int error;
 
+	/* P127544: refuse experimental MIF writes and the unqualified A55 OPP
+	 * at the common transport, including legacy callers. GET is unchanged. */
+	if (id == HAKIOS_ACPM_CH_DVFS && cmd[2] != 1 &&
+	    (cmd[0] == 0 || (cmd[0] == 2 && cmd[1] == 455000))) {
+		uint32_t paired = 0;
+		if (PE_parse_boot_argn("p12754", &paired, sizeof(paired)) && paired == 1)
+			return EPERM;
+	}
 	if (!acpm_ready || id >= CHANNELS_MOST || !channels[id].usable) {
 		return ENXIO;
 	}
@@ -696,6 +704,20 @@ bus_report(void)
 		if (levels == 0 || levels > BUS_LEVELS_MOST || !sram_ok(at, levels * 8)) {
 			bus_say("bus: DVFS %u (%s): %u levels at +%#x: not a table\n", d, bus_names[d], levels, at);
 			continue;
+		}
+		/* Boot metadata, not live readback. Do not propose a change if the
+		 * init index is invalid or the table is not strictly descending. */
+		if (d == 1 || d == 5 || d == 7 || d == 8) {
+			bool valid = init_lv < levels;
+			uint32_t prev = 4000001u;
+			for (uint32_t l = 0; l < levels; l++) {
+				uint32_t f = srd(at + 8 * l), uv = srd(at + 8 * l + 4);
+				if (f < 1000 || f >= prev || uv < 300000 || uv > 1500000) valid = false;
+				prev = f;
+			}
+			if (valid) bus_say("p127544-bus: domain=%u init=%u min=%u next=%u at_min=%u live_verified=0 write_allowed=0\n",
+			    d, srd(at + 8 * init_lv), prev, srd(at + 8 * (init_lv + 1 < levels ? init_lv + 1 : init_lv)), init_lv + 1 == levels);
+			else bus_say("p127544-bus: domain=%u invalid table or init index; write_allowed=0\n", d);
 		}
 		n = (uint32_t)snprintf(line, sizeof(line), "bus: DVFS %u (%s): %u levels, the boot's level %u; kHz/uV:", d,
 		    bus_names[d], levels, init_lv);

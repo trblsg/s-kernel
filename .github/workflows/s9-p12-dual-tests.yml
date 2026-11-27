@@ -34,6 +34,8 @@ jobs:
           node tools/tests/test-p12751-null.js
           node tools/tests/test-p12751-contract.js
           node tools/tests/test-p12752-contract.js
+          node tools/tests/test-p12753-contract.js
+          node tools/tests/test-p12754-contract.js
           cc -std=c11 -Wall -Wextra -Werror -O2 tools/tests/test_s9_p1274_policy.c -o /tmp/s9-p1274-policy
           /tmp/s9-p1274-policy
           cc -std=gnu11 -Wall -Wextra -Werror -O2 -Itools/tests/p12741_stubs tools/tests/test_s9_p12741_user.c -o /tmp/s9-p12741-user
@@ -153,6 +155,8 @@ jobs:
             'tools/tests/test-s9-p1273-gate.ps1',
             'tools/tests/test-s9-p1274-serial.ps1',
             'tools/tests/test-s9-p12752-serial.ps1',
+            'tools/tests/test-s9-p12753-serial.ps1',
+            'tools/tests/test-s9-p12754-serial.ps1',
             'tools/tests/test-s9-p11-lifecycle-serial.ps1',
             'tools/tests/test-s9-p10-lockscreen-source.ps1',
             'tools/tests/test-s9-p10-serial-harness.ps1',

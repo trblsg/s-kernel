@@ -275,7 +275,8 @@ ticker(void *argument)
 #ifdef LX_P127_JIFFIES
 	unsigned long long zero=0;
 	(void)__atomic_compare_exchange_n(&p127_epoch,&zero,began,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);
-	unsigned burst=0;
+	unsigned burst=0, late_streak=0;
+	bool deadline_fault=false;
 #endif
 
 	for (;;) {
@@ -285,7 +286,9 @@ ticker(void *argument)
 
 		lx_os_lock();
 #ifdef LX_P127_JIFFIES
-		bool tickless=lx_os_option("p127_ticker")!=0;
+		bool requested=lx_os_option("p127_ticker")!=0;
+		if(!requested){deadline_fault=false;late_streak=0;}
+		bool tickless=requested && !deadline_fault;
 		if(tickless){
 			unsigned long now=jiffies,wait=100; /* bounded rollback */
 			for(unsigned i=0;i<nitems(armed);i++)if(armed[i]){
@@ -307,22 +310,41 @@ ticker(void *argument)
 		jiffies = (unsigned long)((lx_os_nanoseconds() - began) / 1000000ull);
 #endif
 		unsigned long now=jiffies;
+#ifdef LX_P127_JIFFIES
+		unsigned long overdue=0;
+#endif
 		for (unsigned i = 0; i < nitems(armed) && due == NULL; i++) {
 			if (armed[i] != NULL && (long)(now - armed[i]->expires) >= 0) {
 				due = armed[i];
+#ifdef LX_P127_JIFFIES
+				overdue=now-due->expires;
+#endif
 				armed[i] = NULL;
 			}
 		}
 		for (unsigned i = 0; i < nitems(later) && work == NULL; i++) {
 			if (later[i].work != NULL && (long)(now - later[i].when) >= 0) {
 				work = later[i].work;
+#ifdef LX_P127_JIFFIES
+				unsigned long late=now-later[i].when;
+				if(late>overdue)overdue=late;
+#endif
 				queue = later[i].queue;
 				later[i].work = NULL;
 			}
 		}
 		lx_os_unlock();
 		#ifdef LX_P127_JIFFIES
-		if(tickless && (due || work))(void)lx_os_option("p127_ticker_due");
+		if(tickless && (due || work)){
+			(void)lx_os_option("p127_ticker_due");
+			late_streak=overdue>20 ? late_streak+1 : 0;
+			/* Never discard due work. Fall back to legacy 2ms polling on
+			 * a severe miss or two consecutive late dispatches. */
+			if(overdue>50 || late_streak>=2){
+				deadline_fault=true;
+				(void)lx_os_option("p1273_tick_fail");
+			}
+		}
 		#endif
 		/* (a timer that a part of the driver not built yet would have given its function has none) */
 		if (due != NULL && due->function_415 != NULL) {
