@@ -49,10 +49,18 @@ $script:P12754HostEnabled=$false
 $script:P12753ArmAllowed=$false
 $script:P127544WarmAllowed=$false
 $script:P127544CompositeAllowed=$false
+$script:P127545LongWaitAllowed=$false
 $script:P12752ProfileAllowed=$false
 $script:P12751NextAllowed=$false
 $script:P1273GateAllowed=$false
 $script:P127542GpuAllowed=$false
+$script:P127545PanelAllowed=$false
+$script:P127545MfcAllowed=$false
+$script:P127545MfcProbeAllowed=$false
+$script:P127545CamAllowed=$false
+$script:P127545CamProbeAllowed=$false
+$script:P127545DispAllowed=$false
+$script:P127545DispProbeAllowed=$false
 $script:P127543AssistAllowed=$false
 $script:P1273CombinedAllowed=$false
 $script:P1272ProbeLines=New-Object 'System.Collections.Generic.List[string]'
@@ -132,8 +140,31 @@ function P12-ReplyShape([string]$Name,[string]$Reply,[bool]$Mixed){
         '^p12751_revision$' {return ($Reply -ceq '1')}
         '^p12752_revision$' {return ($Reply -ceq '1')}
         '^p12753_revision$' {return ($Reply -ceq '1')}
-        '^p12754_revision$' {return ($Reply -cmatch '^[12345]$')}
-        '^(mali_irq|p127542_g2)$' {return ($Reply -cmatch '^[01]$')}
+        '^p12754_revision$' {return ($Reply -cmatch '^[123456]$')}
+        '^(mali_irq|p127542_g2|p127545_panel)$' {return ($Reply -cmatch '^[01]$')}
+        '^p127545_panel_stats$' {return ($Reply -cmatch "^version=1 mode=[01] gen=$dec pending=$dec sleep=$dec latch29=$dec fallback=$dec fault=$dec$")}
+        '^p127545_disp_review$' {return ($Reply -cmatch '^(0|200000|134000)$')}
+        '^p127545_disp_stats$' {return ($Reply -cmatch "^version=1 enabled=[01] transport_ok=[01] closed=[01] active=[01] target=$dec seen=$dec restored=$dec qual=[0-3] pending=$dec attempts=$dec sets=$dec restores=$dec preempt=$dec fault=$dec reviews=$dec live_n=$dec live_min=$dec live_max=$dec start=$dec end=$dec$")}
+        '^p127545_cam_stats$' {return ($Reply -cmatch "^version=1 enabled=[01] idle=[01] good=[01] pending=[01] qualified=[01] active=[01] attempts=$dec restores=$dec preempt=$dec fault=$dec frames=$dec leaf=$dec saved=$dec auto=$dec dbg0=$dec dbg1=$dec dbg2=$dec start=$dec end=$dec$")}
+        '^p127545_mfc_stats$' {return ($Reply -cmatch "^version=1 ready=[01] qualified=[01] active=[01] attempts=$dec restores=$dec preempt=$dec fault=$dec crc=$dec saved=$dec auto=$dec dbg0=$dec dbg1=$dec dbg2=$dec start=$dec end=$dec irq_mode=[01] irq_blocked=$dec irq_review=$dec$")}
+        '^p127545_hci$' {return ($Reply -cmatch "^version=1 epoch=$dec owner=$dec unit=$dec valid=[01] v_tx=$dec v_complete=$dec v_irq=$dec v_poll=$dec f_tx=$dec f_complete=$dec f_irq=$dec f_poll=$dec active_probe=0$")}
+        '^p127545_ect_(mif|int)$' {
+            $table=if($Name -eq 'p127545_ect_mif'){0}else{1}
+            if($Reply -cmatch "^version=1 valid=0 table=$table size=0 fingerprint=0 count=0 live_verified=0 write_allowed=0 rows=-$"){return $true}
+            if($Reply -cnotmatch "^version=1 valid=1 table=$table size=([0-9]{1,10}) fingerprint=([0-9]{1,10}) count=([0-9]{1,2}) live_verified=0 write_allowed=0 rows=([0-9:,]+)$"){return $false}
+            $size=[uint64]$Matches[1];$hash=[uint64]$Matches[2];$n=[uint64]$Matches[3];$rows=$Matches[4].Split(',')
+            if($size -lt 16 -or $size -gt 204800 -or $hash -gt 4294967295 -or $n -lt 1 -or $n -gt 32 -or $rows.Count -ne $n){return $false}
+            $seen=@{}
+            foreach($row in $rows){
+                if($row -cnotmatch '^(\d{1,7}):(\d{1,7})$'){return $false}
+                $master=[uint32]$Matches[1];$slave=[uint32]$Matches[2]
+                if($master -lt 1000 -or $master -gt 4000000 -or $slave -gt 4000000 -or ($slave -ne 0 -and $slave -lt 1000) -or $seen.ContainsKey($master)){return $false}
+                $seen[$master]=$true
+            }
+            return $true
+        }
+        '^p127545_int_bounds$' {return ($Reply -cmatch "^version=1 ect=[01] fv_stable=[01] complete=[01] mif_floor=$dec fsys0_floor=$dec stage_mask=(?:[0-9]|[1-5][0-9]|6[0-3]) live_verified=0 write_allowed=0$")}
+        '^p127545_cmu$' {return ($Reply -cmatch "^version=1 stable=[01] busc_khz=$dec bus1_khz=$dec disp_khz=$dec mif_pll_khz=$dec ddrphy2x_khz=$dec mif_mux=[01](?: fsys0_khz=$dec)? int_opp_verified=0 mif_opp_verified=0 write_allowed=0$")}
         '^p127544_window$' {return ($Reply -cmatch "^version=1 valid=[01] arm=$dec start=$dec end=$dec irq27=$dec wfi_n=$dec wfi_ticks=$dec ge_n=$dec ge_ticks=$dec$")}
         '^p127543_wait$' {return ($Reply -cmatch "^version=1 deadline=$dec plateau=[01]$")}
         '^p127543_rail$' {return ($Reply -cmatch "^version=1 generation=$dec count=[0-2] attempts=[0-4] uv0=$dec uv1=$dec$")}
@@ -144,7 +175,7 @@ function P12-ReplyShape([string]$Name,[string]$Reply,[bool]$Mixed){
         '^p127541_stats$' {
             $shape="^version=1 skips=$dec"
             for($i=0;$i -lt 12;$i++){$bit=1 -shl $i;$shape+=" n$bit=$dec t$bit=$dec"}
-            return ($Reply -cmatch ($shape+'$'))
+            return ($Reply -cmatch ($shape+"(?: n4096=$dec t4096=$dec)?$"))
         }
         '^p12754_rate$' {return ($Reply -cmatch "^version=1 fresh=[01] cur=$dec meas=$dec$")}
         '^p12754_wait$' {return ($Reply -cmatch "^version=1 enabled=[01] preflight=$dec wait=$dec seen=$dec quiet_ticks=$dec input_seen=[01] fingers=$dec$")}
@@ -293,7 +324,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup,[ValidateRan
     }
     if($script:P12752IdleAllowed -or $script:P1274HostEnabled){$allowed+=@('p12751_boot_latch','p12752_revision','p12752_eligibility','p12752_idle_mode','p12752_idle_info','p12752_idle_select','p12752_idle_page','p12752_profile')}
     if($script:P12753HostEnabled){$allowed+=@('p12753_revision','p12753_guard','p12753_status','p12753_arm','p12753_select','p12753_page')}
-    if($script:P12754HostEnabled){$allowed+=@('p12754_revision','p12754_wait','p12754_rate','p127541_stats','p1231_ufs_stats','p127542_audio','p127542_audio_result','mali_irq','p127542_g2','p127543_wait','p127543_rail','p127543_assist','p127544_window')}
+    if($script:P12754HostEnabled){$allowed+=@('p12754_revision','p12754_wait','p12754_rate','p127541_stats','p1231_ufs_stats','p127542_audio','p127542_audio_result','mali_irq','p127542_g2','p127543_wait','p127543_rail','p127543_assist','p127544_window','p127545_cmu','p127545_ect_mif','p127545_ect_int','p127545_int_bounds','p127545_panel','p127545_panel_stats','p127545_hci','p127545_mfc_stats','p127545_cam_stats','p127545_disp_stats','p127545_disp_review')}
     if($Name -notin $allowed){throw "P12 sysctl disallowed $Name"}
     if($script:P124HostEnabled -and $Name -eq 'p1231_hash_mode' -and $Value -eq '1'){throw 'P12.4 rejects scalar thermal trial'}
     if($Value -ne '' -and -not (
@@ -308,7 +339,11 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup,[ValidateRan
         ($script:P1274HostEnabled -and $script:P12752ProfileAllowed -and $Name -eq 'p12752_profile' -and $Value -cmatch '^[1-4]$') -or
         ($script:P12753HostEnabled -and $script:P12753ArmAllowed -and $Name -eq 'p12753_arm' -and $Value -cmatch '^(?:[0-9]|10)$') -or
         ($script:P12754HostEnabled -and $script:P12753HostEnabled -and $script:P12753ArmAllowed -and $Name -eq 'p12753_arm' -and $Value -cmatch '^1[1-4]$') -or
-        ($script:P12754HostEnabled -and $script:P12753HostEnabled -and $script:P12753ArmAllowed -and $script:P127544WarmAllowed -and $Name -eq 'p12753_arm' -and ($Value -cmatch '^(?:1[7-9]|2[0-4]|2[6-9])$' -or ($Value -eq '31' -and $script:P127544CompositeAllowed))) -or
+        ($script:P12754HostEnabled -and $script:P12753HostEnabled -and $script:P12753ArmAllowed -and $script:P127544WarmAllowed -and $Name -eq 'p12753_arm' -and ($Value -cmatch '^(?:1[7-9]|2[0-4]|2[6-9])$' -or ($Value -cmatch '^3[1-8]$' -and $script:P127544CompositeAllowed) -or ($script:P127545LongWaitAllowed -and ($Value -cmatch '^(?:8[1-8]|9[0-3])$' -or ($Value -cmatch '^(?:9[5-9]|10[0-2])$' -and $script:P127544CompositeAllowed))))) -or
+        ($script:P12754HostEnabled -and $script:P12753HostEnabled -and $script:P12753ArmAllowed -and $Name -eq 'p12753_arm' -and (($script:P127545MfcProbeAllowed -and $Value -eq '110') -or ($script:P127545MfcAllowed -and $script:P127544WarmAllowed -and ($Value -eq '39' -or ($script:P127545LongWaitAllowed -and $Value -eq '103'))))) -or
+        ($script:P12754HostEnabled -and $script:P12753HostEnabled -and $script:P12753ArmAllowed -and $Name -eq 'p12753_arm' -and (($script:P127545CamProbeAllowed -and $Value -eq '111') -or ($script:P127545CamAllowed -and $script:P127544WarmAllowed -and ($Value -eq '41' -or ($script:P127545LongWaitAllowed -and $Value -eq '105'))))) -or
+        ($script:P12754HostEnabled -and $script:P12753HostEnabled -and $script:P12753ArmAllowed -and $Name -eq 'p12753_arm' -and (($script:P127545DispProbeAllowed -and $Value -in @('112','113')) -or ($script:P127545DispAllowed -and $script:P127544WarmAllowed -and ($Value -in @('43','44','45') -or ($script:P127545LongWaitAllowed -and $Value -in @('107','108','109')))))) -or
+        ($script:P12754HostEnabled -and $script:P127545DispProbeAllowed -and $Name -eq 'p127545_disp_review' -and $Value -in @('0','200000','134000')) -or
         ($script:P12753HostEnabled -and $Name -eq 'p12753_select' -and $Value -cmatch '^\d{1,2}$' -and [int]$Value -lt 96) -or
         ($script:P12752IdleAllowed -and $Name -eq 'p12752_idle_mode' -and $Value -cmatch '^[0-2]$') -or
         ($script:P12752IdleAllowed -and $Name -eq 'p12752_idle_select' -and $Value -cmatch '^\d{1,2}$' -and [int]$Value -lt 96) -or
@@ -322,6 +357,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup,[ValidateRan
         ($script:P12754HostEnabled -and $script:P1273GateAllowed -and $Name -eq 'p1273_gate_begin' -and $Value -in @('33','49','65')) -or
         ($script:P12754HostEnabled -and $script:P127543AssistAllowed -and $Name -eq 'p127543_assist' -and $Value -in @('0','1','5','17','33','49','65','129','257','513')) -or
         ($script:P12754HostEnabled -and $script:P127542GpuAllowed -and $Name -in @('mali_irq','p127542_g2') -and $Value -in @('0','1')) -or
+        ($script:P12754HostEnabled -and $script:P127545PanelAllowed -and $Name -eq 'p127545_panel' -and $Value -in @('0','1')) -or
         ($script:P12754HostEnabled -and $script:P1273GateAllowed -and $Name -eq 'p127542_audio' -and $Value -match '^[1-9]\d{0,7}$') -or
         ($script:P1273HostEnabled -and $script:P1273GateAllowed -and $Name -in @('p1273_gate_review','p1273_gate_ack') -and $Value -match '^[1-9]\d{0,9}$' -and [uint64]$Value -le 99999999) -or
         ($script:P1273HostEnabled -and $script:P1273CombinedAllowed -and $Name -eq 'p127_mode' -and $Value -in @('903','919')) -or
@@ -348,6 +384,8 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup,[ValidateRan
     if($script:P1272HostEnabled){$restore+='p1272_probe_request'}
     if($script:P1273HostEnabled){$restore+=@('p1273_trace_mode','p1273_cap_mode','p1273_offline_s','p1273_gate_begin')}
     if($script:P127542GpuAllowed){$restore+=@('mali_irq','p127542_g2')}
+    if($script:P127545PanelAllowed){$restore+='p127545_panel'}
+    if($script:P127545DispProbeAllowed){$restore+='p127545_disp_review'}
     if($script:P127543AssistAllowed){$restore+=@('p127543_assist')}
     if($script:P1274HostEnabled){$restore+='p12741_profile'}
     # P12752 recorder cleanup is an opt-in zero-only restore, not a new bypass.

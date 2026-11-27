@@ -1,7 +1,8 @@
 /* P12.7.5.3: boot-local lower-only thermal guard and explicit delayed
  * battery audit. Existing governor is the only worker; no new power-state
  * operation. Legacy P125/P127 probes retain their original ABI.
- * All new hardware accesses are read-only, to the external PMU or ACPM. */
+ * Hardware observation is read-only except the explicitly opted-in,
+ * owner-serialized P127545 MFC leaf trial (no bus/PMU mutation). */
 #ifndef HAKIOS_P12753_H
 #define HAKIOS_P12753_H
 #include <sys/hakios.exynos_abox.h>
@@ -43,9 +44,47 @@ static int32_t p127543_flat_excess;
 static bool p127543_plateau;
 static vm_offset_t p12754_mif,p12754_top;
 static bool p12754_cmu_mapped;
-static unsigned p127541_events[12],p127541_skips;
-static uint64_t p127541_ticks[12],p127541_note_at,p127541_busy_at;
-static int p12754_revision=5;
+static unsigned p127541_events[13],p127541_skips;
+static uint64_t p127541_ticks[13],p127541_note_at,p127541_busy_at;
+static int p12754_revision=6;
+static unsigned p127545_wait_ms=90000;
+#define P545_MFC_AUDIT 23u
+#define P545_MFC_PROBE 24u
+#define P545_CAM_AUDIT 25u
+#define P545_CAM_PROBE 26u
+#define P545_DISP_A400 27u
+#define P545_DISP_B200 28u
+#define P545_DISP_B134 29u
+#define P545_DISP_PROBE200 30u
+#define P545_DISP_PROBE134 31u
+static bool p545_mfc_started,p545_cam_started,p545_disp_started;
+extern bool hakios_p127545_mfc_probe(void);
+extern bool hakios_p127545_mfc_begin(uint64_t until);
+extern bool hakios_p127545_mfc_live(void);
+extern bool hakios_p127545_mfc_end(void);
+extern bool hakios_p127545_mfc_qualified(void);
+extern void hakios_p127545_mfc_invalidate(void);
+extern bool hakios_p127545_cam_probe(void);
+extern bool hakios_p127545_cam_begin(uint64_t until);
+extern bool hakios_p127545_cam_live(void);
+extern bool hakios_p127545_cam_end(void);
+extern bool hakios_p127545_cam_qualified(void);
+extern void hakios_p127545_cam_invalidate(void);
+extern bool hakios_p545_disp_probe(uint32_t want);
+extern bool hakios_p545_disp_begin(uint32_t want,uint64_t until);
+extern bool hakios_p545_disp_live(void);
+extern bool hakios_p545_disp_end(void);
+extern bool hakios_p545_disp_qualified(uint32_t want);
+extern void hakios_p545_disp_invalidate(void);
+static uint32_t p545_disp_target(unsigned request){
+    return request==P545_DISP_A400?400000u:
+        request==P545_DISP_B200 || request==P545_DISP_PROBE200?200000u:
+        request==P545_DISP_B134 || request==P545_DISP_PROBE134?134000u:0u;
+}
+static bool p545_disp_audit(unsigned request){return request>=P545_DISP_A400 && request<=P545_DISP_B134;}
+static bool p545_probe(unsigned request){return request==P545_MFC_PROBE || request==P545_CAM_PROBE ||
+    request==P545_DISP_PROBE200 || request==P545_DISP_PROBE134;}
+static bool p545_connected(unsigned request){return request==14 || p545_probe(request);}
 /* Warm is encoded in the one-shot arm request (16+module), never a persistent control. */
 static bool p127544_warm;
 struct p127544_counts {uint64_t irq,n,ticks,ge_n,ge_ticks;};
@@ -156,7 +195,8 @@ static unsigned p12753_policy(unsigned v){
     /* 1=stock, 2=BASE15, 3=PSR, 4=LITTLE949, 5=ABOX, 6=BT,
      * 7=WiFi, 8=TICKER, 9=stock+ACPM audit, 10=stock60.
      * P12754: 11/12/13 staged floors, 14 passive connected audit. */
-    static const unsigned masks[]={0,0,1,9,17,5,257,129,513,0,0,33,49,65,0,P127544_COMPOSITE};
+    static const unsigned masks[]={0,0,1,9,17,5,257,129,513,0,0,33,49,65,0};
+    if(v>=15 && v<=22)return P127545_COMPOSITE|((v-15u)<<7);
     return v<sizeof(masks)/sizeof(masks[0])?masks[v]:0;
 }
 static unsigned p12753_seconds(unsigned v){return (v==1 || v==9)?120u:60u;}
@@ -164,9 +204,13 @@ static bool p12753_gate_clear(void){
     bool ok;lck_spin_lock(&p1273_gate_lock);p1273_gate_refresh_locked(mach_absolute_time());ok=p1273_gate_phase==0;lck_spin_unlock(&p1273_gate_lock);return ok;
 }
 static bool p12753_qualified(unsigned request){
+    if(request==P545_MFC_AUDIT)return hakios_p127545_mfc_qualified();
+    if(request==P545_CAM_AUDIT)return hakios_p127545_cam_qualified();
+    if(p545_disp_audit(request))return hakios_p545_disp_qualified(p545_disp_target(request));
+    if(request==P545_DISP_PROBE134)return hakios_p545_disp_qualified(200000);
     unsigned policy=p12753_policy(request),bit=p1273_gate_bit(policy);
     bool ok=true;
-    if(request==15){lck_spin_lock(&p1273_gate_lock);p1273_gate_refresh_locked(mach_absolute_time());ok=p127544_composite_locked();lck_spin_unlock(&p1273_gate_lock);return ok;}
+    if(p127545_is_composite(policy)){lck_spin_lock(&p1273_gate_lock);p1273_gate_refresh_locked(mach_absolute_time());ok=p127545_composite_locked(policy);lck_spin_unlock(&p1273_gate_lock);return ok;}
     if(bit){lck_spin_lock(&p1273_gate_lock);p1273_gate_refresh_locked(mach_absolute_time());
         unsigned need=bit|p12754_floor_prereq(policy);
         ok=p1273_gate_phase==0 && (p1273_gate_qualified&need)==need;lck_spin_unlock(&p1273_gate_lock);}
@@ -180,9 +224,12 @@ static bool p12753_qualified(unsigned request){
     }
     return ok;
 }
+extern int hakios_p9_panel_auto_on(void);
+extern bool hakios_p545_mfc_restored(void),hakios_p545_cam_restored(void),hakios_p545_disp_restored(void);
 static bool p12753_other_idle(void){
     lck_spin_lock(&p12752_lock);bool old_idle=p12752_idle_mode==0;lck_spin_unlock(&p12752_lock);
-    return gov_running && !ocp_on && gov_policy==2 && clusters[0].online==4 && clusters[1].online==4 &&
+    return hakios_p545_mfc_restored() && hakios_p545_cam_restored() && hakios_p545_disp_restored() &&
+        !hakios_p9_panel_auto_on() && gov_running && !ocp_on && gov_policy==2 && clusters[0].online==4 && clusters[1].online==4 &&
         big_cores==SCION_BIG_CORES && !hakios_cpu_exit_mask && hakios_p124_ufs_safe() &&
         p1273_gate_idle() && p12753_gate_clear() && old_idle && !__atomic_load_n(&hakios_p1273_offline_duration,__ATOMIC_ACQUIRE);
 }
@@ -217,7 +264,7 @@ static void p12753_sample(struct p12753_row *r,uint64_t now){
 static void p12754_wait_note(unsigned mask,uint64_t now){
     lck_spin_lock(&p12753_lock);
     uint64_t elapsed=p127541_note_at && now>=p127541_note_at?now-p127541_note_at:0;
-    for(unsigned i=0;i<12;i++){
+    for(unsigned i=0;i<13;i++){
         unsigned bit=1u<<i;
         if(p12754_wait_mask&bit)p127541_ticks[i]+=elapsed;
         if((mask&bit) && !(p12754_wait_mask&bit))p127541_events[i]++;
@@ -245,7 +292,7 @@ static int p127541_stats_sysctl(__unused struct sysctl_oid *o,__unused void *a,_
     char buf[768];size_t n;
     lck_spin_lock(&p12753_lock);
     n=(size_t)snprintf(buf,sizeof(buf),"version=1 skips=%u",p127541_skips);
-    for(unsigned i=0;i<12 && n<sizeof(buf);i++){
+    for(unsigned i=0;i<13 && n<sizeof(buf);i++){
         int k=snprintf(buf+n,sizeof(buf)-n," n%u=%u t%u=%llu",1u<<i,p127541_events[i],1u<<i,(unsigned long long)p127541_ticks[i]);
         if(k<0 || (size_t)k>=sizeof(buf)-n){lck_spin_unlock(&p12753_lock);return EOVERFLOW;}
         n+=(size_t)k;
@@ -331,19 +378,36 @@ static void p12753_finish(unsigned reason,unsigned mask,uint64_t now,const struc
     p12754_wait_note(p12754_wait_mask,now);
     uint64_t end=reason==10?p12753_until:now;
     uint64_t lease=p12753_lease;
-    /* Only release the lease we actually acquired. No reset of counters. */
+    __atomic_store_n(&hakios_p12753_observe,0,__ATOMIC_RELEASE);
+    __atomic_store_n(&hakios_p12754_hw_observe,0,__ATOMIC_RELEASE);
+    if(p545_mfc_started){
+        if(!hakios_p127545_mfc_end()){if(reason==10)reason=6;mask|=P53_CONFLICT;}
+        p545_mfc_started=false;
+    }
+    if(p545_cam_started){
+        if(!hakios_p127545_cam_end()){if(reason==10)reason=6;mask|=P53_CONFLICT;}
+        p545_cam_started=false;
+    }
+    if(p545_disp_started){
+        if(!hakios_p545_disp_end()){if(reason==10)reason=6;mask|=P53_CONFLICT;}
+        p545_disp_started=false;
+    }
+    /* Publish the final reason only after all owned clocks have rolled
+     * back. Pending/failed restore also interlocks future audits. */
+    if(!hakios_p545_mfc_restored() || !hakios_p545_cam_restored() || !hakios_p545_disp_restored()){
+        if(reason==10)reason=6;mask|=P53_CONFLICT;
+    }
+    if(reason!=10)end=mach_absolute_time();
     if(lease && __atomic_compare_exchange_n(&hakios_p125_lease,&lease,0,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){
         __atomic_store_n(&hakios_p125_end,end,__ATOMIC_RELEASE);
         __atomic_store_n(&hakios_p125_stop_reason,reason,__ATOMIC_RELEASE);
-    }else if(p12753_lease && reason==10){reason=6;mask|=P53_CONFLICT;}
-    __atomic_store_n(&hakios_p12753_observe,0,__ATOMIC_RELEASE);
-    __atomic_store_n(&hakios_p12754_hw_observe,0,__ATOMIC_RELEASE);
+    }else if(p12753_lease && reason==10){reason=6;mask|=P53_CONFLICT;end=mach_absolute_time();}
     if(p12753_policy_lease && __atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE)==p12753_policy_lease)
         hakios_p127_stop(reason);
     lck_spin_lock(&p12753_lock);
     p12753_end=end;p12753_reason=reason;p12753_mask=mask;p12753_stop_row=*r;
     p127544_window_valid=false;
-    if(reason==10 && !mask && p12753_start && p12753_request!=14){
+    if(reason==10 && !mask && p12753_start && !p545_connected(p12753_request)){
         struct p127544_counts c=p127544_read_counts(),b=p127544_begin;
         if(c.irq>=b.irq && c.n>=b.n && c.ticks>=b.ticks && c.ge_n>=b.ge_n && c.ge_ticks>=b.ge_ticks){
             p127544_delta=(struct p127544_counts){c.irq-b.irq,c.n-b.n,c.ticks-b.ticks,c.ge_n-b.ge_n,c.ge_ticks-b.ge_ticks};
@@ -356,11 +420,22 @@ static void p12753_finish(unsigned reason,unsigned mask,uint64_t now,const struc
     say("p12753-audit: frozen request=%u reason=%u mask=%u start=%llu end=%llu\n",p12753_request,reason,mask,(unsigned long long)p12753_start,(unsigned long long)end);
 }
 static int p12753_arm_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
-    int v=__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE)?(int)p12753_request+(p127544_warm?16:0):0;
+    int v=__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE)?(p12753_request==P545_MFC_PROBE?110:p12753_request==P545_CAM_PROBE?111:p12753_request==P545_DISP_PROBE200?112:p12753_request==P545_DISP_PROBE134?113:(int)p12753_request+(p127544_warm?16:0)+(p127545_wait_ms==150000?64:0)):0;
     int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);if(e||!req->newptr)return e;
-    bool warm=v>=17 && v<=31;
+    bool mfc_probe=v==110,cam_probe=v==111,disp200_probe=v==112,disp134_probe=v==113;
+    bool probe=mfc_probe || cam_probe || disp200_probe || disp134_probe;
+    bool extended=v>=81 && v<=109;
+    if(extended)v-=64;
+    bool warm=v>=17 && v<=45;
     if(warm)v-=16;
-    if(v<0 || v>15 || (v>10 && !p12754_optin()) || (warm && (!p12754_optin() || v==9 || v==14)) || (v==15 && !warm))return EINVAL;
+    if(mfc_probe)v=P545_MFC_PROBE;
+    if(cam_probe)v=P545_CAM_PROBE;
+    if(disp200_probe)v=P545_DISP_PROBE200;
+    if(disp134_probe)v=P545_DISP_PROBE134;
+    if(v<0 || v>(int)P545_DISP_PROBE134 || (v>10 && !p12754_optin()) ||
+       (warm && (!p12754_optin() || v==9 || v==14 || p545_probe((unsigned)v))) ||
+       (v>=15 && !warm && !probe) || (extended && !warm) ||
+       (p545_probe((unsigned)v) && !probe))return EINVAL;
     if(!v){if(__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE))__atomic_store_n(&p12753_cancel,1,__ATOMIC_RELEASE);return 0;}
     if(!p12753_enabled() || !p12753_other_idle() || !p12753_qualified((unsigned)v) || p125_thermal_reason() || hakios_battery_temperature()<=0)return EPERM;
     uint64_t now=mach_absolute_time();
@@ -379,14 +454,16 @@ static int p12753_arm_sysctl(__unused struct sysctl_oid *o,__unused void *a,__un
     p127541_skips=0;p127541_note_at=p127541_busy_at=0;
     bzero(p127541_events,sizeof(p127541_events));bzero(p127541_ticks,sizeof(p127541_ticks));
     p127544_window_valid=false;bzero(&p127544_delta,sizeof(p127544_delta));
-    p127544_warm=warm;p12753_request=(unsigned)v;p12753_arm_at=now;p12753_wait_until=now+p1274_ticks_ms(90000);
+    p127545_wait_ms=extended?150000:90000;
+    p545_mfc_started=p545_cam_started=p545_disp_started=false;
+    p127544_warm=warm;p12753_request=(unsigned)v;p12753_arm_at=now;p12753_wait_until=now+p1274_ticks_ms(p127545_wait_ms);
     p12753_quiet=p12753_start=p12753_end=p12753_until=p12753_down=p12753_on=p12753_last=p12753_bus_last=p12753_lease=p12753_policy_lease=0;
     p12753_reason=p12753_mask=p12753_count=p12753_drops=p12753_bus=p12753_select=0;
     bzero(&p12753_stop_row,sizeof(p12753_stop_row));__atomic_store_n(&p12753_cancel,0,__ATOMIC_RELEASE);
     p12753_state=1;__atomic_store_n(&hakios_p12753_busy,1,__ATOMIC_RELEASE);
     lck_spin_unlock(&p12753_lock);return 0;
 }
-SYSCTL_PROC(_kern_hakios,OID_AUTO,p12753_arm,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p12753_arm_sysctl,"I","P12753 cold 1..13, connected 14, warm 17..29 (except 25), composite warm 31; 0 cancel");
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p12753_arm,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p12753_arm_sysctl,"I","P12753 cold 1..13, connected 14, warm 17..29 (except 25), composite warm 31..38, MFC warm 39, ISPPRE warm 41, DISP 43..45, connected probes 110..113; warm+64 extended WAIT; 0 cancel");
 static void p12753_audit_tick(uint64_t now){
     if(!__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE))return;
     /* One PMU mapping on the existing worker, not in an IRQ or MMIO
@@ -409,21 +486,21 @@ static void p12753_audit_tick(uint64_t now){
         if(down>p12753_arm_at){
             lck_spin_lock(&p12753_lock);
             /* Grant once after a prompt disconnect, never renew on another link cycle. */
-            if(!p12753_down && p12754_optin() && p12753_request!=14 && down-p12753_arm_at<=p1274_ticks_ms(15000))
-                p12753_wait_until=down+p1274_ticks_ms(90000);
+            if(!p12753_down && p12754_optin() && !p545_connected(p12753_request) && down-p12753_arm_at<=p1274_ticks_ms(15000))
+                p12753_wait_until=down+p1274_ticks_ms(p127545_wait_ms);
             p12753_down=down;lck_spin_unlock(&p12753_lock);
         }
         if(now>=p12753_wait_until){p12753_finish(8,P53_TIMEOUT,now,&r);return;}
         if(!p12753_other_idle()){p12754_wait_note(1024u,now);p12753_finish(6,P53_CONFLICT,now,&r);return;}
         if(down>p12753_arm_at && up>down){p12753_finish(8,P53_LINK,now,&r);return;}
-        bool connected=p12753_request==14;
+        bool connected=p545_connected(p12753_request);
         unsigned wait=0;
         if(connected ? (down>up) : !(down>p12753_arm_at && down>up))wait|=1u;
         if(!fresh || (!connected && at<down))wait|=2u;
         if(connected ? !(fg&1u) : (fg&1u))wait|=4u;
         if(!off)wait|=8u;if(!gpuoff)wait|=16u;
         /* Headroom must still hold after USB disconnect/wake, not just at arm. */
-        unsigned headroom=(!connected && p12754_optin())?
+        unsigned headroom=((!connected || p545_probe(p12753_request)) && p12754_optin())?
             p12753_temp_mask(r.big,r.lit,r.gpu,r.bat,r.age,p127544_admit_big()+1,p127544_admit_lit()+1,p127544_admit_gpu()+1,45):0;
         if(r.mask || headroom)wait|=32u;if(r.bs+r.ls>=150u)wait|=64u;
         if(hakios_p124_ufs_busy())wait|=128u;
@@ -432,7 +509,7 @@ static void p12753_audit_tick(uint64_t now){
         if(p12753_quiet && on>=p12753_quiet)wait|=2048u;
         /* A warm audit still needs stable thermal conditions, not just a higher ceiling.
          * Existing burst guard is sampled by this same governor worker. */
-        if(!connected && p127544_warm && (p12753_gmask&P53_BUSY))wait|=64u;
+        if(!connected && p127544_warm && (p12753_gmask&P53_BUSY))wait|=4096u;
         p12754_wait_note(wait,now);
         /* If all other conditions settle but temperature stays above the
          * admission ceiling, stop instead of consuming the entire battery wait.
@@ -455,6 +532,21 @@ static void p12753_audit_tick(uint64_t now){
         if(!p12753_quiet){p12753_quiet=now;return;}
         /* Read-only connected audit qualifies quickly; battery WAIT unchanged. */
         if(now-p12753_quiet<p1274_ticks_ms(connected?1000:20000))return;
+        if(p545_probe(p12753_request)){
+            /* Short connected pulse and full rollback. MFC verifies CRC
+             * here; ISPPRE needs a subsequent real stream. Not watts. */
+            bool mfc=p12753_request==P545_MFC_PROBE,cam=p12753_request==P545_CAM_PROBE;
+            bool ok=mfc?hakios_p127545_mfc_probe():cam?hakios_p127545_cam_probe():hakios_p545_disp_probe(p545_disp_target(p12753_request));
+            uint64_t done=mach_absolute_time();
+            struct p12753_row post={0};p12753_sample(&post,done);
+            if(hakios_display_requested_on()!=0 || __atomic_load_n(&hakios_p12753_display_on,__ATOMIC_ACQUIRE)!=on ||
+               __atomic_load_n(&hakios_p12753_usb_down,__ATOMIC_ACQUIRE)!=down || __atomic_load_n(&hakios_p12753_usb_up,__ATOMIC_ACQUIRE)!=up ||
+               __atomic_load_n(&hakios_p12753_cancel,__ATOMIC_ACQUIRE) || post.mask ||
+               p12753_temp_mask(post.big,post.lit,post.gpu,post.bat,post.age,76000,70000,72000,47))ok=false;
+            if(!ok){if(mfc)hakios_p127545_mfc_invalidate();else if(cam)hakios_p127545_cam_invalidate();else hakios_p545_disp_invalidate();}
+            lck_spin_lock(&p12753_lock);p12753_start=now;p12753_until=done;lck_spin_unlock(&p12753_lock);
+            p12753_finish(ok?10:6,ok?0:P53_CONFLICT,done,&r);return;
+        }
         if(connected){
             /* Connected observation owns only the recorder, no policy or P125 lease. */
             lck_spin_lock(&p12753_lock);
@@ -467,7 +559,19 @@ static void p12753_audit_tick(uint64_t now){
         unsigned policy=p12753_policy(p12753_request);
         /* All hardware module admission checks remain in the original
          * P127 arm helper, including UFS/OPP and functional gate ownership. */
-        if(!p12753_qualified(p12753_request) || (policy && (p12753_request==15?p127_arm_mode_internal((int)policy,false,true):p127_arm_mode((int)policy)))){p12753_finish(6,P53_CONFLICT,now,&r);return;}
+        if(!p12753_qualified(p12753_request) || (policy && (p127545_is_composite(policy)?p127_arm_mode_internal((int)policy,false,true):p127_arm_mode((int)policy)))){p12753_finish(6,P53_CONFLICT,now,&r);return;}
+        if(p12753_request==P545_MFC_AUDIT){
+            if(!hakios_p127545_mfc_begin(mach_absolute_time()+p1274_ticks_ms(61000))){p12753_finish(6,P53_CONFLICT,now,&r);return;}
+            p545_mfc_started=true;
+        }
+        if(p12753_request==P545_CAM_AUDIT){
+            if(!hakios_p127545_cam_begin(mach_absolute_time()+p1274_ticks_ms(61000))){p12753_finish(6,P53_CONFLICT,now,&r);return;}
+            p545_cam_started=true;
+        }
+        if(p545_disp_audit(p12753_request)){
+            if(!hakios_p545_disp_begin(p545_disp_target(p12753_request),mach_absolute_time()+p1274_ticks_ms(65000))){p12753_finish(6,P53_CONFLICT,now,&r);return;}
+            p545_disp_started=true;
+        }
         uint64_t start=mach_absolute_time();
         uint64_t until=(start+p1274_ticks_ms((uint64_t)p12753_seconds(p12753_request)*1000))&~3ULL;
         if(policy){
@@ -545,6 +649,9 @@ static void p12753_audit_tick(uint64_t now){
     /* Qualification invalidated by a driver fault or time expiry must
      * terminate the active phase, not just mark it after the fact. */
     if(p12753_request!=3 && !p12753_qualified(p12753_request))mask|=P53_CONFLICT;
+    if(p12753_request==P545_MFC_AUDIT && (!p545_mfc_started || !hakios_p127545_mfc_live()))mask|=P53_CONFLICT;
+    if(p12753_request==P545_CAM_AUDIT && (!p545_cam_started || !hakios_p127545_cam_live()))mask|=P53_CONFLICT;
+    if(p545_disp_audit(p12753_request) && (!p545_disp_started || !hakios_p545_disp_live()))mask|=P53_CONFLICT;
     if(p12753_request==3 && __atomic_load_n(&hakios_p127_psr[3],__ATOMIC_ACQUIRE))mask|=P53_CONFLICT;
     if(!off || on!=p12753_on || __atomic_load_n(&hakios_p125_display_events,__ATOMIC_ACQUIRE))mask|=P53_DISPLAY;
     if(!fresh || (fg&1u) || down!=p12753_down || up>p12753_down)mask|=P53_LINK;

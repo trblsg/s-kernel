@@ -39,6 +39,8 @@
 #include <kern/clock.h>
 #include <kern/locks.h>
 #include <kern/thread.h>
+#include <kern/thread_call.h>
+#include <sys/sysctl.h>
 #include <kern/sched_prim.h>
 #include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
@@ -245,6 +247,7 @@ static uint8_t *mem;                    /* the 128 MB, write-combined */
 static uint32_t steps;
 static int dead;                        /* a step failed: the block is not used again this boot */
 static int fw_up;
+static bool mfc_close_clean=true,mfc_crc_ok;
 static lck_mtx_t *mfc_lock;
 
 static inline uint32_t rd(volatile uint8_t *b, uint32_t off) { return *(volatile uint32_t *)(b + off); }
@@ -387,22 +390,63 @@ static uint32_t last_error;             /* ERROR_CODE as read with the last answ
  */
 #define MFC_INTID       EXYNOS_MFC_MFC_INTID      /* the device tree's SPI 356 */
 extern kern_return_t gic_v3_spi_attach(uint32_t intid, bool edge, void (*handler)(void *context, uint32_t intid), void *context);
+extern void gic_v3_spi_mask(uint32_t intid);
+extern void gic_v3_spi_unmask(uint32_t intid);
 static uint32_t irq_wanted;
 static bool irq_on;
 static volatile uint32_t irq_answer, irq_error;
 static uint64_t irq_count, irq_missed;
 
+/* IRQ accesses to the functional MFC leaf are exclusive with a QCH
+ * experiment. Mask the already-owned SPI before trying to close the gate;
+ * a late dispatched handler records a conflict without reading the IP.
+ * No detach/re-attach, no route change, no clearing pending interrupts. */
+#define P545_MFC_IRQ_CLOSED (1u<<31)
+#define P545_MFC_IRQ_LATE (1u<<30)
+static uint32_t p545_mfc_irq_gate,p545_mfc_irq_blocked,p545_mfc_irq_review;
+static bool p545_mfc_irq_enter(void){
+    uint32_t old=__atomic_load_n(&p545_mfc_irq_gate,__ATOMIC_ACQUIRE);
+    for(;;){
+        if(old&P545_MFC_IRQ_CLOSED){
+            uint32_t want=old|P545_MFC_IRQ_LATE;
+            if(__atomic_compare_exchange_n(&p545_mfc_irq_gate,&old,want,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){
+                __atomic_fetch_add(&p545_mfc_irq_blocked,1,__ATOMIC_RELAXED);return false;
+            }
+        }else{
+            uint32_t want=old+1;
+            if(__atomic_compare_exchange_n(&p545_mfc_irq_gate,&old,want,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return true;
+        }
+    }
+}
+static bool p545_mfc_irq_close(void){
+    if(irq_on)gic_v3_spi_mask(MFC_INTID);
+    uint32_t expected=0;
+    if(__atomic_compare_exchange_n(&p545_mfc_irq_gate,&expected,P545_MFC_IRQ_CLOSED,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return true;
+    if(irq_on && !(expected&P545_MFC_IRQ_CLOSED))gic_v3_spi_unmask(MFC_INTID);
+    return false;
+}
+static bool p545_mfc_irq_open(void){
+    uint32_t old=__atomic_exchange_n(&p545_mfc_irq_gate,0,__ATOMIC_ACQ_REL);
+    if(irq_on)gic_v3_spi_unmask(MFC_INTID);
+    return old==P545_MFC_IRQ_CLOSED;
+}
+static bool p545_mfc_irq_clean(void){
+    return __atomic_load_n(&p545_mfc_irq_gate,__ATOMIC_ACQUIRE)==P545_MFC_IRQ_CLOSED;
+}
+
 static void
 mfc_interrupt(void *context __unused, uint32_t intid __unused)
 {
+	if(!p545_mfc_irq_enter())return;
 	if (R(RISC2HOST_INT) != 0) {
 		irq_error = R(ERROR_CODE);
 		irq_answer = R(RISC2HOST_CMD) & R2H_MASK;
 		W(RISC2HOST_CMD, 0);
 		W(RISC2HOST_INT, 0);
-		irq_count++;
+		__atomic_fetch_add(&irq_count,1,__ATOMIC_RELAXED);
 		thread_wakeup((event_t)&irq_answer);
 	}
+    __atomic_fetch_sub(&p545_mfc_irq_gate,1,__ATOMIC_RELEASE);
 }
 
 /* What the RISC answers, or 0 after `ms`. */
@@ -551,7 +595,7 @@ inst_close(void)
 		return;
 	}
 	W(INSTANCE_ID, I.inst);
-	(void)expect(H2R_CLOSE_INSTANCE, R2H_CLOSE_INSTANCE, "CLOSE_INSTANCE");
+	if(expect(H2R_CLOSE_INSTANCE, R2H_CLOSE_INSTANCE, "CLOSE_INSTANCE")!=0)mfc_close_clean=false;
 	I.open = 0;
 	mem_used = I.mem_mark;
 }
@@ -1023,6 +1067,7 @@ self_test(void)
 	uint32_t consumed = 0, unit = 0, shown = 0, right = 0;
 	uint64_t begun, ended, ns;
 	int error;
+	mfc_crc_ok=false;
 
 	if ((error = inst_open(CODEC_H264)) != 0) {
 		say("exynos_mfc: 4: no instance: %d\n", error);
@@ -1076,6 +1121,7 @@ self_test(void)
 	absolutetime_to_nanoseconds(ended - begun, &ns);
 	say("exynos_mfc: 4: %u frames shown, %u with the right CRC, of 6, in %llu us (error %d)\n", shown, right, ns / 1000, error);
 	inst_close();
+	mfc_crc_ok=right==6 && shown==6 && !error && mfc_close_clean && !dead;
 	if (right != 6) {
 		say("exynos_mfc: 4: not what ffmpeg decodes: no device for user space\n");
 		dead = 1;
@@ -1086,12 +1132,187 @@ self_test(void)
 
 static int mfc_opens;
 
+/* P127545 MFC-only leaf trial. CAL ra_set_qch: enable bit0, request bit1.
+ * No top gate, SYSMMU, bus, PMU, rate or firmware sleep mutation.
+ * Retain the configured IRQ mode; the SPI/atomic gate above prevents an
+ * ISR from accessing the leaf during the trial. All other post-init
+ * firmware users serialize on mfc_lock. A late IRQ invalidates the trial.
+ * DBG_NFO=4 was observed with forced request on this S9; do not assign
+ * a meaning to another state. Require a stable distinct state in the
+ * pilot, and the exact original state on rollback before any IP MMIO.
+ */
+#define P545_MFC_QCH 0x302cu
+#define P545_MFC_DBG 0x702cu
+#define P545_MFC_AUTO 1u
+static bool p545_mfc_ready,p545_mfc_qualified,p545_mfc_active;
+static unsigned p545_mfc_restore_pending;
+bool hakios_p545_mfc_restored(void);
+bool hakios_p545_mfc_restored(void){return !__atomic_load_n(&p545_mfc_restore_pending,__ATOMIC_ACQUIRE) &&
+    !(__atomic_load_n(&p545_mfc_irq_gate,__ATOMIC_ACQUIRE)&P545_MFC_IRQ_CLOSED);}
+static unsigned p545_mfc_revoke;
+static uint32_t p545_mfc_saved,p545_mfc_auto,p545_mfc_dbg0,p545_mfc_dbg1,p545_mfc_dbg2;
+static uint32_t p545_mfc_attempts,p545_mfc_restores,p545_mfc_preempt,p545_mfc_fault,p545_mfc_crc;
+static uint64_t p545_mfc_start,p545_mfc_end,p545_mfc_deadline;
+static thread_call_t p545_mfc_timer;
+
+static bool p545_mfc_access(void){
+    return pmu && cmu_top && cmu_mfc &&
+        (rd(pmu,PMU_STATUS)&PD_ON)==PD_ON &&
+        (rd(cmu_top,TOP_GATE)&(GATE_MANUAL|GATE_ON))==(GATE_MANUAL|GATE_ON) &&
+        (rd(cmu_mfc,MFC_BUS_USER)&((1u<<4)|(1u<<7)))==(1u<<4);
+}
+static bool p545_mfc_idle(void){
+    return p545_mfc_ready && !dead && fw_up && mfc_crc_ok && mfc_close_clean &&
+        (!irq_wanted || irq_on) && !mfc_opens && !I.open && p545_mfc_access();
+}
+static bool p545_mfc_restore_locked(bool preempt){
+    if(!p545_mfc_active)return !p545_mfc_fault;
+    if(preempt){p545_mfc_preempt++;p545_mfc_qualified=false;}
+    bool ok=false;
+    if(p545_mfc_access()){
+        wr(cmu_mfc,P545_MFC_QCH,p545_mfc_saved);
+        ok=wait_bits(cmu_mfc,P545_MFC_QCH,UINT32_MAX,p545_mfc_saved,1000) &&
+           wait_bits(cmu_mfc,P545_MFC_DBG,UINT32_MAX,p545_mfc_dbg0,1000);
+        p545_mfc_dbg2=rd(cmu_mfc,P545_MFC_DBG);
+    }
+    p545_mfc_end=mach_absolute_time();p545_mfc_active=false;
+    if(ok){
+        /* Stock clock is verified before permitting IRQ/IP access again.
+         * An unexpected pending command/IRQ invalidates the measurement,
+         * even when the actual hardware rollback was successful. */
+        bool clean=!irq_answer && !R(HOST2RISC_INT) && !R(RISC2HOST_INT);
+        bool irq_clean=p545_mfc_irq_open();
+        p545_mfc_restores++;__atomic_store_n(&p545_mfc_restore_pending,0,__ATOMIC_RELEASE);
+        if(!clean || !irq_clean){p545_mfc_fault++;p545_mfc_qualified=false;return false;}
+    }else{
+        p545_mfc_fault++;p545_mfc_qualified=false;dead=1;P54_MFC_SET(16u);
+        /* Do not access the codec after an uncertain restore. */
+    }
+    return ok;
+}
+static void p545_mfc_expire(__unused thread_call_param_t a,__unused thread_call_param_t b){
+    lck_mtx_lock(mfc_lock);
+    if(p545_mfc_active && mach_absolute_time()>=p545_mfc_deadline){
+        (void)p545_mfc_restore_locked(true);p545_mfc_qualified=false;
+    }
+    lck_mtx_unlock(mfc_lock);
+}
+static bool p545_mfc_apply_locked(void){
+    if(!p545_mfc_idle() || p545_mfc_active || p545_mfc_fault || !p545_mfc_timer)return false;
+    if(!p545_mfc_irq_close())return false;
+    /* Only the documented MFC functional leaf, with known forced baseline.
+     * No IP reads until the IRQ exclusion gate has been closed. */
+    uint32_t q=rd(cmu_mfc,P545_MFC_QCH),dbg=rd(cmu_mfc,P545_MFC_DBG);
+    if((q&7u)!=QCH_REQ || dbg!=4u || irq_answer || R(HOST2RISC_INT) || R(RISC2HOST_INT)){
+        (void)p545_mfc_irq_open();return false;
+    }
+    IODelay(20);
+    if(rd(cmu_mfc,P545_MFC_QCH)!=q || rd(cmu_mfc,P545_MFC_DBG)!=dbg || !p545_mfc_irq_clean() ||
+       irq_answer || R(HOST2RISC_INT) || R(RISC2HOST_INT)){
+        (void)p545_mfc_irq_open();return false;
+    }
+    p545_mfc_saved=q;p545_mfc_dbg0=dbg;p545_mfc_auto=(q&~QCH_REQ)|P545_MFC_AUTO;
+    p545_mfc_attempts++;p545_mfc_active=true;p545_mfc_start=mach_absolute_time();
+    __atomic_store_n(&p545_mfc_restore_pending,1,__ATOMIC_RELEASE);
+    wr(cmu_mfc,P545_MFC_QCH,p545_mfc_auto);
+    if(!wait_bits(cmu_mfc,P545_MFC_QCH,UINT32_MAX,p545_mfc_auto,1000)){
+        (void)p545_mfc_restore_locked(false);p545_mfc_fault++;p545_mfc_qualified=false;return false;
+    }
+    /* A stable different DBG value is a candidate witness, not proof
+     * of the state encoding. No read of the gated IP until restore. */
+    bool changed=false;
+    for(unsigned i=0;i<100;i++){
+        uint32_t v=rd(cmu_mfc,P545_MFC_DBG);
+        if(v!=dbg && v!=UINT32_MAX){
+            IODelay(10);
+            if(rd(cmu_mfc,P545_MFC_DBG)==v){p545_mfc_dbg1=v;changed=true;break;}
+        }
+        IODelay(10);
+    }
+    if(!changed || !p545_mfc_irq_clean()){(void)p545_mfc_restore_locked(false);p545_mfc_fault++;p545_mfc_qualified=false;return false;}
+    return true;
+}
+bool hakios_p127545_mfc_probe(void);
+bool hakios_p127545_mfc_begin(uint64_t until);
+bool hakios_p127545_mfc_live(void);
+bool hakios_p127545_mfc_end(void);
+bool hakios_p127545_mfc_qualified(void);
+void hakios_p127545_mfc_invalidate(void);
+void hakios_p127545_mfc_invalidate(void){__atomic_store_n(&p545_mfc_revoke,1,__ATOMIC_RELEASE);}
+bool hakios_p127545_mfc_qualified(void){
+    if(!mfc_lock || !lck_mtx_try_lock(mfc_lock))return false;
+    bool ok=p545_mfc_ready && p545_mfc_qualified && !__atomic_load_n(&p545_mfc_revoke,__ATOMIC_ACQUIRE) && !p545_mfc_fault && !dead && mfc_close_clean;
+    lck_mtx_unlock(mfc_lock);return ok;
+}
+bool hakios_p127545_mfc_probe(void){
+    if(!mfc_lock || !lck_mtx_try_lock(mfc_lock))return false;
+    bool ok=false;
+    p545_mfc_qualified=false;
+    __atomic_store_n(&p545_mfc_revoke,0,__ATOMIC_RELEASE);
+    if(p545_mfc_apply_locked()){
+        IODelay(1000);
+        bool held=rd(cmu_mfc,P545_MFC_QCH)==p545_mfc_auto && rd(cmu_mfc,P545_MFC_DBG)==p545_mfc_dbg1;
+        if(p545_mfc_restore_locked(false) && held){
+            /* Existing real six-frame test, only after complete restoration. */
+            uint64_t irq_before=__atomic_load_n(&irq_count,__ATOMIC_ACQUIRE),missed_before=irq_missed;
+            self_test();
+            ok=mfc_crc_ok && !dead && mfc_close_clean &&
+                (!irq_on || (__atomic_load_n(&irq_count,__ATOMIC_ACQUIRE)>irq_before && irq_missed==missed_before));
+            if(ok){p545_mfc_crc++;if(irq_on)p545_mfc_irq_review++;}
+        }
+        if(!ok)p545_mfc_fault++;
+    }
+    p545_mfc_qualified=ok && !p545_mfc_fault;
+    ok=p545_mfc_qualified;
+    lck_mtx_unlock(mfc_lock);return ok;
+}
+bool hakios_p127545_mfc_begin(uint64_t until){
+    if(!mfc_lock || !lck_mtx_try_lock(mfc_lock))return false;
+    uint32_t saved=p545_mfc_saved,dbg=p545_mfc_dbg1;
+    bool ok=p545_mfc_qualified && !__atomic_load_n(&p545_mfc_revoke,__ATOMIC_ACQUIRE) && p545_mfc_apply_locked();
+    if(ok && (p545_mfc_saved!=saved || p545_mfc_dbg1!=dbg)){
+        (void)p545_mfc_restore_locked(false);p545_mfc_qualified=false;p545_mfc_fault++;ok=false;
+    }
+    if(ok){
+        p545_mfc_deadline=until;
+        thread_call_enter_delayed(p545_mfc_timer,until);
+    }
+    lck_mtx_unlock(mfc_lock);return ok;
+}
+bool hakios_p127545_mfc_live(void){
+    if(!mfc_lock || !lck_mtx_try_lock(mfc_lock))return false;
+    bool ok=p545_mfc_active && !p545_mfc_fault && !mfc_opens && p545_mfc_irq_clean() && p545_mfc_access() &&
+        rd(cmu_mfc,P545_MFC_QCH)==p545_mfc_auto && rd(cmu_mfc,P545_MFC_DBG)==p545_mfc_dbg1;
+    if(!ok && p545_mfc_active){(void)p545_mfc_restore_locked(false);p545_mfc_fault++;p545_mfc_qualified=false;}
+    lck_mtx_unlock(mfc_lock);return ok;
+}
+bool hakios_p127545_mfc_end(void){
+    if(!mfc_lock || !lck_mtx_try_lock(mfc_lock))return false;
+    bool was=p545_mfc_active,ok=p545_mfc_restore_locked(false);
+    ok=was && ok && !p545_mfc_fault;
+    lck_mtx_unlock(mfc_lock);return ok;
+}
+static int p545_mfc_stats(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
+    char out[384];
+    if(!mfc_lock)return ENODEV;
+    lck_mtx_lock(mfc_lock);
+    snprintf(out,sizeof(out),"version=1 ready=%u qualified=%u active=%u attempts=%u restores=%u preempt=%u fault=%u crc=%u saved=%u auto=%u dbg0=%u dbg1=%u dbg2=%u start=%llu end=%llu irq_mode=%u irq_blocked=%u irq_review=%u",
+        p545_mfc_ready,p545_mfc_qualified && !__atomic_load_n(&p545_mfc_revoke,__ATOMIC_ACQUIRE),p545_mfc_active,p545_mfc_attempts,p545_mfc_restores,p545_mfc_preempt,p545_mfc_fault,p545_mfc_crc,
+        p545_mfc_saved,p545_mfc_auto,p545_mfc_dbg0,p545_mfc_dbg1,p545_mfc_dbg2,(unsigned long long)p545_mfc_start,(unsigned long long)p545_mfc_end,
+        irq_on,__atomic_load_n(&p545_mfc_irq_blocked,__ATOMIC_ACQUIRE),p545_mfc_irq_review);
+    lck_mtx_unlock(mfc_lock);
+    return SYSCTL_OUT(req,out,strlen(out)+1);
+}
+SYSCTL_DECL(_kern_hakios);
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p127545_mfc_stats,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p545_mfc_stats,"A","MFC isolated auto-QCH trial and rollback witness");
+
 static int
 mfc_open(dev_t dev __unused, int flags __unused, int type __unused, proc_t p __unused)
 {
 	int error = 0;
 
 	lck_mtx_lock(mfc_lock);
+	if(p545_mfc_active)(void)p545_mfc_restore_locked(true);
 	if (dead || !fw_up) {
 		error = EIO;
 	} else if (mfc_opens != 0) {
@@ -1107,6 +1328,7 @@ static int
 mfc_close(dev_t dev __unused, int flags __unused, int type __unused, proc_t p __unused)
 {
 	lck_mtx_lock(mfc_lock);
+	if(p545_mfc_active)(void)p545_mfc_restore_locked(true);
 	if (!dead) {
 		inst_close();
 	}
@@ -1146,6 +1368,7 @@ mfc_ioctl(dev_t dev __unused, u_long cmd, caddr_t data, int flag __unused, proc_
 	int error = 0;
 
 	lck_mtx_lock(mfc_lock);
+	if(p545_mfc_active)(void)p545_mfc_restore_locked(true);
 	if (dead || !fw_up) {
 		lck_mtx_unlock(mfc_lock);
 		return EIO;
@@ -1310,6 +1533,15 @@ mfc_thread(void *arg __unused, wait_result_t w __unused)
 			say("exynos_mfc: 5: no /dev/hakios-mfc\n");
 		} else {
 			P54_MFC_SET(8u);
+			uint32_t paired=0,trial=0;
+			(void)PE_parse_boot_argn("p12754",&paired,sizeof(paired));
+			(void)PE_parse_boot_argn("p127545_qch",&trial,sizeof(trial));
+			if(paired==1 && trial==1 && (!irq_wanted || irq_on) && mfc_crc_ok && mfc_close_clean){
+				lck_mtx_lock(mfc_lock);
+				p545_mfc_timer=thread_call_allocate(p545_mfc_expire,NULL);
+				p545_mfc_ready=p545_mfc_timer!=NULL;
+				lck_mtx_unlock(mfc_lock);
+			}
 			say("exynos_mfc: 5: /dev/hakios-mfc\n");
 		}
 	}

@@ -2324,8 +2324,13 @@ hakios_mali_submit(uint64_t chain,bool fragment)
  * the GPU at every pass, which cost 11 to 17 ms of CPU time per frame.
  */
 #define MALI_QUEUE      64
+extern uint32_t hakios_p127545_panel_generation(void);
+static uint32_t p127545_fragment_gen;
+bool hakios_p127545_gpu_ready(uint32_t gen);
+bool hakios_p127545_gpu_ready(uint32_t gen){return gen && __atomic_load_n(&p127545_fragment_gen,__ATOMIC_ACQUIRE)==gen;}
 static struct {
 	uint64_t chain, seq, queued;
+	uint32_t panel_generation;
 	uint32_t owner;                 /* the client's number (hakios_mali_enqueue_for), 0: none */
 #if P1273_GPU_TRACE
 	uint64_t trace_generation,trace_tid,trace_task;
@@ -3443,6 +3448,7 @@ mali_worker(__unused void *parameter, __unused wait_result_t result)
 		uint64_t queued = mali_queue[mali_queue_head].queued, job_began = mach_absolute_time();
 		uint32_t owner = mali_queue[mali_queue_head].owner;
 		uint32_t p5_job_status = 0;
+		uint32_t panel_gen=mali_queue[mali_queue_head].panel_generation;
 #if P1273_GPU_TRACE
 		struct p1273_gpu_row tr={0};
 		tr.generation=mali_queue[mali_queue_head].trace_generation;
@@ -3545,6 +3551,8 @@ mali_worker(__unused void *parameter, __unused wait_result_t result)
 #endif
 		mali_queue_head = (mali_queue_head + 1) % MALI_QUEUE;
 		mali_queue_count--;
+		if(!dropped && fragment && !p5_job_status && panel_gen && panel_gen==hakios_p127545_panel_generation())
+			__atomic_store_n(&p127545_fragment_gen,panel_gen,__ATOMIC_RELEASE);
 		mali_done_seq = seq;
 		sec_jobs++;
 		sec_busy += ended - job_began;
@@ -3591,6 +3599,7 @@ hakios_mali_enqueue_for(uint64_t chain, bool fragment, uint32_t owner)
 	mali_queue[at].owner = owner;
 	mali_queue[at].seq = seq;
 	mali_queue[at].queued = mach_absolute_time();
+	mali_queue[at].panel_generation=hakios_p127545_panel_generation();
 #if P1273_GPU_TRACE
 	mali_queue[at].trace_generation=0;
 	mali_queue[at].trace_tid=0;mali_queue[at].trace_task=0;mali_queue[at].trace_pid=0;

@@ -55,8 +55,11 @@
 #include <sys/hakios.exynos_soc.h>
 #include <sys/hakios.xnu.h>
 #include <kern/thread.h>
+#include <kern/thread_call.h>
 #include <stdarg.h>
 #include <sys/systm.h>
+#include <sys/sysctl.h>
+#include "hakios.p127545_cmu.h"
 
 #define MBOX_PA         EXYNOS_APM_MBOX_PA
 #define MBOX_INTGR0     0x08
@@ -109,7 +112,48 @@ static struct channel {
  */
 static LCK_GRP_DECLARE(acpm_lock_group, "hakios-acpm");
 static LCK_MTX_DECLARE(acpm_lock, &acpm_lock_group);
+
+/* One atomic reader/exclusive state. Closing never waits for a display
+ * lock or in-flight MMIO, and an IRQ/scanout reader never takes acpm_lock.
+ * A demand is recorded in the same CAS as the denied entry. */
+#define P545_DISP_CLOSED (1u<<31)
+#define P545_DISP_DEMAND (1u<<30)
+#define P545_DISP_READERS (P545_DISP_DEMAND-1u)
+static unsigned p545_disp_gate;
+static thread_call_t p545_disp_demand_call,p545_disp_expiry_call;
+bool hakios_p545_disp_enter(bool demand);
+void hakios_p545_disp_leave(void);
+bool hakios_p545_disp_enter(bool demand){
+    unsigned v=__atomic_load_n(&p545_disp_gate,__ATOMIC_ACQUIRE);
+    for(;;){
+        if(v&P545_DISP_CLOSED){
+            if(!demand || (v&P545_DISP_DEMAND))return false;
+            unsigned want=v|P545_DISP_DEMAND;
+            if(__atomic_compare_exchange_n(&p545_disp_gate,&v,want,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){
+                if(p545_disp_demand_call)thread_call_enter(p545_disp_demand_call);
+                return false;
+            }
+        }else{
+            if((v&P545_DISP_READERS)==P545_DISP_READERS)return false;
+            unsigned want=v+1;
+            if(__atomic_compare_exchange_n(&p545_disp_gate,&v,want,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return true;
+        }
+    }
+}
+void hakios_p545_disp_leave(void){
+    __atomic_fetch_sub(&p545_disp_gate,1,__ATOMIC_RELEASE);
+}
+static bool p545_disp_close(void){
+    unsigned expected=0;
+    return __atomic_compare_exchange_n(&p545_disp_gate,&expected,P545_DISP_CLOSED,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);
+}
+static bool p545_disp_closed(void){return (__atomic_load_n(&p545_disp_gate,__ATOMIC_ACQUIRE)&P545_DISP_CLOSED)!=0;}
+static bool p545_disp_demand(void){return (__atomic_load_n(&p545_disp_gate,__ATOMIC_ACQUIRE)&P545_DISP_DEMAND)!=0;}
+static void p545_disp_open(void){__atomic_store_n(&p545_disp_gate,0,__ATOMIC_RELEASE);}
 static bool acpm_ready, acpm_tried;
+/* A timed-out DVFS queue send can be executed later; do not admit a
+ * new experimental clock owner in that boot. Protected by acpm_lock. */
+static bool p545_dvfs_uncertain;
 
 /* a moment `us` microseconds from now, by the clock: a loop bounded by it ends on time, however long delay() takes */
 static uint64_t
@@ -352,8 +396,38 @@ request_queue(struct channel *c, uint32_t id, uint32_t cmd[4])
 		if (take_answer(c, id, c->seq, cmd)) {
 			return 0;
 		}
+		if(id==HAKIOS_ACPM_CH_DVFS)p545_dvfs_uncertain=true;
 	}
 	return ETIMEDOUT;
+}
+
+/* Experimental DISP owner: one FIFO send, no retry of a lowering SET.
+ * Input consumption plus sequence-matched answer is necessary, but not
+ * sufficient: the caller checks the live clock path separately. */
+static bool p545_dvfs_once(uint32_t cmd[4],bool *submitted){
+    const uint32_t id=HAKIOS_ACPM_CH_DVFS;
+    struct channel *c=&channels[id];
+    *submitted=false;
+    if(!c->usable || c->buffer)return false;
+    uint32_t front=srd(c->in_front),rear=srd(c->in_rear);
+    if(front>=c->len || rear!=front)return false;
+    drain(c,id);
+    uint32_t next=(front+1)%c->len;
+    c->seq=c->seq%63+1;
+    cmd[0]=(cmd[0]&~SEQ_MASK)|(c->seq<<SEQ_SHIFT);
+    for(uint32_t w=0;w<4;w++)swr(c->in_base+front*c->elem+4*w,cmd[w]);
+    __builtin_arm_dsb(15);swr(c->in_front,next);__builtin_arm_dsb(15);
+    *submitted=true;
+    wr(mbox,MBOX_INTGR0,1u<<(16+id));
+    uint64_t until=deadline_us(ANSWER_US);
+    bool answer=false;
+    do{
+        if(!answer)answer=take_answer(c,id,c->seq,cmd);
+        if(answer && srd(c->in_rear)==next && srd(c->in_front)==next)return true;
+        delay(POLL_US);
+    }while(mach_absolute_time()<until);
+    p545_dvfs_uncertain=true;
+    return false;
 }
 
 static int
@@ -399,7 +473,9 @@ hakios_acpm_request(uint32_t id, uint32_t cmd[4])
 		return ENXIO;
 	}
 	lck_mtx_lock(&acpm_lock);
-	error = channels[id].buffer ? request_buffer(&channels[id], id, cmd) : request_queue(&channels[id], id, cmd);
+	/* No legacy/parallel DISP writer while the exclusive trial owns it. */
+	if(id==HAKIOS_ACPM_CH_DVFS && cmd[0]==8 && cmd[2]!=1 && p545_disp_closed())error=EBUSY;
+	else error = channels[id].buffer ? request_buffer(&channels[id], id, cmd) : request_queue(&channels[id], id, cmd);
 	lck_mtx_unlock(&acpm_lock);
 	return error;
 }
@@ -681,6 +757,41 @@ bus_mif_pll_mhz(void)
 	s = con0 & 7;
 	return p != 0 && (con0 & (1u << 31)) ? (uint32_t)(26ull * m / p >> s) : 0;
 }
+
+#include "hakios.p127545_disp.h"
+#include "hakios.p127545_ect.h"
+
+/* P127545: read only; no ACPM GET/SET, no PD-local accesses. Serializes
+ * mappings and AP requests; the second snapshot detects asynchronous APM
+ * changes but does not freeze the APM. A virtual INT OPP is NOT one leaf. */
+static int
+p127545_cmu_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req)
+{
+ static vm_offset_t top,mif;
+ uint32_t r[P545_NREG]={0},r2[P545_NREG]={0};
+ struct p545_cmu_rates rates={0};
+ char out[640];
+ unsigned stable=0;
+ uint32_t paired=0;
+ if(!PE_parse_boot_argn("p12754",&paired,sizeof(paired)) || paired!=1)return ENODEV;
+ lck_mtx_lock(&acpm_lock);
+ if(!acpm_ready){lck_mtx_unlock(&acpm_lock);return ENXIO;}
+ if(!top)top=ml_io_map(EXYNOS_CMU_TOP_PA,0x4000);
+ if(!mif)mif=ml_io_map(CMU_MIF_PA,0x2000);
+ if(top && mif){
+  for(unsigned i=0;i<P545_NREG;i++)r[i]=rd(i>=P545_MIF_PLL?mif:top,p545_offsets[i]);
+  __builtin_arm_dsb(15);
+  for(unsigned i=0;i<P545_NREG;i++)r2[i]=rd(i>=P545_MIF_PLL?mif:top,p545_offsets[i]);
+  stable=memcmp(r,r2,sizeof(r))==0;
+  if(stable)rates=p545_decode(r);
+ }
+ lck_mtx_unlock(&acpm_lock);
+ snprintf(out,sizeof(out),"version=1 stable=%u busc_khz=%u bus1_khz=%u disp_khz=%u mif_pll_khz=%u ddrphy2x_khz=%u mif_mux=%u fsys0_khz=%u int_opp_verified=0 mif_opp_verified=0 write_allowed=0",
+  stable,rates.busc,rates.bus1,rates.disp,rates.mif_pll,rates.ddrphy2x,r[P545_MIF_M]&1,rates.fsys0);
+ return SYSCTL_OUT(req,out,strlen(out)+1);
+}
+SYSCTL_DECL(_kern_hakios);
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p127545_cmu,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p127545_cmu_sysctl,"A","P127545 selected CMU clock calculation; not DVFS domain proof");
 
 /* every domain's levels, one line each, read only; bus_top[] filled */
 static void

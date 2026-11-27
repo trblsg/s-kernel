@@ -33,12 +33,19 @@ $a=Report 'STOCK60' 100000 2.2;$b=Report 'BASE15' 200000 1.9;$c=Report 'STOCK60'
 $r=P12753-Compare $a $b $c;Check ([Math]::Abs($r.delta_mW-250) -lt 0.01) 'ABA delta'
 $c.boot='other';Refuse {P12753-Compare $a $b $c} 'boot'
 $c.boot='same';$c.mean_discharge_w=3;Refuse {P12753-Compare $a $b $c} 'drift'
-$a=Report 'STOCK60' 100000 2.2;$b=Report 'COMPOSITE544' 200000 1.9;$c=Report 'STOCK60' 300000 2.1
+$a=Report 'STOCK60' 100000 2.2;$b=Report 'COMPOSITE69' 200000 1.9;$c=Report 'STOCK60' 300000 2.1
 foreach($r in @($a,$b,$c)){
     $r|Add-Member -NotePropertyName warm -NotePropertyValue $true
+    $r|Add-Member -NotePropertyName precondition_s -NotePropertyValue 15
+    $r|Add-Member -NotePropertyName wait_s -NotePropertyValue 150
     $r|Add-Member -NotePropertyName start_gpu_mc -NotePropertyValue 59000
     $r|Add-Member -NotePropertyName start_bat_c -NotePropertyValue 37
 }
+$b|Add-Member -NotePropertyName policy -NotePropertyValue 69
+Check ((P127545-CompositeNeed 69) -eq 7202) 'base qualification independent of radios'
+Check ((P127545-CompositeNeed 965) -eq 7230) 'all optional qualifications'
+$c.wait_s=90;Refuse {P12753-Compare $a $b $c} 'matched revision 6';$c.wait_s=150
+$b.policy=965;Refuse {P12753-Compare $a $b $c} 'policy mismatch';$b.policy=69
 Check ((P12753-Compare $a $b $c).warm) 'warm composite ABA'
 $b.warm=$false;Refuse {P12753-Compare $a $b $c} 'cannot mix warm'
 $b.warm=$true;$b.start_gpu_mc=62000;Refuse {P12753-Compare $a $b $c} 'GPU/battery temperature'

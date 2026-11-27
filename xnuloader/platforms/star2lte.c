@@ -20,7 +20,7 @@ static const struct platform platform_star2lte = {
 	.exynos_wdt = 0x10060000, .exynos_wdt_other = 0x10050000, .exynos_wdt_pmu_bit = 23,
 	.parked_cores = 0x2, .affinity_unreliable = 1,
 	.payload_home = 0xD0000000,
-	.keep_out = { { 0xF0000000, 0x0B200000, "CP: modem_if, cp_ram_logging" }, { 0xFB200000, 0x02800000, "ABOX: abox_rmem" } },
+	.keep_out = { { 0xF0000000, 0x0B200000, "CP: modem_if, cp_ram_logging" }, { 0xFB200000, 0x02800000, "ABOX: abox_rmem" }, { 0xA0000000, 0x34000, "S-Boot ECT" } },
 	/* Same Exynos9810 low-bank map as StarLTE; extra_ram_claim() tests every page before exposing it to XNU. */
 	.extra_ram = exynos9810_extra_ram,
 	.sibling_of = &platform_starlte,

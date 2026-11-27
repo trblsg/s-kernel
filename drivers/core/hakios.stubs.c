@@ -45,6 +45,16 @@ void hakios_exynos_halt_off(boolean_t reboot);          /* (machine_routines.c's
 bool hakios_s6e3ha8_blank(int (*say)(const char *, ...));
 
 #ifndef HAKIOS_EXYNOS_ACPM
+bool hakios_p545_disp_enter(__unused bool demand){return true;}
+void hakios_p545_disp_leave(void){}
+bool hakios_p545_disp_wake(void){return true;}
+bool hakios_p545_disp_restored(void){return true;}
+bool hakios_p545_disp_probe(__unused uint32_t want){return false;}
+bool hakios_p545_disp_begin(__unused uint32_t want,__unused uint64_t until){return false;}
+bool hakios_p545_disp_live(void){return false;}
+bool hakios_p545_disp_end(void){return false;}
+bool hakios_p545_disp_qualified(__unused uint32_t want){return false;}
+void hakios_p545_disp_invalidate(void){}
 void hakios_exynos_dvfs_start(void);
 void
 hakios_exynos_dvfs_start(void)
@@ -131,6 +141,15 @@ void hakios_max77705_usb_console(__unused const char *arg) {}
 void hakios_max77705_usb_close(void);
 void hakios_max77705_usb_close(void) {}
 #endif
+#if !defined(HAKIOS_EXYNOS_CAMERA) || defined(HAKIOS_DEVICE_IS_STAR2LTE)
+bool hakios_p545_cam_restored(void){return true;}
+bool hakios_p127545_cam_probe(void){return false;}
+bool hakios_p127545_cam_begin(__unused uint64_t until){return false;}
+bool hakios_p127545_cam_live(void){return false;}
+bool hakios_p127545_cam_end(void){return false;}
+bool hakios_p127545_cam_qualified(void){return false;}
+void hakios_p127545_cam_invalidate(void){}
+#endif
 #ifndef HAKIOS_EXYNOS_CAMERA
 void hakios_exynos_camera_init(void) {}
 void hakios_exynos_camera_quiesce(void) {}
@@ -214,6 +233,13 @@ bool hakios_wifi_network(__unused uint8_t *name, __unused unsigned *name_length,
     __unused unsigned *passphrase_length) { return false; }
 #endif
 #ifndef HAKIOS_EXYNOS_MFC
+bool hakios_p545_mfc_restored(void){return true;}
+bool hakios_p127545_mfc_probe(void){return false;}
+bool hakios_p127545_mfc_begin(__unused uint64_t until){return false;}
+bool hakios_p127545_mfc_live(void){return false;}
+bool hakios_p127545_mfc_end(void){return false;}
+bool hakios_p127545_mfc_qualified(void){return false;}
+void hakios_p127545_mfc_invalidate(void){}
 int hakios_mfc_carve(__unused uint64_t bytes, __unused uint64_t *phys) { return -1; }
 void hakios_mfc_uncarve(__unused uint64_t phys) {}
 int hakios_mfc_carved(__unused uint64_t phys) { return 0; }
@@ -234,10 +260,12 @@ void hakios_cs47l93_quiesce(void) {}
 void hakios_max98512_quiesce(void) {}
 #endif
 #ifndef HAKIOS_S6E3HA8
+bool hakios_p545_disp_panel_quiet(void){return false;}
 void hakios_s6e3ha8_init(void) {}
 bool hakios_s6e3ha8_blank(__unused int (*say)(const char *, ...)) { return false; }      /* "not blanked" */
 int hakios_s6e3ha8_power(bool on);
 int hakios_s6e3ha8_power(__unused bool on) { return ENODEV; }    /* no panel driver: the screen as iOS draws it */
+uint32_t hakios_p127545_panel_generation(void) { return 0; }
 int hakios_p9_panel_auto_on(void) { return 0; }       /* no Samsung S9 runtime panel mode */
 #endif
 
@@ -245,6 +273,10 @@ int hakios_p9_panel_auto_on(void) { return 0; }       /* no Samsung S9 runtime p
 void hakios_exynos_halt_off(__unused boolean_t reboot) {}  /* a halt hands the phone to the loader, as it always did */
 #endif
 #ifndef HAKIOS_EXYNOS_DPU
+bool hakios_p545_disp_dpu_quiesce(void){return false;}
+bool hakios_p545_disp_dpu_restore(void){return false;}
+uint32_t hakios_p545_disp_frame_seq(void){return 0;}
+bool hakios_p545_disp_frame_review(__unused uint32_t seq){return false;}
 /* the display's own scan-out (MiniIOMobileFramebuffer.cpp, fb_flip/fb_dpp/fps_log): none, frames go into the boot framebuffer */
 int hakios_scanout_probe(uint64_t fb_phys, uint32_t width, uint32_t height, uint32_t rowbytes);
 int hakios_scanout_memory(uint64_t bytes, unsigned count, uint64_t *phys);
@@ -259,6 +291,7 @@ int hakios_scanout_memory(__unused uint64_t bytes, __unused unsigned count, __un
 int hakios_scanout_attach(__unused int mode, __unused const uint64_t *phys, __unused unsigned count, __unused uint32_t width,
     __unused uint32_t height, __unused uint32_t rowbytes, __unused unsigned shown) { return -1; }
 int hakios_scanout_flip(__unused unsigned index) { return -1; }
+bool hakios_p127545_frame_latched(__unused uint32_t gen) { return false; }
 int hakios_scanout_latched(void) { return 1; }
 void hakios_scanout_detach(__unused const char *why) {}
 uint32_t hakios_scanout_refreshes(void) { return 0; }
@@ -346,6 +379,7 @@ void hakios_adreno_minute(void) {}
 #endif
 
 #ifndef HAKIOS_MALI
+bool hakios_p127545_gpu_ready(__unused uint32_t gen) { return false; }
 void hakios_mali_init(void) {}
 /* the display's fps_log line (MiniIOMobileFramebuffer.cpp): no Mali, nothing to say of it */
 int hakios_mali_second(uint64_t *busy_ns, uint32_t *jobs, uint64_t *queued_ns, uint32_t *mhz, uint32_t *switches,

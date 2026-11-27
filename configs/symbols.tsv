@@ -312,7 +312,7 @@ HALT_OFF	arg	halt_off	Chip, thermal and PMIC	k	hakios.exynos_poweroff.c
 HAPTIC_EFFECT	arg	haptic_effect	Haptics and torch	k	hakios.haptic.c	
 HI	arg	hi	User space	u	inject_sb.c	manual profiler; hi=2: autonomous A/B and extended attribution
 IOAES	arg	ioaes	User space	k	MiniIOAESAccelerator.cpp	no IOAESAccelerator at all, as the kernel was before this driver
-IRIS_S9	arg	iris_s9	User space	k	hakios.exynos_iris.c	run the first N steps: 1 read the pins, CIS_CLK2, LDOs and the LED's ID; 2 power the sensor
+IRIS_S9	arg	iris_s9	Cameras	k	hakios.exynos_camera.c,hakios.exynos_iris.c	run the first N steps: 1 read the pins, CIS_CLK2, LDOs and the LED's ID; 2 power the sensor
 IRIS_S9_EXP	arg	iris_s9_exp	User space	k	hakios.exynos_iris.c	exposure in lines of 6.56 us (default 0x0339 = 825, at most 5075)
 IRIS_S9_GAIN	arg	iris_s9_gain	User space	k	hakios.exynos_iris.c	analog gain, 0x20 is 1x (default 0x20, range 0x20 to 0x200)
 IRIS_S9_ISPDIV	arg	iris_s9_ispdiv	User space	k	hakios.exynos_iris.c	CLKCMU_ISPPRE_BUS = 466 MHz / (D + 1) while the frame is taken (default 0, range 0 to 3)
@@ -429,8 +429,32 @@ MODEM_SIM_SWITCH_OFF	arg	modem_sim_switch_off	Cellular	k	hakios.mpss.c
 MODEM_STEP	arg	modem_step	Cellular	k	hakios.mpss.c	the steps once the root is there, then back to the loader if modem_return=1 says so
 MODEM_WAIT	arg	modem_wait	Cellular	k	hakios.mpss.c	
 MODEM_WDA_OFF	arg	modem_wda_off	Cellular	k	hakios.mpss.c	
-P122	arg	p122	GPU and display	k	hakios.mali.c	P12.2 causal diagnostics: constant low-overhead GPU clock-floor/queue/run histograms in all profiles
+P122	arg	p122	GPU and display	k	hakios.exynos_cpufreq.c,hakios.mali.c	P12.2 causal diagnostics: constant low-overhead GPU clock-floor/queue/run histograms in all profiles
+P126_WORKER_WAIT	arg	p126_worker_wait	Wi-Fi	k	lx_base.c	
 P1272_PROBE	arg	p1272_probe	GPU and display	k	hakios.mali.c	enable one host-requested OFF capability and wake qualification
+P1273	arg	p1273	User space	k	hakios.p125_sysctl.h,hakios.p1274_lab.h	
+P1273_TICK_CANCEL	arg	p1273_tick_cancel	Wi-Fi	k	lx_base.c	
+P1273_TICK_FAIL	arg	p1273_tick_fail	Wi-Fi	k	lx_base.c	
+P1273_WIFI_HANDLED	arg	p1273_wifi_handled	Wi-Fi	k	lx_pci.c	
+P1273_WIFI_RX	arg	p1273_wifi_rx	Wi-Fi	k	lx_cfg.c	
+P1273_WIFI_TX	arg	p1273_wifi_tx	Wi-Fi	k	lx_cfg.c	
+P1274	arg	p1274	User space	k	hakios.p1274_lab.h	
+P1275	arg	p1275	User space	k	hakios.p1274_lab.h	
+P12751	arg	p12751	User space	ku	hakios.p1274_lab.h,hakios.p12751.h,init.c	boot-immutable PanVK selection and independent, bounded paired ICD stage evidence
+P12752	arg	p12752	User space	k	hakios.p1274_lab.h	
+P12753	arg	p12753	GPU and display	k	hakios.p125_sysctl.h,hakios.p12753.h,hakios.p127545_disp.h,hakios.s6e3ha8.c	
+P12754	arg	p12754	GPU and display	k	hakios.bcm4361_bt.c,hakios.exynos_acpm.c,hakios.exynos_camera.c,hakios.exynos_mfc.c,hakios.p125_sysctl.h,hakios.p127545_disp.h,hakios.s6e3ha8.c	
+P127545_DISP	arg	p127545_disp	User space	k	hakios.p127545_disp.h	
+P127545_ECT	arg	p127545_ect	Loader	l	loader.c	
+P127545_QCH	arg	p127545_qch	Cameras	k	hakios.exynos_camera.c,hakios.exynos_mfc.c	
+P127_INTX	arg	p127_intx	Wi-Fi	k	lx_pci.c	
+P127_INTX_ATTACH	arg	p127_intx_attach	Wi-Fi	k	lx_pci.c	
+P127_INTX_DETACH	arg	p127_intx_detach	Wi-Fi	k	lx_pci.c	
+P127_INTX_FALLBACK	arg	p127_intx_fallback	Wi-Fi	k	lx_pci.c	
+P127_TICKER	arg	p127_ticker	Wi-Fi	k	lx_base.c	
+P127_TICKER_DUE	arg	p127_ticker_due	Wi-Fi	k	lx_base.c	
+P127_TICKER_WAIT	arg	p127_ticker_wait	Wi-Fi	k	lx_base.c	
+P127_TICKER_WAKE	arg	p127_ticker_wake	Wi-Fi	k	lx_base.c	
 P12_GPU_BOOT_AUTO	arg	p12_gpu_boot_auto	GPU and display	k	hakios.mali.c	Arm the existing guarded P9 automatic G3D screen-OFF gate after GPU initialization
 P3POWER	arg	p3power	GPU and display	k	hakios.mali.c	sample read-only G3D PMU and PLL state every five seconds
 P3RAIL	arg	p3rail	GPU and display	k	hakios.mali.c	read BUCK6 PMIC voltage at most once every thirty seconds

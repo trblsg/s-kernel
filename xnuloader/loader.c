@@ -14,6 +14,8 @@
  * platforms/ and a line in platforms[] below.
  */
 #include "efi.h"
+#include "p127545_ect.h"
+static struct p545_ect_snapshot p545_ect_boot;
 #include "identity.h"         /* who Darwin shall think we are: from the iPhone's own device tree (mkidentity.py) */
 #include "scion_splash_logo.h"   /* Scion's boot screen (splash=1): the sprout, and the drawing the kernel shares (docs/boot-screen.md) */
 #include "scion_splash.h"          /* the kernel's (osfmk/console of the fork, scion/xnu-8796): build.sh puts its directory on -I */
@@ -905,10 +907,11 @@ choose_window(const struct payload_info *pi)
 	uint32_t desc_ver;
 	uint64_t best_base = 0, best_size = 0;
 	/* what XNU's window must stay clear of: the payload where it landed and where it is now, and the platform's keep-outs */
-	uint64_t avoid[4][2] = {
+	uint64_t avoid[5][2] = {
 		{ PAYLOAD_BASE, PAYLOAD_BASE + PAYLOAD_MAX_SIZE }, { payload_base, payload_base + PAYLOAD_MAX_SIZE },
 		{ PLAT->keep_out[0].base, PLAT->keep_out[0].base + PLAT->keep_out[0].size },
 		{ PLAT->keep_out[1].base, PLAT->keep_out[1].base + PLAT->keep_out[1].size },
+		{ PLAT->keep_out[2].base, PLAT->keep_out[2].base + PLAT->keep_out[2].size },
 	};
 
 	if (win_size != 0) {
@@ -925,15 +928,15 @@ choose_window(const struct payload_info *pi)
 		}
 		uint64_t lo = d->phys_start, hi = d->phys_start + (d->pages << 12);
 		/* the payload and the keep-outs may sit in RAM that UEFI considers free: stay clear of them (the larger side) */
-		for (int a = 0; a < 4; a++) {
+		for (int a = 0; a < (int)(sizeof(avoid)/sizeof(avoid[0])); a++) {
 			uint64_t pay_lo = avoid[a][0], pay_hi = avoid[a][1];
 
 			if (pay_hi > pay_lo && lo < pay_hi && hi > pay_lo) {
-				if (pay_lo - lo > hi - pay_hi && pay_lo > lo) {
-					hi = pay_lo;
-				} else {
-					lo = pay_hi;
-				}
+				uint64_t left = pay_lo > lo ? pay_lo - lo : 0;
+				uint64_t right = hi > pay_hi ? hi - pay_hi : 0;
+				if (left > right) hi = pay_lo;
+				else if (right) lo = pay_hi;
+				else { hi = lo; break; }
 			}
 		}
 		if (hi <= lo) {
@@ -954,7 +957,7 @@ choose_window(const struct payload_info *pi)
 	if (best_size > MAX_MEM_SIZE) {
 		best_size = MAX_MEM_SIZE;
 	}
-	for (int k = 0; k < 2; k++) {
+	for (int k = 0; k < (int)(sizeof(PLAT->keep_out)/sizeof(PLAT->keep_out[0])); k++) {
 		uint64_t ko = PLAT->keep_out[k].base, ke = ko + PLAT->keep_out[k].size;
 
 		if (ke > ko && best_base < ke && best_base + best_size > ko) {
@@ -1303,7 +1306,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	    payload_base, payload_base + PAYLOAD_MAX_SIZE - 1, payload_base != PAYLOAD_BASE ? " (moved)" : "", kern_lo,
 	    kern_hi - 1, rd_pa, rd_pa + rd_size - 1, dt_pa, dt_pa + dt_max - 1, ba_pa, PANIC_LOG_BASE);
 	print("layout: XNU's RAM %x..%x (memSize %x); kept from XNU and UEFI:", win_base, win_base + win_size - 1, win_size);
-	for (int k = 0; k < 2; k++) {
+	for (int k = 0; k < (int)(sizeof(PLAT->keep_out)/sizeof(PLAT->keep_out[0])); k++) {
 		if (PLAT->keep_out[k].size != 0) {
 			print(" %x..%x (%s)", PLAT->keep_out[k].base, PLAT->keep_out[k].base + PLAT->keep_out[k].size - 1,
 			    PLAT->keep_out[k].what);
@@ -1678,6 +1681,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_prop(&w, "random-seed", seed, sizeof(seed));
 	dt_prop_u64(&w, "dram-base", phys_base);
 	dt_prop_u64(&w, "dram-size", win_size);
+	if (p545_ect_boot.abi == 1)
+		dt_prop(&w, "hakios-ect-minlock", &p545_ect_boot, sizeof(p545_ect_boot));
 	if (give_extra) {
 		/* RAM beside the window that is the kernel's too: pairs of base and size (extra_ram_claim; patch 1512) */
 		static uint64_t extra_reg[EXTRA_RAM_MAX][2];
@@ -2299,7 +2304,7 @@ close:
  * there while it stays alive beside the kernel, and choose_window never sees it as free. Pieces the firmware already has
  * are said, not taken.
  */
-static void
+static int
 keep_out_reserve(uint64_t lo, uint64_t hi, const char *what)
 {
 	static uint8_t map_buf[65536];
@@ -2308,7 +2313,7 @@ keep_out_reserve(uint64_t lo, uint64_t hi, const char *what)
 
 	if (EFI_ERROR(BS->get_memory_map(&map_size, map_buf, &map_key, &desc_size, &desc_ver))) {
 		print("keep-out %x..%x (%s): GetMemoryMap failed, NOT reserved\n", lo, hi - 1, what);
-		return;
+		return 0;
 	}
 	for (uint64_t off = 0; off < map_size; off += desc_size) {
 		efi_memory_descriptor *d = (efi_memory_descriptor *)(map_buf + off);
@@ -2335,6 +2340,9 @@ keep_out_reserve(uint64_t lo, uint64_t hi, const char *what)
 	}
 	print("keep-out %x..%x (%s): %d KB reserved now, %d KB the firmware's already, %d KB not taken\n", lo, hi - 1, what,
 	    taken >> 10, held >> 10, failed >> 10);
+	/* Only completely claimed conventional memory is a readable capture
+	 * candidate. Pre-held firmware ranges may be inaccessible or in use. */
+	return !held && !failed && taken == hi - lo;
 }
 
 /*
@@ -2345,8 +2353,15 @@ keep_out_reserve(uint64_t lo, uint64_t hi, const char *what)
  * the payload stays where it landed and the run goes on as before the move: a run is never lost to it.
  * Then the keep-outs are reserved.
  */
+static int
+p545_ect_wanted(const char *cmdline)
+{
+	for(const char *c=cmdline;c && *c;c++)
+		if((c==cmdline || c[-1]==' ') && starts_with(c, "p127545_ect=1") && (!c[13] || c[13]==' '))return 1;
+	return 0;
+}
 static void
-payload_move(void)
+payload_move(const char *cmdline)
 {
 	const struct payload_header *ph = (const struct payload_header *)PAYLOAD_BASE;
 	uint64_t home = 0, bytes;
@@ -2383,10 +2398,25 @@ payload_move(void)
 	} else if (PLAT->payload_home != 0) {
 		print("payload: none at %x to move (magic %x)\n", PAYLOAD_BASE, (uint64_t)ph->magic);
 	}
-	for (int k = 0; k < 2; k++) {
+	for (int k = 0; k < (int)(sizeof(PLAT->keep_out)/sizeof(PLAT->keep_out[0])); k++) {
 		if (PLAT->keep_out[k].size != 0) {
-			keep_out_reserve(PLAT->keep_out[k].base, PLAT->keep_out[k].base + PLAT->keep_out[k].size,
+			int claimed=keep_out_reserve(PLAT->keep_out[k].base, PLAT->keep_out[k].base + PLAT->keep_out[k].size,
 			    PLAT->keep_out[k].what);
+			if(PLAT->keep_out[k].base==0xA0000000ULL && PLAT->keep_out[k].size==0x34000 && p545_ect_wanted(cmdline)){
+				struct p545_ect_snapshot again={0};
+				const volatile uint8_t *ect=(const volatile uint8_t *)(uintptr_t)0xA0000000ULL;
+				/* No physical read unless every page was conventional and
+				 * successfully claimed. No raw ECT bytes exported. */
+				if(claimed && p545_ect_extract(ect,0x32000,&p545_ect_boot) &&
+				   p545_ect_extract(ect,0x32000,&again) &&
+				   memcmp(&p545_ect_boot,&again,sizeof(again))==0){
+					print("p127545-ect: stable MINLOCK size %x mif %d int %d fingerprint %x\n",
+					    (uint64_t)p545_ect_boot.size,(uint64_t)p545_ect_boot.mif_n,(uint64_t)p545_ect_boot.int_n,(uint64_t)p545_ect_boot.fingerprint);
+				}else{
+					p545_ect_boot.abi=0;
+					print("p127545-ect: capture refused, no MINLOCK property\n");
+				}
+			}
 		}
 	}
 }
@@ -2628,7 +2658,7 @@ efi_main(efi_handle image, efi_system_table *st)
 	 * just armed, so that a hang in it is a restart into recovery; and read again from where it is now.
 	 */
 	if (PLAT->payload_home != 0 || PLAT->keep_out[0].size != 0) {
-		payload_move();
+		payload_move(have_payload ? pi.cmdline : "");
 		have_payload = parse_payload(&pi, 0);
 	}
 	if (have_payload && pi.usb_mode && usb_start()) {

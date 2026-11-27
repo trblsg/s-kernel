@@ -6,7 +6,7 @@ assert(gov.includes('#include "hakios.p12753.h"'));
 assert(gov.includes('max=p12753_ceiling(c,max)'));
 assert(h.includes('return cap?MIN(stock,cap):stock'));
 assert(h.includes('PE_parse_boot_argn("p12753"'));
-assert(h.includes('p1274_ticks_ms(connected?1000:20000)') && h.includes('p1274_ticks_ms(90000)'));
+assert(h.includes('p1274_ticks_ms(connected?1000:20000)') && h.includes('p1274_ticks_ms(p127545_wait_ms)') && h.includes('p127545_wait_ms=extended?150000:90000'));
 assert(h.includes('down>p12753_arm_at && down>up && fresh && !(fg&1u)'));
 assert(h.indexOf('now-p12753_quiet<p1274_ticks_ms(connected?1000:20000)')<h.indexOf('p127_arm_mode((int)policy)'));
 assert(h.includes('p12753_request==9 && p12753_bus<13'));

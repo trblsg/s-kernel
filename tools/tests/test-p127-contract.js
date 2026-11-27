@@ -15,7 +15,7 @@ a(!handler.includes('rd(uart')&&!handler.includes('wr(uart'));
 const ab=read('drivers/audio/abox/hakios.exynos_abox.c');
 has(ab,'sink_head==sink_tail && !amp_running && !hp_on && !hp_want','!hakios_audio_input_wanted()','dma==&bypass_dma','RDMA_PROGRESS,0,DMA_STOP_US','p127_abox_resume()','area_kept=true;return false','delay_for_interval(POLL_MS, NSEC_PER_MSEC)');
 const wifi=read('wifi/lx/brcmfmac/lx_pci.c'),lx=read('wifi/lx/src/lx_base.c');
-has(wifi,'lx_os_irq_line_watchdog()','lx_os_irq_line_detach()','watchdog && r!=IRQ_NONE','lx_pause_ms(20)');
+has(wifi,'lx_os_irq_line_watchdog()','lx_os_irq_line_detach()','watchdog && r!=IRQ_NONE','lx_pause_ms(quiet<200000000ull?20:quiet<1000000000ull?40:80)');
 has(lx,'lx_os_jiffies_now(void)','p127_ticker_event','wait=100','burst>=32','ticks_to_ns(wait)');
 a.equal((lx.match(/p127_ticker_changed\(\);/g)||[]).length,4);
 has(read('tools/mk-brcmfmac.sh'),'p127-jiffies-header.py','-DLX_P127_JIFFIES=1');

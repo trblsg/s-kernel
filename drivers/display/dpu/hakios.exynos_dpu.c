@@ -74,6 +74,7 @@
  */
 #include <stdarg.h>
 #include <kern/clock.h>
+#include "hakios.p127545_disp_access.h" /* staged by drivers/map into bsd/dev */
 #include <kern/locks.h>
 #include <sys/sysctl.h>
 #if __has_include(<kern/hakios_p125.h>)
@@ -224,6 +225,7 @@ dump_channel(const char *what, unsigned type)
 int
 hakios_scanout_probe(uint64_t fb_phys, uint32_t width, uint32_t height, uint32_t rowbytes)
 {
+	P545_DISP_GUARD(true,-1);
 	uint32_t gc, trig, path0, path1, frames, base, img, on = 0;
 	int type;
 
@@ -440,6 +442,61 @@ extern int hakios_display_requested_on(void);
 extern int hakios_p9_panel_auto_on(void);
 #endif
 
+/* Exclusive ACPM owner calls these ONLY at verified stock DISP rate.
+ * This is not a PSR lease; the same mask is used for DISP400 controls.
+ * No ordinary MMIO scope is allowed while the gate is closed.
+ * Samsung regs-decon.h GLOBAL_CONTROL_IDLE_STATUS = bit5;
+ * regs-dpp.h IDMA/DPP OP_STATUS = bit2.
+ */
+static bool p545_dpu_masked;
+static uint32_t p545_dpu_trigger;
+bool hakios_p545_disp_dpu_quiesce(void);
+bool hakios_p545_disp_dpu_restore(void);
+static bool p545_dpu_idle(void){
+    if((rd(decon,GLOBAL_CONTROL)&(GC_CMD_MODE|GC_RUN|(1u<<5)))!=(GC_CMD_MODE|GC_RUN|(1u<<5)) ||
+       rd(decon,SHADOW_REQ)!=0)return false;
+    uint32_t path0=rd(decon,DATA_PATH_0),path1=rd(decon,DATA_PATH_1);
+    unsigned n=0;
+    for(unsigned w=0;w<WINDOWS;w++){
+        if(!(path0&(1u<<(4*w))))continue;
+        int type=type_of_channel[(path1>>(4*w))&7];
+        if(type<0)return false;
+        if((rd(idma((unsigned)type),IDMA_ENABLE)&OP_BUSY) ||
+           (rd(dppc((unsigned)type),DPP_ENABLE)&OP_BUSY))return false;
+        n++;
+    }
+    return n>0;
+}
+bool hakios_p545_disp_dpu_quiesce(void){
+    if(probed<=0 || mode!=2 || !decon || !dpp || !dma || psr_owner || psr_b || psr_ms || p545_dpu_masked)return false;
+    if((rd(decon,GLOBAL_CONTROL)&(GC_CMD_MODE|GC_RUN))!=(GC_CMD_MODE|GC_RUN) || rd(decon,SHADOW_REQ)!=0)return false;
+    uint32_t trig=rd(decon,TRIG_CONTROL);
+    if((trig&(HW_TRIG_EN|HW_TRIG_MASKED|SW_TRIG_EN))!=HW_TRIG_EN)return false;
+    p545_dpu_trigger=trig;p545_dpu_masked=true;
+    wr(decon,TRIG_CONTROL,trig|HW_TRIG_MASKED);
+    __builtin_arm_dsb(15);
+    if(rd(decon,TRIG_CONTROL)!=(trig|HW_TRIG_MASKED))return false;
+    /* An in-flight frame is allowed to finish at stock clocks. */
+    for(unsigned i=0;i<40;i++){
+        if(p545_dpu_idle()){
+            uint32_t frame=rd(decon,FRAME_COUNT);
+            IOSleep(20);
+            if(p545_dpu_idle() && rd(decon,FRAME_COUNT)==frame &&
+               rd(decon,TRIG_CONTROL)==(trig|HW_TRIG_MASKED))return true;
+        }
+        IOSleep(1);
+    }
+    return false;
+}
+bool hakios_p545_disp_dpu_restore(void){
+    if(!p545_dpu_masked)return true;
+    wr(decon,TRIG_CONTROL,p545_dpu_trigger);
+    __builtin_arm_dsb(15);
+    if(rd(decon,TRIG_CONTROL)!=p545_dpu_trigger)return false;
+    p545_dpu_masked=false;
+    return true;
+}
+
 /* The lock covers ownership and the actual trigger/shadow write. Never
  * unmask a trigger owned by something else; preserve ownership on failure. */
 static bool
@@ -468,14 +525,57 @@ psr_wake(void)
 }
 /* The early wake in the frame path is not enough: a timer could mask
  * between it and SHADOW_REQ. Serialize the final request as well. */
+extern uint32_t hakios_p127545_panel_generation(void);
+extern bool hakios_p127545_gpu_ready(uint32_t gen);
+static uint32_t p127545_candidate(void){uint32_t gen=hakios_p127545_panel_generation();return hakios_p127545_gpu_ready(gen)?gen:0;}
+static uint32_t p127545_submit_gen,p127545_submit_frame;
+
+/* Only a normal framebuffer submission can publish a wake candidate. */
 static void
-psr_shadow(void)
+psr_shadow_gen(uint32_t gen)
 {
     lck_spin_lock(&psr_lock);
     psr_last_frame=mach_absolute_time();
     (void)psr_release_locked();
     wr(decon,SHADOW_REQ,rd(decon,SHADOW_REQ)|SHADOW_ALL);
+    if(gen && gen==hakios_p127545_panel_generation()){
+        p127545_submit_frame=rd(decon,FRAME_COUNT);p127545_submit_gen=gen;
+    }else{p127545_submit_gen=0;}
     lck_spin_unlock(&psr_lock);
+}
+static void psr_shadow(void){psr_shadow_gen(0);}
+/* Temporal proof of a real normal scanout after the restored clock.
+ * Never count attach/detach or an old completed shadow update. */
+static uint32_t p545_disp_submit_seq,p545_disp_submit_frame;
+static void p545_disp_mark_normal(void){
+    lck_spin_lock(&psr_lock);
+    p545_disp_submit_frame=rd(decon,FRAME_COUNT);
+    __atomic_add_fetch(&p545_disp_submit_seq,1,__ATOMIC_RELEASE);
+    lck_spin_unlock(&psr_lock);
+}
+uint32_t hakios_p545_disp_frame_seq(void);
+uint32_t hakios_p545_disp_frame_seq(void){return __atomic_load_n(&p545_disp_submit_seq,__ATOMIC_ACQUIRE);}
+bool hakios_p545_disp_frame_review(uint32_t seq);
+bool hakios_p545_disp_frame_review(uint32_t seq){
+    P545_DISP_GUARD(false,false);
+    lck_spin_lock(&psr_lock);
+    bool ok=probed>0 && mode && hakios_p545_disp_frame_seq()!=seq &&
+        (rd(decon,GLOBAL_CONTROL)&GC_RUN) &&
+        (rd(decon,TRIG_CONTROL)&(HW_TRIG_EN|HW_TRIG_MASKED))==HW_TRIG_EN &&
+        !(rd(decon,SHADOW_REQ)&SHADOW_ALL) && rd(decon,FRAME_COUNT)!=p545_disp_submit_frame;
+    lck_spin_unlock(&psr_lock);return ok;
+}
+bool hakios_p127545_frame_latched(uint32_t gen);
+bool hakios_p127545_frame_latched(uint32_t gen){
+    P545_DISP_GUARD(true,false);
+    bool ok=false;
+    lck_spin_lock(&psr_lock);
+    if(gen && gen==p127545_submit_gen && gen==hakios_p127545_panel_generation() && probed>0 && mode && decon){
+        uint32_t trig=rd(decon,TRIG_CONTROL);
+        ok=(rd(decon,GLOBAL_CONTROL)&GC_RUN) && (trig&(HW_TRIG_EN|HW_TRIG_MASKED))==HW_TRIG_EN &&
+            !(rd(decon,SHADOW_REQ)&SHADOW_ALL) && rd(decon,FRAME_COUNT)!=p127545_submit_frame;
+    }
+    lck_spin_unlock(&psr_lock);return ok;
 }
 static void
 psr_mask_locked(unsigned owner,uint32_t threshold)
@@ -506,6 +606,7 @@ psr_mask_locked(unsigned owner,uint32_t threshold)
 void
 hakios_p127_psr_poll(void)
 {
+    P545_DISP_GUARD_VOID(false);
 #if __has_include(<kern/hakios_p125.h>)
     bool want=(hakios_p127_mode()&P127_PSR) &&
         hakios_display_requested_on()==0 && !hakios_p9_panel_auto_on();
@@ -544,8 +645,19 @@ hakios_p127_psr_poll(void)
 static void
 psr_tick(thread_call_param_t p0 __unused, thread_call_param_t p1 __unused)
 {
+    bool scope __attribute__((cleanup(p545_disp_scope_exit)))=hakios_p545_disp_enter(false);
     uint32_t ms;
     lck_spin_lock(&psr_lock);
+    if(!scope){
+        ms=psr_ms;
+        lck_spin_unlock(&psr_lock);
+        if(ms && psr_call){
+            uint64_t deadline;
+            clock_interval_to_deadline(ms<500?ms:500,NSEC_PER_MSEC,&deadline);
+            thread_call_enter_delayed(psr_call,deadline);
+        }
+        return;
+    }
     ms=psr_ms;
     if(!ms){lck_spin_unlock(&psr_lock);return;}
     if(psr_b){
@@ -585,6 +697,8 @@ SYSCTL_PROC(_kern_hakios,OID_AUTO,p1273_psr,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LO
 int
 hakios_scanout_show(uint64_t phys, uint32_t rowbytes)
 {
+	P545_DISP_GUARD(true,-1);
+	uint32_t gen=p127545_candidate();
 	vm_offset_t i;
 
 	if (mode != 2 || (phys & 0xff) || (rowbytes & 3) || !hakios_scanout_carved(phys) ||
@@ -601,25 +715,30 @@ hakios_scanout_show(uint64_t phys, uint32_t rowbytes)
 	wr(i, IDMA_BASE_C, (uint32_t)phys);
 	plane_off();                            /* (fb_planes: one layer again) */
 	__asm__ volatile ("dsb sy" ::: "memory");
-	psr_shadow();
+	psr_shadow_gen(gen);
+	p545_disp_mark_normal();
 	return 0;
 }
 
 uint32_t
 hakios_scanout_refreshes(void)
 {
+	P545_DISP_GUARD(false,UINT32_MAX);
 	return probed > 0 ? rd(decon, FRAME_COUNT) : 0;
 }
 
 int
 hakios_scanout_latched(void)
 {
+	P545_DISP_GUARD(true,0);
 	return probed > 0 && (rd(decon, SHADOW_REQ) & SHADOW_ALL) == 0;
 }
 
 int
 hakios_scanout_flip(unsigned index)
 {
+	P545_DISP_GUARD(true,-1);
+	uint32_t gen=p127545_candidate();
 	vm_offset_t i;
 
 	if (mode == 0 || index >= nbuffers) {
@@ -636,7 +755,8 @@ hakios_scanout_flip(unsigned index)
 	wr(i, IDMA_BASE_C, (uint32_t)buffers[index]);
 	plane_off();                            /* (fb_planes: a frame drawn whole) */
 	__asm__ volatile ("dsb sy" ::: "memory");
-	psr_shadow();
+	psr_shadow_gen(gen);
+	p545_disp_mark_normal();
 	return 0;
 }
 
@@ -922,6 +1042,8 @@ int
 hakios_scanout_planes(uint64_t upper, uint32_t upper_rowbytes, uint64_t lower, uint32_t lower_rowbytes, uint32_t x,
     uint32_t y, uint32_t w, uint32_t h)
 {
+	P545_DISP_GUARD(true,-1);
+	uint32_t gen=p127545_candidate();
 	vm_offset_t ui;
 	uint32_t img, sw, sh, pw, ph, px0, py0, px1, py1, dw, dh;
 
@@ -968,7 +1090,8 @@ hakios_scanout_planes(uint64_t upper, uint32_t upper_rowbytes, uint64_t lower, u
 	wr(ui, IDMA_BASE_C, (uint32_t)upper);
 	plane_place(lower, lower_rowbytes, sh, x, y, w, h, px0, py0, px1, py1);
 	__asm__ volatile ("dsb sy" ::: "memory");
-	psr_shadow();
+	psr_shadow_gen(gen);
+	p545_disp_mark_normal();
 	return 0;
 }
 
@@ -976,6 +1099,7 @@ hakios_scanout_planes(uint64_t upper, uint32_t upper_rowbytes, uint64_t lower, u
 void
 hakios_scanout_detach(const char *why)
 {
+	P545_DISP_GUARD_VOID(true);
 	if (probed <= 0 || mode == 0) {
 		return;
 	}
@@ -1094,6 +1218,7 @@ int
 hakios_scanout_attach(int want, const uint64_t *phys, unsigned count, uint32_t width, uint32_t height, uint32_t rowbytes,
     unsigned shown)
 {
+	P545_DISP_GUARD(true,-1);
 	say("exynos_dpu: attach: %s asked for, %u buffers of %ux%u (%u bytes a row), the first at %#llx, %u drawn\n",
 	    want == 2 ? "VGF0's scaler (fb_dpp)" : want == 1 ? "flips (fb_flip)" : "nothing", count, width, height, rowbytes,
 	    count ? phys[0] : 0, shown);

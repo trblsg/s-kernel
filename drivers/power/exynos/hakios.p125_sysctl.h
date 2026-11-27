@@ -952,13 +952,20 @@ p1273_gate_events_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,in
 }
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p1273_gate_active,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1273_gate_events_sysctl,"A","P12.7.3 active policy evidence");
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p1273_gate_post,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,1,p1273_gate_events_sysctl,"A","P12.7.3 post-restore evidence");
-/* P127544 composite is audit-owned only. No new generic mode or gate bit.
- * Individual real functional gates must all remain valid this boot. */
-#define P127544_COMPOSITE 965u /* BASE + ABOX + LITTLE598 + WIFI + BT + TICKER */
-#define P127544_NEED (P1273_G_ABOX|P1273_G_BT|P1273_G_WIFI|P1273_G_TICKER|P1273_G_FLOOR|P12754_G_832|P12754_G_715|P12754_G_598)
-static bool p127544_composite_locked(void){
-    return p12754_optin() && p1273_gate_phase==0 &&
-        (p1273_gate_qualified&P127544_NEED)==P127544_NEED;
+/* P127545: audit-only BASE15 + LITTLE598 + ABOX. Optional network
+ * bits require their own live qualification; never silently add them. */
+#define P127545_COMPOSITE 69u
+#define P127545_OPTIONAL (P127_WIFI|P127_BT|P127_TICKER)
+static bool p127545_is_composite(unsigned mode){
+    return (mode & ~P127545_OPTIONAL)==P127545_COMPOSITE;
+}
+static bool p127545_composite_locked(unsigned mode){
+    unsigned need=P1273_G_ABOX|P1273_G_FLOOR|P12754_G_832|P12754_G_715|P12754_G_598;
+    if(mode&P127_WIFI)need|=P1273_G_WIFI;
+    if(mode&P127_BT)need|=P1273_G_BT;
+    if(mode&P127_TICKER)need|=P1273_G_TICKER;
+    return p127545_is_composite(mode) && p12754_optin() && p1273_gate_phase==0 &&
+        (p1273_gate_qualified&need)==need;
 }
 static void
 p127_guard(void)
@@ -981,9 +988,9 @@ p127_guard(void)
     }
     if(!reason && !hakios_p127_mode())reason=1;
     unsigned mode=hakios_p127_mode();
-    if(!reason && mode==P127544_COMPOSITE){
+    if(!reason && p127545_is_composite(mode)){
         lck_spin_lock(&p1273_gate_lock);p1273_gate_refresh_locked(mach_absolute_time());
-        bool allowed=__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE) && p127544_composite_locked();
+        bool allowed=__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE) && p127545_composite_locked(mode);
         lck_spin_unlock(&p1273_gate_lock);if(!allowed)reason=11;
     }
     if(!reason && p12754_optin() && (mode==5 || mode==17 || mode==129 || mode==257 || mode==513)){
@@ -992,7 +999,7 @@ p127_guard(void)
             (p1273_gate_phase==0 && (p1273_gate_qualified&p1273_gate_bit(mode)));
         lck_spin_unlock(&p1273_gate_lock);if(!allowed)reason=11;
     }
-    if(!reason && p12754_optin() && P127_FLOOR(mode)>=2 && mode!=P127544_COMPOSITE){
+    if(!reason && p12754_optin() && P127_FLOOR(mode)>=2 && !p127545_is_composite(mode)){
         lck_spin_lock(&p1273_gate_lock);p1273_gate_refresh_locked(mach_absolute_time());
         unsigned prior=p12754_floor_prereq(mode);
         bool allowed=prior && (p1273_gate_qualified&prior)==prior &&
@@ -1032,7 +1039,7 @@ p127_arm_mode_internal(int v,bool assist,bool audit_composite)
 {
     if(v<0 || v>(int)P127_MASK || P127_FLOOR(v)>5)return EINVAL;
     if(p12754_optin() && P127_FLOOR(v)>4)return EPERM;
-    if(audit_composite!=(v==(int)P127544_COMPOSITE) || (audit_composite && (assist || !__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE))))return EPERM;
+    if(audit_composite!=p127545_is_composite((unsigned)v) || (audit_composite && (assist || !__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE))))return EPERM;
     if(!v){hakios_p127_stop(0);return 0;}
     if(__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE))return EBUSY;
     if(!(v&P127_BASE))return EINVAL;
@@ -1070,7 +1077,7 @@ p127_arm_mode_internal(int v,bool assist,bool audit_composite)
         lck_spin_unlock(&p1273_gate_lock);return EPERM;
     }
     unsigned prior=p12754_floor_prereq((unsigned)v);
-    if(audit_composite && (!p127544_composite_locked() || !enabled || !gov_running || gov_policy!=2 || hakios_cpu_exit_mask || big_cores!=SCION_BIG_CORES || clusters[0].online!=4 || clusters[1].online!=4)){
+    if(audit_composite && (!p127545_composite_locked((unsigned)v) || !enabled || !gov_running || gov_policy!=2 || hakios_cpu_exit_mask || big_cores!=SCION_BIG_CORES || clusters[0].online!=4 || clusters[1].online!=4)){
         lck_spin_unlock(&p1273_gate_lock);return EPERM;
     }
     if(assist){

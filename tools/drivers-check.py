@@ -59,7 +59,7 @@ def check(root):
         seen_name[name] = tree
         if not os.path.isfile(os.path.join(root, "drivers", sub, name)):
             problems.append("drivers/%s/%s is listed but is not there" % (sub, name))
-    listed = {os.path.join("drivers", sub, os.path.basename(tree)) for sub, tree in entries}
+    listed = {os.path.normpath(os.path.join("drivers", sub, os.path.basename(tree))) for sub, tree in entries}
     drivers = os.path.join(root, "drivers")
     for top, _dirs, names in sorted(os.walk(drivers)):
         shown = os.path.relpath(top, root).replace(os.sep, "/")
@@ -68,7 +68,7 @@ def check(root):
         if shown.split("/")[1] not in SUBSYSTEMS:
             problems.append("%s is not in a known subsystem directory" % shown)
         for name in sorted(names):
-            if name not in ("README.md", "conf") and os.path.join(shown, name) not in listed:
+            if name not in ("README.md", "conf") and os.path.normpath(os.path.join(shown, name)) not in listed:
                 problems.append("%s/%s is not in drivers/map, so it would never reach the kernel" % (shown, name))
     if os.path.realpath(root) == os.path.realpath(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))):
         spec = importlib.util.spec_from_file_location("xnu_tree", os.path.join(os.path.dirname(os.path.abspath(__file__)), "xnu-tree.py"))

@@ -2,13 +2,13 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **710 arguments**: 617 read by the kernel, 23 by the loader, 87 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **734 arguments**: 640 read by the kernel, 24 by the loader, 88 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
 Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl kern.bootargs`).
 
-## GPU and display (126)
+## GPU and display (128)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -115,8 +115,10 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `mali_probe` | K | `hakios.mali.c` | `CONFIG_MALI_PROBE` |  |
 | `mali_trace` | K | `hakios.mali.c` | `CONFIG_MALI_TRACE` |  |
 | `metal` | KU | `MiniIOMobileFramebuffer.cpp`, `inject_sb.c` | `CONFIG_METAL` |  |
-| `p122` | K | `hakios.mali.c` | `CONFIG_P122` |  |
+| `p122` | K | `hakios.exynos_cpufreq.c`, `hakios.mali.c` | `CONFIG_P122` |  |
 | `p1272_probe` | K | `hakios.mali.c` | `CONFIG_P1272_PROBE` |  |
+| `p12753` | K | `hakios.p125_sysctl.h`, `hakios.p12753.h`, `hakios.p127545_disp.h`, `hakios.s6e3ha8.c` | `CONFIG_P12753` |  |
+| `p12754` | K | `hakios.bcm4361_bt.c`, `hakios.exynos_acpm.c`, `hakios.exynos_camera.c`, `hakios.exynos_mfc.c`, `hakios.p125_sysctl.h`, `hakios.p127545_disp.h`, `hakios.s6e3ha8.c` | `CONFIG_P12754` |  |
 | `p12_gpu_boot_auto` | K | `hakios.mali.c` | `CONFIG_P12_GPU_BOOT_AUTO` |  |
 | `p3power` | K | `hakios.mali.c` | `CONFIG_P3POWER` |  |
 | `p3rail` | K | `hakios.mali.c` | `CONFIG_P3RAIL` |  |
@@ -146,7 +148,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `privs` | K | `kern_minimac.c` | `CONFIG_PRIVS` |  |
 | `security` | K | `kern_minimac.c` | `CONFIG_SECURITY` |  |
 
-## Wi-Fi (50)
+## Wi-Fi (64)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -155,6 +157,20 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `brcmfmac_poll` | K | `lx_pci.c` | `CONFIG_BRCMFMAC_POLL` |  |
 | `brcmfmac_poll_ms` | K | `lx_pci.c` | `CONFIG_BRCMFMAC_POLL_MS` |  |
 | `brcmfmac_tcm_idx` | K | `lx_brcmf.c` | `CONFIG_BRCMFMAC_TCM_IDX` |  |
+| `p126_worker_wait` | K | `lx_base.c` | `CONFIG_P126_WORKER_WAIT` |  |
+| `p1273_tick_cancel` | K | `lx_base.c` | `CONFIG_P1273_TICK_CANCEL` |  |
+| `p1273_tick_fail` | K | `lx_base.c` | `CONFIG_P1273_TICK_FAIL` |  |
+| `p1273_wifi_handled` | K | `lx_pci.c` | `CONFIG_P1273_WIFI_HANDLED` |  |
+| `p1273_wifi_rx` | K | `lx_cfg.c` | `CONFIG_P1273_WIFI_RX` |  |
+| `p1273_wifi_tx` | K | `lx_cfg.c` | `CONFIG_P1273_WIFI_TX` |  |
+| `p127_intx` | K | `lx_pci.c` | `CONFIG_P127_INTX` |  |
+| `p127_intx_attach` | K | `lx_pci.c` | `CONFIG_P127_INTX_ATTACH` |  |
+| `p127_intx_detach` | K | `lx_pci.c` | `CONFIG_P127_INTX_DETACH` |  |
+| `p127_intx_fallback` | K | `lx_pci.c` | `CONFIG_P127_INTX_FALLBACK` |  |
+| `p127_ticker` | K | `lx_base.c` | `CONFIG_P127_TICKER` |  |
+| `p127_ticker_due` | K | `lx_base.c` | `CONFIG_P127_TICKER_DUE` |  |
+| `p127_ticker_wait` | K | `lx_base.c` | `CONFIG_P127_TICKER_WAIT` |  |
+| `p127_ticker_wake` | K | `lx_base.c` | `CONFIG_P127_TICKER_WAKE` |  |
 | `wifi` | KU | `hakios.wifi.c`, `net_test.m` | `CONFIG_WIFI` |  |
 | `wifi_again` | K | `hakios.wifi.c` | `CONFIG_WIFI_AGAIN` |  |
 | `wifi_ask` | K | `hakios.wifi.c` | `CONFIG_WIFI_ASK` |  |
@@ -332,7 +348,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `speaker_probe` | K | `hakios.speaker.c` | `CONFIG_SPEAKER_PROBE` |  |
 | `virtio_sound` | K | `hakios.virtio_sound.c` | `CONFIG_VIRTIO_SOUND` |  |
 
-## Cameras (39)
+## Cameras (41)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -370,6 +386,8 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `cam_settle` | K | `hakios.camera.c` | `CONFIG_CAM_SETTLE` |  |
 | `cam_shutter` | K | `hakios.camera.c` | `CONFIG_CAM_SHUTTER` |  |
 | `cam_vblank` | K | `hakios.camera.c` | `CONFIG_CAM_VBLANK` |  |
+| `iris_s9` | K | `hakios.exynos_camera.c`, `hakios.exynos_iris.c` | `CONFIG_IRIS_S9` |  |
+| `p127545_qch` | K | `hakios.exynos_camera.c`, `hakios.exynos_mfc.c` | `CONFIG_P127545_QCH` |  |
 | `sccam.addr` | K | `hakios.camera.c`, `hakios.sccam_torch.c` | `CONFIG_SCCAM_ADDR` |  |
 | `sccam.h` | K | `hakios.camera.c` | `CONFIG_SCCAM_H` |  |
 | `sccam.size` | K | `hakios.camera.c` | `CONFIG_SCCAM_SIZE` |  |
@@ -591,7 +609,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ustacks_threads` | K | `user_exception_trace.c` | `CONFIG_USTACKS_THREADS` |  |
 | `ustacks_tname` | K | `user_exception_trace.c` | `CONFIG_USTACKS_TNAME` |  |
 
-## Loader (13)
+## Loader (14)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -603,13 +621,14 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `gamut` | L | `loader.c` | `CONFIG_GAMUT` |  |
 | `loader_platform` | L | `loader.c` | `CONFIG_LOADER_PLATFORM` |  |
 | `mfc` | KL | `hakios.exynos_mfc.c`, `loader.c` | `CONFIG_MFC` |  |
+| `p127545_ect` | L | `loader.c` | `CONFIG_P127545_ECT` |  |
 | `recovery` | L | `loader.c`, `wdt_exynos.c` | `CONFIG_RECOVERY` |  |
 | `serial` | L | `loader.c` | `CONFIG_SERIAL` |  |
 | `splash` | KL | `loader.c`, `scion_splash.c` | `CONFIG_SPLASH` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 | `ufs_write_guid` | L | `loader.c` | `CONFIG_UFS_WRITE_GUID` |  |
 
-## User space (189)
+## User space (194)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -725,7 +744,6 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `gpu3d_size` | K | `hakios.vgpu3d_xnu.c` | `CONFIG_GPU3D_SIZE` |  |
 | `hi` | U | `inject_sb.c` | `CONFIG_HI` |  |
 | `ioaes` | K | `MiniIOAESAccelerator.cpp` | `CONFIG_IOAES` |  |
-| `iris_s9` | K | `hakios.exynos_iris.c` | `CONFIG_IRIS_S9` |  |
 | `iris_s9_exp` | K | `hakios.exynos_iris.c` | `CONFIG_IRIS_S9_EXP` |  |
 | `iris_s9_gain` | K | `hakios.exynos_iris.c` | `CONFIG_IRIS_S9_GAIN` |  |
 | `iris_s9_ispdiv` | K | `hakios.exynos_iris.c` | `CONFIG_IRIS_S9_ISPDIV` |  |
@@ -763,6 +781,12 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `mfc_irq` | K | `hakios.exynos_mfc.c` | `CONFIG_MFC_IRQ` |  |
 | `mfc_mif_khz` | K | `hakios.exynos_mfc.c` | `CONFIG_MFC_MIF_KHZ` |  |
 | `mfc_zc` | K | `hakios.exynos_mfc.c` | `CONFIG_MFC_ZC` |  |
+| `p1273` | K | `hakios.p125_sysctl.h`, `hakios.p1274_lab.h` | `CONFIG_P1273` |  |
+| `p1274` | K | `hakios.p1274_lab.h` | `CONFIG_P1274` |  |
+| `p1275` | K | `hakios.p1274_lab.h` | `CONFIG_P1275` |  |
+| `p12751` | KU | `hakios.p1274_lab.h`, `hakios.p12751.h`, `init.c` | `CONFIG_P12751` |  |
+| `p12752` | K | `hakios.p1274_lab.h` | `CONFIG_P12752` |  |
+| `p127545_disp` | K | `hakios.p127545_disp.h` | `CONFIG_P127545_DISP` |  |
 | `passcode_debug` | U | `passcoded.m` | `CONFIG_PASSCODE_DEBUG` |  |
 | `passcode_reset` | K | `MiniAppleKeyStore.cpp` | `CONFIG_PASSCODE_RESET` |  |
 | `passcode_selftest` | K | `MiniAppleKeyStore.cpp` | `CONFIG_PASSCODE_SELFTEST` |  |

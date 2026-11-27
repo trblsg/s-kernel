@@ -37,7 +37,8 @@ static struct {
 	bool line;				/* INTx (brcmfmac=5) */
 	volatile bool exp_line,exp_fault;
 	void *volatile exp_self;
-	unsigned exp_empty,exp_irqs;
+	unsigned exp_empty,exp_irq_next,exp_irq_count;
+	unsigned long long exp_irq_times[101],exp_last_irq;
 	volatile bool polling;			/* the thread is wanted ... */
 	volatile bool polls;			/* ... and runs */
 	void *volatile poll_self;		/* (lx_os_thread_self() of that thread) */
@@ -240,7 +241,8 @@ poller(void *argument)
 			(void)lx_os_option("p127_intx_detach");
 		}
 		if(wanted && !__atomic_load_n(&lp.exp_fault,__ATOMIC_ACQUIRE) && !lp.exp_line && lx_brcmf_reached(5)){
-			lp.exp_line=true;lp.exp_empty=0;__atomic_store_n(&lp.exp_irqs,0,__ATOMIC_RELAXED);
+			lp.exp_line=true;lp.exp_empty=0;lp.exp_irq_next=lp.exp_irq_count=0;
+			__atomic_store_n(&lp.exp_last_irq,lx_os_nanoseconds(),__ATOMIC_RELEASE);
 			if(lx_os_irq_line_attach(line_fired,NULL)==0){
 				(void)lx_os_option("p127_intx_attach");
 				lx_os_irq_line_enable();
@@ -250,10 +252,12 @@ poller(void *argument)
 			}
 		}
 		if(lp.exp_line){
-			/* 20ms watchdog detects missed interrupts while quiet; a
-			 * nonempty check or empty IRQ storm latches stock fallback. */
-			lx_pause_ms(20);
-			if(__atomic_exchange_n(&lp.exp_irqs,0,__ATOMIC_RELAXED)>100){if(!__atomic_exchange_n(&lp.exp_fault,true,__ATOMIC_ACQ_REL))(void)lx_os_option("p127_intx_fallback");}
+			/* Back off only when real INTx traffic is quiet. The IRQ storm
+			 * limit below is independent of watchdog scheduling. Rollback
+			 * polling sleep is at most 80ms, plus scheduling and handler delay. */
+			unsigned long long now=lx_os_nanoseconds(),last=__atomic_load_n(&lp.exp_last_irq,__ATOMIC_ACQUIRE);
+			unsigned long long quiet=now>=last?now-last:0;
+			lx_pause_ms(quiet<200000000ull?20:quiet<1000000000ull?40:80);
 			if(lp.polling && !__atomic_load_n(&lp.exp_fault,__ATOMIC_ACQUIRE) && lx_os_option("p127_intx"))
 				lx_os_irq_line_watchdog();
 			continue;
@@ -288,7 +292,18 @@ line_fired(void *argument)
 	if(experimental){
 		(void)lx_os_option(watchdog?"p127_intx_watchdog":"p127_intx_irq");
 		if(!watchdog && r!=IRQ_NONE)(void)lx_os_option("p1273_wifi_handled");
-		if(!watchdog && __atomic_fetch_add(&lp.exp_irqs,1,__ATOMIC_RELAXED)>=100){if(!__atomic_exchange_n(&lp.exp_fault,true,__ATOMIC_ACQ_REL))(void)lx_os_option("p127_intx_fallback");}
+		if(!watchdog){
+			/* Serialized handler owns the ring. 101 real IRQs in any
+			 * trailing 20ms is a fault, even with an 80ms watchdog. */
+			unsigned long long now=lx_os_nanoseconds();
+			__atomic_store_n(&lp.exp_last_irq,now,__ATOMIC_RELEASE);
+			lp.exp_irq_times[lp.exp_irq_next]=now;
+			lp.exp_irq_next=(lp.exp_irq_next+1)%101u;
+			if(lp.exp_irq_count<101u)lp.exp_irq_count++;
+			if(lp.exp_irq_count==101u && now-lp.exp_irq_times[lp.exp_irq_next]<=20000000ull){
+				if(!__atomic_exchange_n(&lp.exp_fault,true,__ATOMIC_ACQ_REL))(void)lx_os_option("p127_intx_fallback");
+			}
+		}
 		if((watchdog && r!=IRQ_NONE) || (!watchdog && r==IRQ_NONE && ++lp.exp_empty>=8)){
 			if(!__atomic_exchange_n(&lp.exp_fault,true,__ATOMIC_ACQ_REL))(void)lx_os_option("p127_intx_fallback");
 		}else if(!watchdog && r!=IRQ_NONE)lp.exp_empty=0;

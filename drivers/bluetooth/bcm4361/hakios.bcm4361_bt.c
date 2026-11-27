@@ -118,6 +118,8 @@
  * (init.samsungexynos9810.rc, proprietary-files.txt: the two .hcd files).
  */
 #include <kern/clock.h>
+#include <kern/locks.h>
+#include "hakios.p127545_hci.h"
 #if __has_include(<kern/hakios_p125.h>)
 #include <kern/hakios_p125.h>
 #else
@@ -443,7 +445,7 @@ bt_getc(void)
 #if __has_include(<kern/hakios_p125.h>)
 		hakios_p1273_event(P1273_BT_ERROR,1);
 #endif
-		rx_errors++;
+		__atomic_fetch_add(&rx_errors,1,__ATOMIC_RELAXED);
 	}
 	return (int)(rd(uart, URXH) & 0xff);
 }
@@ -1186,6 +1188,20 @@ static volatile bool pump_running;
 static volatile SInt32 kctl_owns;       /* 1 while a com.apple.uart.bluetooth client has the UART (below) */
 static void kctl_pump(int *in);
 static uint32_t p127_bt_event,p127_bt_irq_pending,p127_bt_attached;
+static uint32_t p545_hci_enabled;
+static uint64_t p545_hci_irqs;
+static uint32_t p545_hci_transport_gen;
+/* Even generations are stable; a transition brackets the attachment and
+ * UART programming, so a concurrent TX cannot certify an unstable mode. */
+static struct p545_hci_mark p545_hci_mark_now(void){
+    struct p545_hci_mark m={0};
+    m.generation=__atomic_load_n(&p545_hci_transport_gen,__ATOMIC_ACQUIRE);
+    m.attached=__atomic_load_n(&p127_bt_attached,__ATOMIC_ACQUIRE)!=0;
+    m.irq_pending=__atomic_load_n(&p127_bt_irq_pending,__ATOMIC_ACQUIRE)!=0;
+    m.irq=__atomic_load_n(&p545_hci_irqs,__ATOMIC_ACQUIRE);
+    m.known=!(m.generation&1u) && m.generation==__atomic_load_n(&p545_hci_transport_gen,__ATOMIC_ACQUIRE);
+    return m;
+}
 static bool p127_bt_fault;
 static uint32_t p127_bt_ucon,p127_bt_uintm,p127_bt_errors,p127_bt_empty;
 
@@ -1203,19 +1219,23 @@ p127_bt_arrived(__unused void *ctx,uint32_t intid)
     gic_v3_spi_mask(intid);
     __atomic_store_n(&p127_bt_irq_pending,1,__ATOMIC_RELEASE);
     __atomic_fetch_add(&p127_bt_event,1,__ATOMIC_RELEASE);
+    if(__atomic_load_n(&p545_hci_enabled,__ATOMIC_RELAXED))__atomic_fetch_add(&p545_hci_irqs,1,__ATOMIC_RELAXED);
     hakios_p127_metric(5,1,1);
     thread_wakeup((event_t)&p127_bt_event);
 }
 static void
 p127_bt_detach(void)
 {
-    if(!__atomic_exchange_n(&p127_bt_attached,0,__ATOMIC_ACQ_REL))return;
+    if(!__atomic_load_n(&p127_bt_attached,__ATOMIC_ACQUIRE))return;
+    __atomic_add_fetch(&p545_hci_transport_gen,1,__ATOMIC_ACQ_REL);
+    __atomic_store_n(&p127_bt_attached,0,__ATOMIC_RELEASE);
     gic_v3_spi_mask(P127_BT_INTID);
     wr(uart,UINTM,p127_bt_uintm);
     wr(uart,UCON,p127_bt_ucon);
     gic_v3_spi_detach(P127_BT_INTID);
     __atomic_store_n(&p127_bt_irq_pending,0,__ATOMIC_RELEASE);
     hakios_p127_metric(5,4,1);
+    __atomic_add_fetch(&p545_hci_transport_gen,1,__ATOMIC_RELEASE);
 }
 static bool
 p127_bt_attach(void)
@@ -1223,18 +1243,21 @@ p127_bt_attach(void)
     if(!(rd(uart,UMCON)&UMCON_AFC) || (rd(uart,UINTM)&15u)!=15u ||
        (rd(uart,UCON)&15u)!=UCON_CPU_MODES)return false;
     p127_bt_ucon=rd(uart,UCON);p127_bt_uintm=rd(uart,UINTM);
-    if(gic_v3_spi_attach(P127_BT_INTID,false,p127_bt_arrived,NULL)!=KERN_SUCCESS)return false;
+    __atomic_add_fetch(&p545_hci_transport_gen,1,__ATOMIC_ACQ_REL);
+    if(gic_v3_spi_attach(P127_BT_INTID,false,p127_bt_arrived,NULL)!=KERN_SUCCESS){
+        __atomic_add_fetch(&p545_hci_transport_gen,1,__ATOMIC_RELEASE);return false;
+    }
     gic_v3_spi_mask(P127_BT_INTID);
     __atomic_store_n(&p127_bt_attached,1,__ATOMIC_RELEASE);
-    p127_bt_errors=rx_errors;p127_bt_empty=0;
+    p127_bt_errors=__atomic_load_n(&rx_errors,__ATOMIC_RELAXED);p127_bt_empty=0;
     wr(uart,UINTP,P127_BT_RX_BITS);
     wr(uart,UINTSP,P127_BT_RX_BITS);
     wr(uart,UCON,p127_bt_ucon|P127_BT_RX_UCON);
     wr(uart,UINTM,p127_bt_uintm&~P127_BT_RX_BITS);
     hakios_p127_metric(5,0,1);
-    if((rd(uart,UINTM)&15u)!=12u || (rd(uart,UCON)&P127_BT_RX_UCON)!=P127_BT_RX_UCON){
-        p127_bt_detach();return false;
-    }
+    bool ok=(rd(uart,UINTM)&15u)==12u && (rd(uart,UCON)&P127_BT_RX_UCON)==P127_BT_RX_UCON;
+    __atomic_add_fetch(&p545_hci_transport_gen,1,__ATOMIC_RELEASE);
+    if(!ok){p127_bt_detach();return false;}
     return true;
 }
 static void
@@ -1315,7 +1338,7 @@ bt_tty_pump(__unused void *arg, __unused wait_result_t w)
 		if(!wanted)p127_bt_fault=false;
 		if(__atomic_load_n(&p127_bt_attached,__ATOMIC_ACQUIRE) && (!wanted || !owner))p127_bt_detach();
 		if(wanted && owner && !p127_bt_fault && !__atomic_load_n(&p127_bt_attached,__ATOMIC_ACQUIRE) && !p127_bt_attach())p127_bt_fallback();
-		if(__atomic_load_n(&p127_bt_attached,__ATOMIC_ACQUIRE) && (!(rd(uart,UMCON)&UMCON_AFC) || (rd(uart,UFSTAT)&UFSTAT_RX_FULL) || (rd(uart,UINTP)&2u) || rx_errors!=p127_bt_errors))p127_bt_fallback();
+		if(__atomic_load_n(&p127_bt_attached,__ATOMIC_ACQUIRE) && (!(rd(uart,UMCON)&UMCON_AFC) || (rd(uart,UFSTAT)&UFSTAT_RX_FULL) || (rd(uart,UINTP)&2u) || __atomic_load_n(&rx_errors,__ATOMIC_RELAXED)!=p127_bt_errors))p127_bt_fallback();
 		tty_lock(tp);
 		if (ISSET(tp->t_state, TS_ISOPEN)) {
 			out = q_to_b(&tp->t_outq, buf, sizeof(buf));
@@ -1610,8 +1633,73 @@ static kern_ctl_ref kctl_ref;
 static volatile u_int32_t kctl_unit;
 static uint8_t kctl_rx[256];            /* read from the chip, not yet taken by the socket */
 static size_t kctl_rx_len;
+static struct p545_hci_mark p545_rx_mark;
 static uint32_t kctl_bytes_in, kctl_bytes_out;
 static uint32_t kctl_full;               /* times the socket had no room (bt_trace) */
+
+/* Separate, bounded-memory witness. Observe only bytes actually transferred
+ * for the current owner. No second socket, no credit or FIFO modification.
+ * Do not hold this lock across any UART or socket operation. */
+static LCK_GRP_DECLARE(p545_hci_grp,"p127545-hci");
+static LCK_SPIN_DECLARE(p545_hci_lock,&p545_hci_grp);
+static struct p545_hci p545_hci_state;
+static uint64_t p545_hci_epoch;
+static uint32_t p545_hci_unit,p545_hci_pid,p545_hci_rxerr;
+static bool p545_hci_tx_active;
+static void p545_hci_owner(uint32_t unit,uint32_t pid){
+    if(!__atomic_load_n(&p545_hci_enabled,__ATOMIC_RELAXED))return;
+    lck_spin_lock(&p545_hci_lock);
+    if(++p545_hci_epoch==0)++p545_hci_epoch;
+    bzero(&p545_hci_state,sizeof(p545_hci_state));
+    p545_hci_unit=unit;p545_hci_pid=pid;p545_hci_tx_active=false;
+    p545_hci_rxerr=__atomic_load_n(&rx_errors,__ATOMIC_RELAXED);
+    lck_spin_unlock(&p545_hci_lock);
+}
+static uint64_t p545_hci_begin(uint32_t unit,bool tx){
+    uint64_t epoch=0;
+    if(!__atomic_load_n(&p545_hci_enabled,__ATOMIC_RELAXED))return 0;
+    lck_spin_lock(&p545_hci_lock);
+    if(unit && unit==p545_hci_unit && kctl_owns && unit==kctl_unit){
+        epoch=p545_hci_epoch;
+        if(tx){
+            if(p545_hci_tx_active)p545_hci_state.invalid=true;
+            p545_hci_tx_active=true;
+        }
+    }
+    lck_spin_unlock(&p545_hci_lock);return epoch;
+}
+static void p545_hci_bytes(uint64_t epoch,uint32_t unit,bool rx,const uint8_t *b,size_t n,struct p545_hci_mark mark){
+    if(!epoch)return;
+    lck_spin_lock(&p545_hci_lock);
+    if(epoch==p545_hci_epoch && unit==p545_hci_unit && unit==kctl_unit && kctl_owns){
+        if(__atomic_load_n(&rx_errors,__ATOMIC_RELAXED)!=p545_hci_rxerr)p545_hci_state.invalid=true;
+        p545_hci_feed(&p545_hci_state,rx,b,n,mark);
+    }
+    lck_spin_unlock(&p545_hci_lock);
+}
+static void p545_hci_end(uint64_t epoch,int error){
+    if(!epoch)return;
+    lck_spin_lock(&p545_hci_lock);
+    if(epoch==p545_hci_epoch){
+        if(error)p545_hci_state.invalid=true;
+        p545_hci_tx_active=false;
+    }
+    lck_spin_unlock(&p545_hci_lock);
+}
+static int p127545_hci_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
+    char out[384];struct p545_hci s;uint64_t epoch;uint32_t pid,unit;bool valid;
+    if(!__atomic_load_n(&p545_hci_enabled,__ATOMIC_RELAXED))return ENODEV;
+    lck_spin_lock(&p545_hci_lock);
+    s=p545_hci_state;epoch=p545_hci_epoch;unit=p545_hci_unit;pid=p545_hci_pid;
+    valid=unit && unit==kctl_unit && kctl_owns && !p545_hci_tx_active && !s.invalid && __atomic_load_n(&rx_errors,__ATOMIC_RELAXED)==p545_hci_rxerr;
+    lck_spin_unlock(&p545_hci_lock);
+    snprintf(out,sizeof(out),"version=1 epoch=%llu owner=%u unit=%u valid=%u v_tx=%llu v_complete=%llu v_irq=%llu v_poll=%llu f_tx=%llu f_complete=%llu f_irq=%llu f_poll=%llu active_probe=0",
+        epoch,pid,unit,valid,s.op[0].tx,s.op[0].complete,s.op[0].irq,s.op[0].poll,
+        s.op[1].tx,s.op[1].complete,s.op[1].irq,s.op[1].poll);
+    return SYSCTL_OUT(req,out,strlen(out)+1);
+}
+SYSCTL_DECL(_kern_hakios);
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p127545_hci,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p127545_hci_sysctl,"A","Passive current-owner HCI witness; not active qualification");
 
 static errno_t
 kctl_connect(__unused kern_ctl_ref ref, struct sockaddr_ctl *sac, void **unitinfo)
@@ -1627,12 +1715,14 @@ kctl_connect(__unused kern_ctl_ref ref, struct sockaddr_ctl *sac, void **unitinf
 		say("bt: com.apple.uart.bluetooth: refused to pid %d: the UART is in use\n", proc_pid(current_proc()));
 		return EBUSY;
 	}
+	p545_hci_owner(0,0); /* invalidate the displaced epoch before changing FIFO ownership */
 	kctl_unit = sac->sc_unit;
 	kctl_rx_len = 0;
 	kctl_bytes_in = kctl_bytes_out = 0;
 	trace_out.type = trace_in.type = 0;
 	trace_out.junk = trace_in.junk = 0;
 	fifo_reset();
+	p545_hci_owner(sac->sc_unit,(uint32_t)proc_pid(current_proc()));
 	OSCompareAndSwap(0, 1, &kctl_owns);
 	say("bt: com.apple.uart.bluetooth: connected (unit %u) by pid %d, the chip at %u baud\n", sac->sc_unit,
 	    proc_pid(current_proc()), link_baud);
@@ -1643,6 +1733,7 @@ static errno_t
 kctl_disconnect(__unused kern_ctl_ref ref, u_int32_t unit, __unused void *unitinfo)
 {
 	if (unit == kctl_unit && OSCompareAndSwap(1, 0, &kctl_owns)) {
+		p545_hci_owner(0,0);
 		kctl_unit = 0;
 		OSCompareAndSwap(1, 0, &busy);
 	}
@@ -1657,6 +1748,7 @@ kctl_send(__unused kern_ctl_ref ref, u_int32_t unit, __unused void *unitinfo, mb
 	uint8_t buf[256];
 	size_t len = mbuf_pkthdr_len(m), off = 0;
 	errno_t error = 0;
+	uint64_t epoch=p545_hci_begin(unit,true);
 
 	if (!kctl_owns || unit != kctl_unit) {
 		error = ENXIO;
@@ -1666,14 +1758,21 @@ kctl_send(__unused kern_ctl_ref ref, u_int32_t unit, __unused void *unitinfo, mb
 
 		if (mbuf_copydata(m, off, n, buf) != 0) {
 			error = EINVAL;
-		} else if (!bt_write(buf, n, 2000)) {
-			error = EIO;
+		} else if (!kctl_owns || unit != kctl_unit) {
+			error=ENXIO;
 		} else {
+			/* Stage the owner's bytes before transmission: a response may
+			 * be drained by the pump before bt_write returns. The entire
+			 * epoch is invalidated if any actual write fails; the stats
+			 * cannot be valid while the send is in flight. */
+			p545_hci_bytes(epoch,unit,false,buf,n,p545_hci_mark_now());
+			if (!bt_write(buf, n, 2000)) {error=EIO;break;}
 			trace_bytes(&trace_out, buf, n);
 			off += n;
 			kctl_bytes_out += (uint32_t)n;
 		}
 	}
+	p545_hci_end(epoch,error);
 	mbuf_freem(m);
 	p127_bt_wake();
 	return error;
@@ -1733,12 +1832,20 @@ static void
 kctl_pump(int *in)
 {
 	u_int32_t unit = kctl_unit;
+	uint64_t epoch=p545_hci_begin(unit,false);
 	int c;
 
 	while (kctl_owns && *in < 1024) {
-		while (kctl_rx_len < sizeof(kctl_rx) && (c = bt_getc()) >= 0) {
+		/* Mark the drain, not the eventual successful socket delivery.
+		 * A backlog spanning two drain batches has ambiguous attribution. */
+		struct p545_hci_mark mark=p545_hci_mark_now();
+		if(!kctl_rx_len)p545_rx_mark=mark;
+		else if(kctl_rx_len<sizeof(kctl_rx))p545_rx_mark.known=false;
+		while (kctl_owns && unit==kctl_unit && kctl_rx_len < sizeof(kctl_rx) && (c = bt_getc()) >= 0) {
 			kctl_rx[kctl_rx_len++] = (uint8_t)c;
 		}
+		if(!kctl_owns || unit!=kctl_unit)return;
+		if(mark.generation!=__atomic_load_n(&p545_hci_transport_gen,__ATOMIC_ACQUIRE))p545_rx_mark.known=false;
 		if (kctl_rx_len == 0) {
 			return;
 		}
@@ -1748,6 +1855,7 @@ kctl_pump(int *in)
 			}
 			return;                         /* ENOBUFS: the reader is behind; RTS holds the chip meanwhile */
 		}
+		p545_hci_bytes(epoch,unit,true,kctl_rx,kctl_rx_len,p545_rx_mark);
 		trace_bytes(&trace_in, kctl_rx, kctl_rx_len);
 		kctl_bytes_in += (uint32_t)kctl_rx_len;
 		*in += (int)kctl_rx_len;
@@ -1760,6 +1868,9 @@ kctl_publish(void)
 {
 	struct kern_ctl_reg reg;
 	errno_t e;
+	uint32_t paired=0;
+	(void)PE_parse_boot_argn("p12754",&paired,sizeof(paired));
+	__atomic_store_n(&p545_hci_enabled,paired==1,__ATOMIC_RELEASE);
 
 	bzero(&reg, sizeof(reg));
 	strlcpy(reg.ctl_name, "com.apple.uart.bluetooth", sizeof(reg.ctl_name));

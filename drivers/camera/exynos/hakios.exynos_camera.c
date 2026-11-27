@@ -1022,6 +1022,8 @@ static vm_offset_t pmu, cmu_isppre, sysreg_isppre, csis, dphy, wdma, cdma, mmu, 
 static bool domain_mine;                /* this run switched ISPPRE on */
 static bool domain_up;                  /* ISPPRE is on and its blocks may be read */
 static bool phy_mine, link_on, dma_on, pattern_on, streaming;
+/* Stopping a request is not proof that the active DMA has drained. */
+static bool dma_needs_idle;
 static uint32_t iso_found, dphy_reset_found, top_gate_found, cdma_found[4];
 static bool top_gate_mine, cdma_mine, clocks_mine;
 static uint32_t top_mux_found, top_div_found;
@@ -1179,10 +1181,13 @@ dma_stop(void)
 static bool
 dma_quiet(void)
 {
-	if (!domain_up) {
-		return true;
-	}
-	return wait_for(wdma, DMA_ACT_CTRL, DMA_ON, 0, 100000, false);
+	if (!domain_up) {dma_needs_idle=false;return true;}
+	if(!dma_needs_idle)return true;
+	/* Never read an IP register after restoring its access clocks. */
+	if(!wdma || !clocks_mine)return false;
+	bool ok=wait_for(wdma, DMA_ACT_CTRL, DMA_ON, 0, 100000, false);
+	if(ok && !dma_on && !pattern_on)dma_needs_idle=false;
+	return ok;
 }
 
 /* the WDMA's frame in flight dropped, as the BSP's DMA cancel does it (DMA_ABORT_REQ, then the request taken back) */
@@ -1681,7 +1686,7 @@ dma_start(void)
 		wr(wdma, DMA_ADDR(i), (uint32_t)buffer_pa);
 	}
 	wr(wdma, VCMN + VCMN_INT_SRC, rd(wdma, VCMN + VCMN_INT_SRC));
-	dma_on = true;P54_CAM_SET(4u);
+	dma_needs_idle=true;dma_on = true;P54_CAM_SET(4u);
 	wr(wdma, DMA_CTRL, rd(wdma, DMA_CTRL) | DMA_ON | DMA_UPDT_PTR_EN);
 }
 
@@ -2147,7 +2152,7 @@ stream_start(void)
 		wr(wdma, DMA_ADDR(i), (uint32_t)(buffer_pa + (uint64_t)(i % RING_SLOTS) * SLOT_BYTES));
 	}
 	wr(wdma, VCMN + VCMN_INT_SRC, rd(wdma, VCMN + VCMN_INT_SRC));
-	dma_on = true;P54_CAM_SET(4u);
+	dma_needs_idle=true;dma_on = true;P54_CAM_SET(4u);
 	wr(wdma, DMA_CTRL, rd(wdma, DMA_CTRL) | DMA_ON | DMA_UPDT_PTR_EN);
 	say("exynos_camera: 5: the link on (UPDATE_SHADOW, D-PHY, clock lane, no Q-channel, CSI_EN)\n");
 	wr(csis, CSIS_CMN_CTRL, rd(csis, CSIS_CMN_CTRL) | CMN_UPDATE_SHADOW);
@@ -2611,8 +2616,10 @@ all_down(void)
 	if (powered) {
 		power_down();
 	}
+	/* Check the active DMA state before restoring access clocks. */
+	bool quiet=dma_quiet();
 	isp_down();
-	if (buffer != 0 && (dma_on || pattern_on || !dma_quiet())) {
+	if (buffer != 0 && (dma_on || pattern_on || !quiet)) {
 		say("exynos_camera: the WDMA was not seen to stop: no more DMA into %#llx this run\n", buffer_pa);
 		buffer_busy = true;
 	}
@@ -2943,6 +2950,13 @@ static uint32_t stream_readers;
 static uint64_t read_wc, read_pack, read_out, read_n;     /* where a read()'s time goes (selfread says) */
 static uint32_t stream_overtaken;       /* reads refused: the WDMA came round to the frame's slot before it was read out */
 static uint32_t cam_always;             /* cam_s9_always */
+static bool p545_cam_enabled,p545_cam_idle_window,p545_cam_good,p545_cam_qualified,p545_cam_pending,p545_cam_active,p545_cam_bad_restore;
+static unsigned p545_cam_restore_pending;
+bool hakios_p545_cam_restored(void);
+bool hakios_p545_cam_restored(void){return !__atomic_load_n(&p545_cam_restore_pending,__ATOMIC_ACQUIRE);}
+static uint32_t p545_cam_attempts,p545_cam_restores,p545_cam_fault,p545_cam_preempt,p545_cam_frames;
+static uint32_t p545_cam_saved,p545_cam_auto,p545_cam_dbg0,p545_cam_dbg1,p545_cam_dbg2,p545_cam_leaf;
+static uint64_t p545_cam_start,p545_cam_end,p545_cam_until;
 static volatile bool cam_open;          /* /dev/hakios-camera is open */
 static uint64_t last_read;              /* the time of the last read's start or wake (a reader waiting is a reader) */
 static uint8_t pack_line[MAX_W * 2], packed[MAX_W * 5 / 4];
@@ -2954,6 +2968,7 @@ s9dev_open(__unused dev_t dev, __unused int flags, __unused int type, __unused s
 		return EIO;
 	}
 	lck_mtx_lock(&s9cam_lock);
+	if(p545_cam_bad_restore){lck_mtx_unlock(&s9cam_lock);return EIO;}
 	stream_failed = false;  /* (a stream that failed is tried again by the next open) */
 	cam_open = true;
 	lck_mtx_unlock(&s9cam_lock);
@@ -3284,6 +3299,129 @@ stream_wanted(void)
 	       (cam_open && mach_absolute_time() - __atomic_load_n(&last_read, __ATOMIC_ACQUIRE) < idle)));
 }
 
+/* P127545 ISPPRE-only trial, serialized by the same s9cam_lock which
+ * publishes the owner thread's idle window. Do not map or power a domain
+ * for the test. Require a successful real stream and a known forced leaf
+ * with both access clocks still enabled after stock teardown. Never touch
+ * the other CSIS, SYSMMU, AXI, BUSP, top gate, rate or PMU.
+ * DBG_NFO is a transition witness only; no guessed Q-state encoding.
+ */
+static bool p545_cam_access(void){
+    return cmu_top && cmu_isppre && pmu && domain_up && !domain_mine &&
+        (rd(pmu,PMU_ISPPRE_STATUS)&PD_ON)==PD_ON && (rd(pmu,PMU_DPU_STATUS)&PD_ON)==PD_ON &&
+        (rd(cmu_top,TOP_ISPPRE_GATE)&(GATE_MANUAL|GATE_ON))==(GATE_MANUAL|GATE_ON) &&
+        (rd(cmu_isppre,ISPPRE_BUS_USER)&((1u<<4)|(1u<<7)))==(1u<<4);
+}
+static bool p545_cam_idle(void){
+    return p545_cam_enabled && p545_cam_idle_window && p545_cam_good && !p545_cam_fault &&
+        !p545_cam_bad_restore && !cam_open && !stream_wanted() && !shots_closed &&
+        !stream_running && !stream_readers && !powered && !dma_on && !pattern_on &&
+        !link_on && !streaming && !phy_mine && !clocks_mine && !top_gate_mine &&
+        !buffer_busy && !broken && !sensor_broken && p545_cam_access();
+}
+static bool p545_cam_restore_locked(bool preempt){
+    if(!p545_cam_active)return !p545_cam_bad_restore;
+    if(preempt){p545_cam_preempt++;p545_cam_qualified=false;}
+    bool ok=false;
+    if(p545_cam_access()){
+        wr(cmu_isppre,p545_cam_leaf,p545_cam_saved);
+        __builtin_arm_dsb(15);
+        ok=wait_for(cmu_isppre,p545_cam_leaf,UINT32_MAX,p545_cam_saved,1000,false) &&
+            wait_for(cmu_isppre,p545_cam_leaf+QCH_DBG,UINT32_MAX,p545_cam_dbg0,1000,false);
+        p545_cam_dbg2=rd(cmu_isppre,p545_cam_leaf+QCH_DBG);
+    }
+    p545_cam_active=false;p545_cam_end=mach_absolute_time();
+    if(ok){p545_cam_restores++;__atomic_store_n(&p545_cam_restore_pending,0,__ATOMIC_RELEASE);}
+    else{
+        p545_cam_fault++;p545_cam_bad_restore=true;p545_cam_qualified=false;p545_cam_pending=false;
+        stream_failed=true;
+    }
+    return ok;
+}
+static bool p545_cam_apply_locked(void){
+    if(!p545_cam_idle() || p545_cam_active)return false;
+    /* Exactly the CSIS this driver used. No speculative QCH sweep. */
+    p545_cam_leaf=cam_rear?0x3020u:QCH_CSIS1;
+    uint32_t q=rd(cmu_isppre,p545_cam_leaf),dbg=rd(cmu_isppre,p545_cam_leaf+QCH_DBG);
+    if((q&7u)!=QCH_REQ || dbg!=4u)return false;
+    spin_us(20);
+    if(rd(cmu_isppre,p545_cam_leaf)!=q || rd(cmu_isppre,p545_cam_leaf+QCH_DBG)!=dbg)return false;
+    p545_cam_saved=q;p545_cam_auto=(q&~QCH_REQ)|1u;p545_cam_dbg0=dbg;
+    p545_cam_start=mach_absolute_time();p545_cam_attempts++;p545_cam_active=true;
+    __atomic_store_n(&p545_cam_restore_pending,1,__ATOMIC_RELEASE);
+    wr(cmu_isppre,p545_cam_leaf,p545_cam_auto);__builtin_arm_dsb(15);
+    if(!wait_for(cmu_isppre,p545_cam_leaf,UINT32_MAX,p545_cam_auto,1000,false)){
+        (void)p545_cam_restore_locked(false);p545_cam_fault++;p545_cam_qualified=false;return false;
+    }
+    bool changed=false;
+    for(unsigned i=0;i<100;i++){
+        uint32_t v=rd(cmu_isppre,p545_cam_leaf+QCH_DBG);
+        if(v!=dbg && v!=UINT32_MAX){
+            spin_us(10);
+            if(rd(cmu_isppre,p545_cam_leaf+QCH_DBG)==v){p545_cam_dbg1=v;changed=true;break;}
+        }
+        spin_us(10);
+    }
+    if(!changed){(void)p545_cam_restore_locked(false);p545_cam_fault++;p545_cam_qualified=false;return false;}
+    return true;
+}
+bool hakios_p127545_cam_probe(void);
+bool hakios_p127545_cam_begin(uint64_t until);
+bool hakios_p127545_cam_live(void);
+bool hakios_p127545_cam_end(void);
+bool hakios_p127545_cam_qualified(void);
+void hakios_p127545_cam_invalidate(void);
+void hakios_p127545_cam_invalidate(void){lck_mtx_lock(&s9cam_lock);p545_cam_pending=false;p545_cam_qualified=false;lck_mtx_unlock(&s9cam_lock);}
+bool hakios_p127545_cam_qualified(void){
+    if(!lck_mtx_try_lock(&s9cam_lock))return false;
+    bool ok=p545_cam_qualified && !p545_cam_fault && !p545_cam_bad_restore;
+    lck_mtx_unlock(&s9cam_lock);return ok;
+}
+bool hakios_p127545_cam_probe(void){
+    if(!lck_mtx_try_lock(&s9cam_lock))return false;
+    p545_cam_qualified=false;p545_cam_pending=false;
+    bool ok=false;
+    if(p545_cam_apply_locked()){
+        spin_us(1000);
+        bool held=rd(cmu_isppre,p545_cam_leaf)==p545_cam_auto && rd(cmu_isppre,p545_cam_leaf+QCH_DBG)==p545_cam_dbg1;
+        ok=p545_cam_restore_locked(false) && held;
+        if(ok)p545_cam_pending=true;else p545_cam_fault++;
+    }
+    lck_mtx_unlock(&s9cam_lock);return ok;
+}
+bool hakios_p127545_cam_begin(uint64_t until){
+    if(!lck_mtx_try_lock(&s9cam_lock))return false;
+    uint32_t saved=p545_cam_saved,dbg=p545_cam_dbg1,leaf=p545_cam_leaf;
+    bool ok=p545_cam_qualified && p545_cam_apply_locked();
+    if(ok && (p545_cam_saved!=saved || p545_cam_dbg1!=dbg || p545_cam_leaf!=leaf)){
+        (void)p545_cam_restore_locked(false);p545_cam_qualified=false;p545_cam_fault++;ok=false;
+    }
+    if(ok)p545_cam_until=until;
+    lck_mtx_unlock(&s9cam_lock);return ok;
+}
+bool hakios_p127545_cam_live(void){
+    if(!lck_mtx_try_lock(&s9cam_lock))return false;
+    bool ok=p545_cam_active && p545_cam_idle() &&
+        rd(cmu_isppre,p545_cam_leaf)==p545_cam_auto && rd(cmu_isppre,p545_cam_leaf+QCH_DBG)==p545_cam_dbg1;
+    if(!ok && p545_cam_active){(void)p545_cam_restore_locked(false);p545_cam_fault++;p545_cam_qualified=false;}
+    lck_mtx_unlock(&s9cam_lock);return ok;
+}
+bool hakios_p127545_cam_end(void){
+    if(!lck_mtx_try_lock(&s9cam_lock))return false;
+    bool was=p545_cam_active,ok=p545_cam_restore_locked(false);
+    ok=was && ok && !p545_cam_fault;
+    lck_mtx_unlock(&s9cam_lock);return ok;
+}
+static int p545_cam_stats(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
+    char out[416];
+    lck_mtx_lock(&s9cam_lock);
+    snprintf(out,sizeof(out),"version=1 enabled=%u idle=%u good=%u pending=%u qualified=%u active=%u attempts=%u restores=%u preempt=%u fault=%u frames=%u leaf=%u saved=%u auto=%u dbg0=%u dbg1=%u dbg2=%u start=%llu end=%llu",
+        p545_cam_enabled,p545_cam_idle_window,p545_cam_good,p545_cam_pending,p545_cam_qualified,p545_cam_active,p545_cam_attempts,p545_cam_restores,p545_cam_preempt,p545_cam_fault,p545_cam_frames,
+        p545_cam_leaf,p545_cam_saved,p545_cam_auto,p545_cam_dbg0,p545_cam_dbg1,p545_cam_dbg2,(unsigned long long)p545_cam_start,(unsigned long long)p545_cam_end);
+    lck_mtx_unlock(&s9cam_lock);return SYSCTL_OUT(req,out,strlen(out)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p127545_cam_stats,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p545_cam_stats,"A","ISPPRE owned leaf trial and real stream review");
+
 /* one stream: the camera up, the frames coming until nobody wants them, everything down again; false if it failed */
 static bool
 stream_session(void)
@@ -3295,6 +3433,7 @@ stream_session(void)
 	static uint64_t numbered;       /* the frames of the earlier streams: the numbers go on */
 	bool ok = false, ae_near = false, lens_holds;
 	int slot;
+	if(p545_cam_bad_restore)return false;
 
 	say("exynos_camera: 7: THE STREAM: %s up, %u x %u RAW10 at 30 frames a second into the ring (%u slots of %u bytes at "
 	    "%#llx), the auto-exposure %s\n", cam_name, FRAME_W, FRAME_H, RING_SLOTS, SLOT_BYTES, MEM_PA, cam_ae ? "on" : "off");
@@ -3407,6 +3546,12 @@ down:
 	}
 	all_down();
 	lck_mtx_lock(&s9cam_lock);
+	if(p545_cam_enabled){
+		p545_cam_good=ok && seen>=4 && !dma_errors && !buffer_busy && !broken && !sensor_broken;
+		if(p545_cam_good)p545_cam_frames++;
+		if(p545_cam_pending){p545_cam_qualified=p545_cam_good;p545_cam_pending=false;if(!p545_cam_good)p545_cam_fault++;}
+		else if(!p545_cam_good)p545_cam_qualified=false;
+	}
 	stream_running = false;
 	stream_newest_slot = -1;        /* (the ring's frames are old by the next stream) */
 	while (stream_readers != 0) {
@@ -3423,11 +3568,16 @@ static void
 stream_wait(void)
 {
 	lck_mtx_lock(&s9cam_lock);
-	while (!shots_closed && !stream_wanted()) {
+	p545_cam_idle_window=true;
+	while (!shots_closed && !stream_wanted() && !p545_cam_bad_restore) {
+		if(p545_cam_active && (cam_open || mach_absolute_time()>=p545_cam_until))
+			(void)p545_cam_restore_locked(true);
 		struct timespec ts = { 0, 50 * NSEC_PER_MSEC };
-
 		(void)msleep(&last_read, &s9cam_lock, PZERO, "hakios-camera-idle", &ts);
 	}
+	/* Restore before leaving this owner idle window, even on shutdown. */
+	if(p545_cam_active)(void)p545_cam_restore_locked(true);
+	p545_cam_idle_window=false;
 	lck_mtx_unlock(&s9cam_lock);
 }
 
@@ -3435,7 +3585,7 @@ stream_wait(void)
 static void
 stream_loop(void)
 {
-	for (stream_wait(); !shots_closed; stream_wait()) {
+	for (stream_wait(); !shots_closed && !p545_cam_bad_restore; stream_wait()) {
 		if (stream_session()) {
 			continue;
 		}
@@ -3669,6 +3819,11 @@ hakios_exynos_camera_init(void)
 		steps = 7;
 	}
 	shots_enabled = steps >= 6;
+	uint32_t paired=0,trial=0,iris=0;
+	(void)PE_parse_boot_argn("p12754",&paired,sizeof(paired));
+	(void)PE_parse_boot_argn("p127545_qch",&trial,sizeof(trial));
+	(void)PE_parse_boot_argn("iris_s9",&iris,sizeof(iris));
+	p545_cam_enabled=paired==1 && trial==1 && !iris && steps>=7 && !cam_always && !cam_probe;
 	if (kernel_thread_start(camera_thread, (void *)(uintptr_t)steps, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	}

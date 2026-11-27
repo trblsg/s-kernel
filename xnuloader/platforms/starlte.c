@@ -6,6 +6,7 @@
  *   0x80000000 + 2 MB          sec_debug_magic (4 KB) and a margin
  *   0x8F000000 - 0x97FFFFFF    the UEFI image, its stack, the DXE heap, and 80 MB more left to UEFI's allocator, which
  *                              stays alive beside the kernel (zswap_debug, 0x91300000, is in it)
+ *   0xA0000000 + 0x34000      S-Boot ECT (parameter_size 0x32000, rounded to 16 KB; preserve for read-only audit)
  *   0xAF800000 + 32 MB         rkp_region
  *   0xB8000000 + 2 MB          tima_region
  *   0xC0000000 + 512 KB        seclog_mem
@@ -16,7 +17,7 @@
  * the map), the loader's image at 0xA1000000 and whatever UEFI has handed out stay where they are.
  */
 static const uint64_t exynos9810_extra_ram[][2] = {
-	{ 0x80200000, 0x8F000000 }, { 0x98000000, 0xAF800000 }, { 0xB1800000, 0xB8000000 }, { 0xB8200000, 0xC0000000 },
+	{ 0x80200000, 0x8F000000 }, { 0x98000000, 0xA0000000 }, { 0xA0034000, 0xAF800000 }, { 0xB1800000, 0xB8000000 }, { 0xB8200000, 0xC0000000 },
 	{ 0xC0080000, 0xCC000000 }, { 0xE3700000, 0xF0000000 },
 	/* The main window has already been claimed and is no longer ConventionalMemory; collect any other high-bank pieces. */
 	{ 0x880000000, 0xA00000000 }, { 0, 0 },
@@ -106,7 +107,7 @@ static const struct platform platform_starlte = {
 	 * starts the modem before XNU (S-Boot does not; Android's cbd would).
 	 */
 	.payload_home = 0xD0000000,
-	.keep_out = { { 0xF0000000, 0x0B200000, "CP: modem_if, cp_ram_logging" }, { 0xFB200000, 0x02800000, "ABOX: abox_rmem" } },
+	.keep_out = { { 0xF0000000, 0x0B200000, "CP: modem_if, cp_ram_logging" }, { 0xFB200000, 0x02800000, "ABOX: abox_rmem" }, { 0xA0000000, 0x34000, "S-Boot ECT" } },
 	/*
 	 * The low bank's free RAM, about 900 MB, is the kernel's too (beside its 2 GB window from 0x880000000), in the ranges
 	 * above; extra_ram=0 among the kernel's arguments: not.

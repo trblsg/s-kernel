@@ -46,6 +46,7 @@
 !/.github/
 !/avf/
 
+.p545-tools/
 __pycache__/
 *~
 *.orig
@@ -56,6 +57,7 @@ __pycache__/
 !/xnuloader/efi.h
 !/xnuloader/*.c
 !/xnuloader/platform.h
+!/xnuloader/p127545_ect.h
 !/xnuloader/chooser.h
 !/xnuloader/scion_splash_logo.h
 !/xnuloader/platforms/

@@ -30,6 +30,7 @@ virtio   bsd/dev/hakios.virtio_blk.c
 
 gpu/adreno bsd/dev/hakios.adreno.c
 display/dpu bsd/dev/hakios.exynos_dpu.c
+display bsd/dev/hakios.p127545_disp_access.h
 display/dpu bsd/dev/hakios.lga_dpu.c
 media/mfc bsd/dev/hakios.exynos_mfc.c
 media/mfc bsd/dev/hakios.exynos_mfc_test.h
@@ -122,6 +123,11 @@ core     bsd/dev/hakios.exec.c
 soc/exynos bsd/dev/hakios.exynos_hsi2c.c
 soc/exynos bsd/dev/hakios.exynos_spi.c
 soc/exynos bsd/dev/hakios.exynos_acpm.c
+soc/exynos bsd/dev/hakios.p127545_cmu.h
+soc/exynos bsd/dev/hakios.p127545_disp.h
+soc/exynos bsd/dev/hakios.p127545_ect.h
+soc/exynos bsd/dev/hakios.p127545_ect_abi.h
+soc/exynos bsd/dev/hakios.p127545_int_bounds.h
 soc/exynos bsd/dev/hakios.soc_runtime.c
 soc/exynos bsd/dev/hakios.exynos_m3.c
 soc/exynos bsd/dev/hakios.p8_soc_snapshot.h
@@ -143,6 +149,7 @@ power   bsd/dev/hakios.s2mps18_rtc.c
 power   bsd/dev/hakios.battguard.c
 bluetooth bsd/dev/hakios.bt.c
 bluetooth/bcm4361 bsd/dev/hakios.bcm4361_bt.c
+bluetooth/bcm4361 bsd/dev/hakios.p127545_hci.h
 bluetooth/bcm4361 iokit/Kernel/hakios.bt_node.cpp
 bluetooth/bcm4361 bsd/dev/hakios.bcm_hci.h
 

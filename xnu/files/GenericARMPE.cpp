@@ -221,6 +221,7 @@ GenericARMCPU::getCPUName(void)
  * CPU_ON takes at boot (milliseconds); the screen-on does not wait for them.
  */
 extern "C" int hakios_s6e3ha8_power(bool on);
+extern "C" bool hakios_p545_disp_wake(void);
 extern "C" int hakios_p9_panel_auto_on(void); /* runtime opt-in, 0 by default */
 extern "C" bool psci_smp_cpu_is_loaders(int cpu);
 extern "C" uint32_t hakios_cpu_exit_mask;       /* osfmk/arm/cpu_common.c: the cores ml_cpu_can_exit() lets go */
@@ -373,9 +374,15 @@ hakios_display_power(int on)
 	gDisplayOn = on;
 	/* P12.5 observation of actual display requests only. */
 	hakios_p125_display_event(on ? 1u : 0u);
+	/* A sleepable display-power callback: restore before any DCS or scanout.
+	 * Concurrent early display MMIO is fenced by the exclusive scope gate. */
+	bool dispSafe = !on || hakios_p545_disp_wake();
+	if (!dispSafe) {
+		hakios_say("GenericARMPE: DISP rollback unverified; MMIO fenced, recovery required\n");
+	}
 	hakios_say("GenericARMPE: the display %s (iOS's power request)%s%s\n", on ? "on" : "off",
 	    gPanelSleep ? "; panel_sleep=1" : "", gSleepCores ? "; sleep_cores=" : "");
-	if (gPanelSleep || hakios_p9_panel_auto_on()) {
+	if (dispSafe && (gPanelSleep || hakios_p9_panel_auto_on())) {
 		int error = hakios_s6e3ha8_power(on);
 
 		if (error != 0) {

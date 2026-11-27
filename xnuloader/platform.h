@@ -30,7 +30,7 @@ struct platform {
 	uint32_t parked_cores;           /* a bit for each core the boot loader used for itself: the kernel's only if asked (core1=1) */
 	uint8_t affinity_unreliable;     /* PSCI AFFINITY_INFO says "on" of cores that are off: CPU_ON's answer is what counts */
 	uint64_t payload_home;           /* not 0: the payload is moved here (or a 64 MiB step above) from PAYLOAD_BASE at the start */
-	struct { uint64_t base, size; const char *what; } keep_out[2];  /* RAM neither UEFI nor XNU may have: reserved at the start */
+	struct { uint64_t base, size; const char *what; } keep_out[3];  /* RAM neither UEFI nor XNU may have: reserved at the start */
 	const uint64_t (*extra_ram)[2];  /* where free RAM beside XNU's window is XNU's too ([lo, hi) each, to a {0, 0}): extra_ram_claim */
 	uint8_t extra_ram_off;           /* ... only with extra_ram=1 among the kernel's arguments (otherwise: unless extra_ram=0) */
 	const char *data_part;           /* a port with no darwin: the one partition, by name, ufs_write=1 may write (block_is_data_part) */

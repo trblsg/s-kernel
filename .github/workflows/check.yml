@@ -80,6 +80,11 @@ jobs:
         run: sh tools/s6e3ha8-gamma-test.sh
       - name: The Galaxy S9's Bluetooth H4 framing, HCI events, .hcd reading and UART divisor hold together (sanitizers)
         run: sh tools/bcm-hci-test.sh
+      - name: P127545 portable C and ECT bounds (not device qualification)
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g tools/tests/test_s9_p127545_witness.c -o /tmp/p127545-witness
+          /tmp/p127545-witness
+          python3 tools/tests/test_p127545_ect.py
       - name: The Galaxy S9's sensor hub's SPI frames, packets, CRC-8, RPCs, firmware records and SSP hold together (sanitizers)
         run: sh tools/bcm-shub-test.sh
       - name: The commits of the fork of XNU that the profiles pin can be fetched

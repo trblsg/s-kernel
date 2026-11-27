@@ -106,7 +106,12 @@
  * at most once a second, with how many were left out since the last line.
  */
 #include <kern/clock.h>
+#include "hakios.p127545_disp_access.h" /* staged by drivers/map into bsd/dev */
 #include <kern/locks.h>
+#include <kern/thread_call.h>
+#if __has_include(<kern/hakios_p125.h>)
+#include <kern/hakios_p125.h>
+#endif
 #include <libkern/libkern.h>
 #include <mach/mach_time.h>
 #include <mach/mach_types.h>
@@ -140,6 +145,7 @@ SYSCTL_DECL(_kern_hakios);
 #define  FULL_PH        (1u << 11)
 #define  EMPTY_PH       (1u << 10)      /* (the header FIFO empty: Samsung takes that for "sent" as well) */
 #define  FULL_PL        (1u << 9)
+#define  EMPTY_PL       (1u << 8)
 #define RX_WORDS        64              /* Samsung's DSIM_RX_FIFO_MAX_DEPTH */
 
 #define DCS_SHORT       0x05
@@ -461,6 +467,7 @@ panel_gamma_init(uint32_t mode)
 static int
 panel_set(int level)
 {
+	P545_DISP_GUARD(true,EBUSY);
 	static const uint8_t key_on[] = { 0xF0, 0x5A, 0x5A }, take[] = { 0xF7, 0x03 }, key_off[] = { 0xF0, 0xA5, 0xA5 };
 	uint8_t gamma[1 + HA8_CA] = { REG_GAMMA };
 	uint32_t aor;
@@ -571,6 +578,7 @@ bool hakios_s6e3ha8_blank(int (*say_as)(const char *, ...));
 bool
 hakios_s6e3ha8_blank(int (*say_as)(const char *, ...))
 {
+	P545_DISP_GUARD(true,false);
 	static const uint8_t key1_on[] = { 0x9F, 0xA5, 0xA5 }, key1_off[] = { 0x9F, 0x5A, 0x5A };
 	static const uint8_t display_off[] = { 0x28 }, sleep_in[] = { 0x10 };
 	bool locked = panel_lock != NULL && lck_mtx_try_lock(panel_lock), off, asleep;
@@ -622,11 +630,41 @@ static bool panel_asleep;
  * P9 is intentionally OFF by default and NEVER changes panel supplies. */
 static uint32_t p9_panel_auto, panel_sleep_boot;
 extern int hakios_display_requested_on(void);
+extern bool hakios_p127545_frame_latched(uint32_t gen);
+static uint32_t fresh_mode,fresh_boot,fresh_gen,fresh_ready,fresh_dsim;
+static uint32_t fresh_ok,fresh_fallback,fresh_fault,fresh_sleep;
+static bool fresh_off_ok;
+static uint64_t fresh_deadline,fresh_arm_until;
+/* Called with panel_lock held. Never disarm an asleep panel. */
+static void fresh_disarm(void){panel_sleep=panel_sleep_boot;__atomic_store_n(&fresh_mode,0,__ATOMIC_RELEASE);}
+static thread_call_t fresh_call;
+uint32_t hakios_p127545_panel_generation(void);
+uint32_t hakios_p127545_panel_generation(void){return __atomic_load_n(&fresh_ready,__ATOMIC_ACQUIRE);}
+static void fresh_schedule(void){uint64_t t;clock_interval_to_deadline(10,NSEC_PER_MSEC,&t);thread_call_enter_delayed(fresh_call,t);}
+/* A timeout is a compatibility wake, never success evidence. */
+static void fresh_worker(thread_call_param_t a __unused,thread_call_param_t b __unused){
+    P545_DISP_GUARD_VOID(true);
+    static const uint8_t key_on[]={0x9f,0xa5,0xa5},key_off[]={0x9f,0x5a,0x5a},on[]={0x29};
+    lck_mtx_lock(panel_lock);
+    uint32_t gen=hakios_p127545_panel_generation();
+    if(!gen || hakios_display_requested_on()!=1 || panel_asleep){lck_mtx_unlock(panel_lock);return;}
+    uint64_t now=mach_absolute_time();
+    bool latched=now<fresh_deadline && rd(DSIM_CONFIG)==fresh_dsim && hakios_p127545_frame_latched(gen);
+    if(!latched && now<fresh_deadline){fresh_schedule();lck_mtx_unlock(panel_lock);return;}
+    __atomic_store_n(&fresh_ready,0,__ATOMIC_RELEASE);
+    if(hakios_display_requested_on()!=1){lck_mtx_unlock(panel_lock);return;}
+    bool ok=dsim_send(key_on,sizeof(key_on)) && dsim_send(on,sizeof(on));
+    ok=dsim_send(key_off,sizeof(key_off)) && ok;
+    if(latched && ok)fresh_ok++;else{fresh_fallback++;if(!ok)fresh_fault++;}
+    if(ok)fresh_disarm();
+    say("p127545-panel: gen=%u latch=%u display29=%u fallback=%u\n",gen,latched,ok,!latched||!ok);
+    lck_mtx_unlock(panel_lock);
+}
 
 int
 hakios_p9_panel_auto_on(void)
 {
-    return (int)__atomic_load_n(&p9_panel_auto, __ATOMIC_ACQUIRE);
+    return (int)(__atomic_load_n(&p9_panel_auto, __ATOMIC_ACQUIRE) || __atomic_load_n(&fresh_mode,__ATOMIC_ACQUIRE));
 }
 
 int hakios_s6e3ha8_power(bool on);
@@ -634,10 +672,12 @@ int hakios_s6e3ha8_power(bool on);
 int
 hakios_s6e3ha8_power(bool on)
 {
+	P545_DISP_GUARD(true,EBUSY);
 	static const uint8_t key1_on[] = { 0x9F, 0xA5, 0xA5 }, key1_off[] = { 0x9F, 0x5A, 0x5A };
 	static const uint8_t display_off[] = { 0x28 }, sleep_in[] = { 0x10 }, sleep_out[] = { 0x11 }, display_on[] = { 0x29 };
 	bool first, second;
 	int level;
+	uint32_t gen=0;
 
 	if (!panel_sleep || dsim == 0 || panel_lock == NULL) {
 		return ENODEV;
@@ -647,6 +687,15 @@ hakios_s6e3ha8_power(bool on)
 		lck_mtx_unlock(panel_lock);
 		return 0;                       /* (already so) */
 	}
+	if (!on && !panel_asleep && __atomic_load_n(&fresh_mode,__ATOMIC_ACQUIRE) && mach_absolute_time()>=fresh_arm_until){
+		fresh_disarm();lck_mtx_unlock(panel_lock);return 0;
+	}
+	if (__atomic_load_n(&fresh_mode,__ATOMIC_ACQUIRE)){
+		if(++fresh_gen==0)++fresh_gen;
+		gen=fresh_gen;
+		__atomic_store_n(&fresh_ready,0,__ATOMIC_RELEASE);
+		if(!on)fresh_dsim=rd(DSIM_CONFIG);
+	}
 	if (!on) {
 		first = dsim_send(key1_on, sizeof(key1_on)) && dsim_send(display_off, sizeof(display_off));
 		first = dsim_send(key1_off, sizeof(key1_off)) && first;
@@ -655,6 +704,7 @@ hakios_s6e3ha8_power(bool on)
 		second = dsim_send(key1_off, sizeof(key1_off)) && second;
 		delay(100 * 1000);              /* Samsung's wait after sleep-in */
 		panel_asleep = true;
+		if(gen){fresh_off_ok=first&&second;if(fresh_off_ok)fresh_sleep++;else fresh_fault++;}
 		level = panel_level;
 	} else {
 		first = dsim_send(key1_on, sizeof(key1_on)) && dsim_send(sleep_out, sizeof(sleep_out));
@@ -666,13 +716,21 @@ hakios_s6e3ha8_power(bool on)
 	}
 	lck_mtx_unlock(panel_lock);
 	if (on) {
-		if (level >= 0) {
-			(void)panel_set(level);         /* (logs itself) */
-		}
+		int brightness_error=level>=0?panel_set(level):EINVAL;
 		lck_mtx_lock(panel_lock);
+		if(gen){
+			if(gen!=fresh_gen || hakios_display_requested_on()!=1 || panel_asleep){lck_mtx_unlock(panel_lock);return EBUSY;}
+			if(fresh_off_ok && first && !brightness_error && panel_write && rd(DSIM_CONFIG)==fresh_dsim && fresh_call){
+				clock_interval_to_deadline(250,NSEC_PER_MSEC,&fresh_deadline);
+				__atomic_store_n(&fresh_ready,gen,__ATOMIC_RELEASE);
+				fresh_schedule();lck_mtx_unlock(panel_lock);return 0;
+			}
+			fresh_fallback++;fresh_fault++;
+		}
 		delay(20 * 1000);
 		second = dsim_send(key1_on, sizeof(key1_on)) && dsim_send(display_on, sizeof(display_on));
 		second = dsim_send(key1_off, sizeof(key1_off)) && second;
+		if(gen && first && second)fresh_disarm();
 		lck_mtx_unlock(panel_lock);
 	}
 	say("s6e3ha8: panel_sleep: %s: %s %s, %s %s (brightness %d; FIFOCTRL %x, INTSRC %x)\n", on ? "screen on" : "screen off",
@@ -696,6 +754,8 @@ p9_panel_mode_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
     int err=sysctl_io_number(req,value,sizeof(value),&value,NULL);
     if(err || req->newptr==USER_ADDR_NULL)return err;
     if(value!=0 && value!=1)return EINVAL;
+    P545_DISP_GUARD(true,EBUSY);
+    if(__atomic_load_n(&fresh_mode,__ATOMIC_ACQUIRE))return EBUSY;
     if(!dsim || !panel_lock)return ENODEV;
     /* No asynchronous panel state transition from a kernel sysctl. The
      * normal GenericARMPE display event is the sole OFF/ON executor. */
@@ -705,6 +765,7 @@ p9_panel_mode_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
         if(err)return err;
     }
     lck_mtx_lock(panel_lock);
+    if(__atomic_load_n(&fresh_mode,__ATOMIC_ACQUIRE) || hakios_display_requested_on()!=1){lck_mtx_unlock(panel_lock);return EBUSY;}
     panel_sleep=value?1u:panel_sleep_boot;
     __atomic_store_n(&p9_panel_auto,(uint32_t)value,__ATOMIC_RELEASE);
     lck_mtx_unlock(panel_lock);
@@ -723,7 +784,7 @@ p9_panel_stats_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     char out[200];
     snprintf(out,sizeof(out),"mode=%u panel_sleep=%u panel_asleep=%u "
         "display_requested=%d panel_ready=%u DCS_only=1 DECON_DSIM_gated=unproven",
-        __atomic_load_n(&p9_panel_auto,__ATOMIC_ACQUIRE),panel_sleep,
+        (unsigned)hakios_p9_panel_auto_on(),panel_sleep,
         panel_asleep?1u:0u,hakios_display_requested_on(),
         dsim&&panel_lock?1u:0u);
     return SYSCTL_OUT(req,out,strlen(out)+1);
@@ -732,9 +793,47 @@ SYSCTL_PROC(_kern_hakios,OID_AUTO,p9_panel_stats,
     CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,
     p9_panel_stats_sysctl,"A","P9 panel request/DCS state; does not imply DECON or power-rail OFF");
 
+/* Only exclusive DISP owner at verified stock rate can sample DSIM.
+ * No panel DCS change is mixed into the DISP experiment. */
+bool hakios_p545_disp_panel_quiet(void);
+bool hakios_p545_disp_panel_quiet(void){
+    if(!dsim || !panel_lock || panel_sleep || panel_asleep || p9_panel_auto || fresh_mode || fresh_ready)return false;
+    uint32_t f=rd(DSIM_FIFOCTRL);
+    return (f&(EMPTY_PH|EMPTY_PL|EMPTY_RX|FULL_PH|FULL_PL))==(EMPTY_PH|EMPTY_PL|EMPTY_RX);
+}
+
+/* Separate runtime opt-in, not a P9 mode or rail-power change. */
+static int p127545_panel_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unused int arg2,struct sysctl_req *req){
+    int v=(int)__atomic_load_n(&fresh_mode,__ATOMIC_ACQUIRE);
+    int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(e || req->newptr==USER_ADDR_NULL)return e;
+    if(v!=0 && v!=1)return EINVAL;
+    P545_DISP_GUARD(true,EBUSY);
+    if(!fresh_boot || !panel_lock || !dsim || !fresh_call)return ENODEV;
+    lck_mtx_lock(panel_lock);
+#if __has_include(<kern/hakios_p125.h>)
+    if(v && (__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE) || hakios_p127_mode())){lck_mtx_unlock(panel_lock);return EBUSY;}
+#endif
+    if(hakios_display_requested_on()!=1 || panel_asleep || fresh_ready || p9_panel_auto || panel_sleep_boot || (v && (!panel_write || panel_level<0))){lck_mtx_unlock(panel_lock);return EBUSY;}
+    if(v){
+        if(fresh_mode){lck_mtx_unlock(panel_lock);return EBUSY;}
+        clock_interval_to_deadline(60,NSEC_PER_SEC,&fresh_arm_until);
+        panel_sleep=1;__atomic_store_n(&fresh_mode,1,__ATOMIC_RELEASE);
+    }else{fresh_disarm();}
+    lck_mtx_unlock(panel_lock);return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p127545_panel,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p127545_panel_sysctl,"I","Experimental fresh scanout wake, default off");
+static int p127545_panel_stats_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unused int arg2,struct sysctl_req *req){
+    char out[192];if(!panel_lock)return ENODEV;
+    lck_mtx_lock(panel_lock);
+    snprintf(out,sizeof(out),"version=1 mode=%u gen=%u pending=%u sleep=%u latch29=%u fallback=%u fault=%u",fresh_mode,fresh_gen,fresh_ready,fresh_sleep,fresh_ok,fresh_fallback,fresh_fault);
+    lck_mtx_unlock(panel_lock);return SYSCTL_OUT(req,out,strlen(out)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p127545_panel_stats,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p127545_panel_stats_sysctl,"A","DCS transmission and scanout evidence, not panel retention or power qualification");
 void
 hakios_s6e3ha8_init(void)
 {
+	P545_DISP_GUARD_VOID(true);
 	uint32_t enabled = 0, level = 0, mode = 2, write_arg;
 
 	if (!PE_parse_boot_argn("panel", &enabled, sizeof(enabled)) || enabled == 0) {
@@ -759,6 +858,11 @@ hakios_s6e3ha8_init(void)
 	(void)hakios_panel_register("s6e3ha8", panel_set);
 	(void)PE_parse_boot_argn("panel_sleep", &panel_sleep, sizeof(panel_sleep));
 	panel_sleep_boot=panel_sleep;
+	uint32_t audit_boot=0;
+	(void)PE_parse_boot_argn("p12754",&fresh_boot,sizeof(fresh_boot));
+	(void)PE_parse_boot_argn("p12753",&audit_boot,sizeof(audit_boot));
+	fresh_boot=(fresh_boot==1 && audit_boot==1);
+	if(fresh_boot)fresh_call=thread_call_allocate(fresh_worker,NULL);
 	if (panel_sleep) {
 		say("s6e3ha8: panel_sleep=%u: the screen's off from iOS puts the panel to sleep (28, 10), its on wakes it (11, 29)\n",
 		    panel_sleep);
