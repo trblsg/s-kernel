@@ -5,6 +5,10 @@
 #ifndef HAKIOS_P12753_H
 #define HAKIOS_P12753_H
 #include <sys/hakios.exynos_abox.h>
+/* XNU 8796's exported machine_routines.h does not declare ml_io_map.
+ * Use the same typed declaration as hakios.exynos_mfc.c, which maps
+ * this PMU range on S9. No implicit int return or address truncation. */
+extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 #define P12753_ROWS 96u
 #define P53_BIG 1u
 #define P53_LIT 2u

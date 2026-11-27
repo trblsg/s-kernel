@@ -13,6 +13,12 @@ assert(h.includes('p12753_request==9 && p12753_bus<13'));
 assert(h.includes('hakios_acpm_dvfs_get') && h.includes('hakios_acpm_dvfs_table'));
 assert(!/hakios_acpm_dvfs_set|CPU_SUSPEND|CPU_OFF|DCS|ml_io_write|pmic_write/.test(h));
 assert(h.includes('r->dpu!=UINT32_MAX && (r->dpu&15u)==15u?hakios_scanout_refreshes()'));
+// Native build regression: exported machine_routines.h lacks ml_io_map.
+// Match the existing MFC PMU mapper's ABI; declare before the first call.
+const mapDecl=/extern\s+vm_offset_t\s+ml_io_map\(vm_offset_t(?:\s+\w+)?,\s*vm_size_t(?:\s+\w+)?\);/;
+assert(mapDecl.test(read('drivers/media/mfc/hakios.exynos_mfc.c')));
+const decl=h.match(mapDecl), call=h.indexOf('p12753_pmu=ml_io_map(EXYNOS_PMU_PA,0x5000)');
+assert(decl && call>decl.index,'P12753 typed PMU mapping declaration missing before use');
 assert(h.includes('p12753_policy_lease=orig') && h.includes('p12753_qualified(p12753_request)'));
 assert(abi.includes('hakios_p12753_observe') && abi.includes('hakios_p12753_fg_link'));
 assert(old.includes('Keep legacy hard guards'));
