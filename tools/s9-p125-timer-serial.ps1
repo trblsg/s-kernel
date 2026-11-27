@@ -4,7 +4,7 @@
 param(
  [ValidatePattern('^COM[0-9]+$')][string]$Port='COM125',
  [string]$ReconnectPort='',
- [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump','DriverTrials','EnergyTrials','EnergyOffline','Idle52','Idle52Offline','Idle52Recover','Audit53','Audit53Recover','Audit53Compare','Guard53','GpuCacheCheck','P1273Diagnostics','BusTrace','ThermalTrace','ThermalTraceDump','ThermalGpuDump','OffBurstCapABA','OfflineABA','FunctionalGate','CombinedConnected')][string]$Scenario='Trace',
+ [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump','DriverTrials','EnergyTrials','EnergyOffline','Idle52','Idle52Offline','Idle52Recover','Audit53','Audit53Recover','Audit53Compare','Guard53','Hardware54','GpuCacheCheck','P1273Diagnostics','BusTrace','ThermalTrace','ThermalTraceDump','ThermalGpuDump','OffBurstCapABA','OfflineABA','FunctionalGate','CombinedConnected')][string]$Scenario='Trace',
  [ValidateRange(30,90)][int]$TraceSeconds=60,
  [ValidateRange(12,40)][int]$AggregateSeconds=20,
  [string]$SymbolMap='',
@@ -21,14 +21,15 @@ param(
  [switch]$P12752Idle,
  [string]$P12752PriorReport='',
  [uint64]$ExpectedStart=0,
- [ValidateSet('STOCK120','STOCK60','BASE15','PSR','LITTLE949','ABOX','BT','WIFI','TICKER','BUS')][string]$Audit53Module='STOCK120',
+ [switch]$P12754,
+ [ValidateSet('STOCK120','STOCK60','BASE15','PSR','LITTLE949','LITTLE832','LITTLE715','LITTLE598','ABOX','BT','WIFI','TICKER','BUS')][string]$Audit53Module='STOCK120',
  [string]$Audit53Checkpoint='',
  [string[]]$Audit53Reports=@(),
  [string]$Audit53PriorReport='',
  [switch]$AllowOffCap,
  [switch]$AllowStrongerCap,
  [ValidateSet('ABOX','BT','WIFI','TICKER','LITTLE949','COMBINED5','COMBINED6')][string]$OfflineModule='LITTLE949',
- [ValidateSet('USB','ABOX','BT','WIFI','TICKER','LITTLE949','COMBINED5','COMBINED6')][string]$GateModule='USB',
+ [ValidateSet('USB','ABOX','BT','WIFI','TICKER','LITTLE949','LITTLE832','LITTLE715','LITTLE598','COMBINED5','COMBINED6')][string]$GateModule='USB',
  [ValidateSet('COMBINED5','COMBINED6')][string]$CombinedProfile='COMBINED5',
  [switch]$AllowFunctionalGate,
  [switch]$AllowCombined,
@@ -46,8 +47,9 @@ $script:P127HostEnabled=$true
 $script:P1272HostEnabled=$true
 $script:P12752IdleAllowed=[bool]$P12752Idle
 $script:P12752IdleDirty=$false
-$script:P12753HostEnabled=$Scenario -in @('Audit53','Audit53Recover','Guard53')
-$script:P12753ArmAllowed=$Scenario -eq 'Audit53' -and [bool]$AllowOfflineTrial
+$script:P12754HostEnabled=[bool]$P12754
+$script:P12753HostEnabled=$Scenario -in @('Audit53','Audit53Recover','Guard53','Hardware54')
+$script:P12753ArmAllowed=($Scenario -eq 'Audit53' -and [bool]$AllowOfflineTrial) -or ($Scenario -eq 'Hardware54' -and $P12754)
 $script:P1273HostEnabled=([bool]$P1273Telemetry -or [bool]$P12752Idle -or $script:P12753HostEnabled -or $Scenario -in @('P1273Diagnostics','BusTrace','ThermalTrace','ThermalTraceDump','ThermalGpuDump','OffBurstCapABA','OfflineABA','FunctionalGate','CombinedConnected'))
 $script:P1273GateDirty=$false
 $script:P1273OfflineDirty=$false
@@ -1136,11 +1138,11 @@ function P1273-OfflineABA([string]$Stem){
 # foreground functions after kernel has restored mode0. Never ACK on time alone.
 function P1273-GateStatus {
     $v=P125-Fields (P12-Query 'p1273_gate_status')
-    if($v.version -ne '1' -or [int]$v.qualified -gt 255){throw 'P1273 gate ABI mismatch'}
+    if($v.version -ne '1' -or [int]$v.qualified -gt $(if($P12754){7423}else{255})){throw 'P1273 gate ABI mismatch'}
     return $v
 }
 function P1273-GateBit([int]$Mode){
-    switch($Mode){3{1} 5{2} 257{4} 129{8} 513{16} 17{32} 903{64} 919{128} default{throw 'P1273 invalid gate mask'}}
+    switch($Mode){3{1} 5{2} 257{4} 129{8} 513{16} 17{32} 33{1024} 49{2048} 65{4096} 903{64} 919{128} default{throw 'P1273 invalid gate mask'}}
 }
 function P1273-CombinedPermission([int]$Mode,[switch]$Qualifying){
     $script:P1273CombinedAllowed=$false
@@ -1179,7 +1181,8 @@ function P1273-GateForeground([string]$Module){
 }
 function P1273-FunctionalGate([string]$Stem){
     if(-not $AllowFunctionalGate){throw 'FunctionalGate requires -AllowFunctionalGate; real external workload and foreground confirmation'}
-    $defs=@{USB=3;ABOX=5;BT=257;WIFI=129;TICKER=513;LITTLE949=17;COMBINED5=903;COMBINED6=919}
+    $defs=@{USB=3;ABOX=5;BT=257;WIFI=129;TICKER=513;LITTLE949=17;LITTLE832=33;LITTLE715=49;LITTLE598=65;COMBINED5=903;COMBINED6=919}
+    if($GateModule -in @('LITTLE832','LITTLE715','LITTLE598')){P12754-PriorFloor $GateModule}
     $mask=$defs[$GateModule];$bit=P1273-GateBit $mask
     if($mask -in 903,919){P1273-CombinedPermission $mask -Qualifying}
     $script:P1273GateAllowed=$true
@@ -1202,8 +1205,8 @@ function P1273-FunctionalGate([string]$Stem){
     }else{P125-PumpOff 45}
     $active=P1273-GateCheckpoint $Stem 'GATE-ACTIVE'
     if($active.Gate.generation -ne $generation -or $active.Gate.phase -ne '2' -or $active.Policy.mode -ne "$mask" -or $active.Policy.reason -ne '0'){throw 'P1273 functional policy revoked'}
-    if($mask -eq 17){
-        Life-Say 'P1273 LITTLE949: wake screen NOW to prove kernel revokes the floor lease'
+    if($mask -in @(17,33,49,65)){
+        Life-Say "P1273 ${GateModule}: wake screen NOW to prove kernel revokes the floor lease; verify normal storage and UI during foreground review"
         $until=(Life-Now).AddSeconds(20)
         while($script:LifeState -ne 'ON' -and (Life-Now) -lt $until){
             Life-Pump;Life-CheckSafety (Life-Now);P12-EarlyThermalGuard
@@ -1304,17 +1307,79 @@ function P12753-Power($S,$Rows,$FG,[int]$Seconds){
     return [pscustomobject]@{version=1;power_verified=[bool]$ok;window_s=$span;covered_s=$covered;samples=$w.Count;mean_discharge_w=if($ok){$joules/$covered}else{$null};discharge_wh=if($ok){$joules/3600}else{$null};start_big_mc=if($t.Count){[int]$t[0].big}else{0};start_lit_mc=if($t.Count){[int]$t[0].lit}else{0};mean_voltage_uv=if($w.Count){($w|Measure-Object voltage_uv -Average).Average}else{0}}
 }
 function P12753-Diff($A,$B,[string]$Key){return P125-Sub ([uint64]$B[$Key]) ([uint64]$A[$Key])}
+# Only cursor writes are idempotent. Never retry a policy or arm write.
+function P12754-FrozenIdentity($S,$CP){
+    if((P12-Query 'p1273_boot_identity') -ne $CP.Nonce){throw 'P12754 boot identity changed'}
+    $v=P125-Fields (P12-Query 'p12753_status')
+    foreach($k in @('state','request','arm','start','end','count','reason','mask')){
+        if($v[$k] -ne $S[$k]){throw 'P12754 frozen phase changed; no retry'}
+    }
+}
+function P12754-FrozenRow($S,$CP,[int]$Index){
+    for($attempt=0;$attempt -lt 3;$attempt++){
+        try{
+            [void](P12-Query 'p12753_select' "$Index")
+        }catch{
+            if($_.Exception.Message -notmatch 'Missing echo and sysctl readback'){throw}
+            P12754-FrozenIdentity $S $CP
+            if((P12-Query 'p12753_select') -ne "$Index"){
+                if($attempt -eq 2){throw 'P12754 frozen cursor not confirmed'}
+                continue
+            }
+        }
+        $r=P125-Fields (P12-Query 'p12753_page')
+        if($r.select -ne "$Index" -or $r.phase -ne $S.start){throw 'P12754 row identity changed'}
+        return $r
+    }
+    throw 'P12754 cursor retries exhausted'
+}
+function P12754-PriorFloor([string]$Module){
+    $prior=@{LITTLE832='LITTLE949';LITTLE715='LITTLE832';LITTLE598='LITTLE715'}
+    if(-not $prior.ContainsKey($Module)){return}
+    if(-not $P12754 -or -not $AllowLowerFloor -or $Audit53Reports.Count -ne 3){throw 'P12754 lower floor requires -P12754 -AllowLowerFloor and prior same-boot A0/B/A1 JSON paths in -Audit53Reports'}
+    $r=@($Audit53Reports|ForEach-Object {Get-Content -Raw -LiteralPath $_|ConvertFrom-Json})
+    [void](P12753-Compare $r[0] $r[1] $r[2])
+    if($r[1].module -ne $prior[$Module] -or $r[1].boot -ne (P12-Query 'p1273_boot_identity')){throw 'P12754 prior floor or boot mismatch'}
+    if(-not $r[1].PSObject.Properties['rail_verified'] -or -not $r[1].rail_verified){throw 'P12754 prior floor lacks BUCK3 evidence'}
+}
+function P12754-Require {
+    if((P12-Query 'p12754_revision') -ne '1'){throw 'P12754 ABI mismatch'}
+    $w=P125-Fields (P12-Query 'p12754_wait')
+    if($w.enabled -ne '1'){throw 'P12754 boot opt-in missing'}
+}
+function P12754-ExportHardware([string]$Stem,$Rows){
+    $names=@('MIF','INT','CPUCL0','CPUCL1','G3D','INTCAM','FSYS0','CAM','DISP','AUD','IVA','SCORE','CP')
+    $out=@(foreach($r in $Rows){
+        if($r.kind -ne '2'){continue}
+        $i=[int]$r.index
+        if($i -lt 13){
+            [pscustomobject][ordered]@{at=$r.at;source='ACPM_GET';name=$names[$i];valid=$r.valid;errno=$r.errno;word0=$r.bkhz;word1=$r.raw;word2=$r.lkhz;word3=$r.bmeas;rate_khz=if($r.valid -eq '1'){$r.raw}else{$null};pll_khz=$null;mux=$null;divider=$null;busd=$null;switch_mux=$null;gate=$null;ctrl=$null;vsel=$null;ctrl_errno=$null;vsel_errno=$null;configured_uv=$null;cache_age_ms=$null;aux0=$null;aux1=$null;aux2=$null;aux3=$null;aux4=$null}
+        }elseif($i -ge 100 -and $i -le 105){
+            $isRail=$i -ge 103;$isMif=$i -eq 100
+            [pscustomobject][ordered]@{at=$r.at;source=if($isRail){'S2MPS18_CONFIG'}else{'CMU_REGISTER'};name=@('MIF_PLL','MFC_BUS','ISPPRE_BUS','BUCK2_BIG','BUCK3_LITTLE','BUCK6_G3D')[$i-100];valid=$r.valid;errno=$r.errno;word0=if(-not $isRail){$r.raw}else{$null};word1=$null;word2=$null;word3=$null;rate_khz=$null;pll_khz=if($isMif -and $r.valid -eq '1'){$r.refresh}else{$null};mux=if($isMif){$r.bkhz}elseif(-not $isRail){$r.raw}else{$null};divider=if($isMif){$r.lkhz}elseif(-not $isRail){$r.bkhz}else{$null};busd=if($isMif){$r.bmeas}else{$null};switch_mux=if($isMif){$r.lmeas}else{$null};gate=if(-not $isRail -and -not $isMif){$r.lkhz}else{$null};ctrl=if($isRail){$r.raw}else{$null};vsel=if($isRail){$r.bkhz}else{$null};ctrl_errno=if($isRail){$r.lkhz}else{$null};vsel_errno=if($isRail){$r.bmeas}else{$null};configured_uv=if($isRail -and $r.opp_valid -eq '1'){$r.opp_uv}else{$null};cache_age_ms=$null;aux0=$null;aux1=$null;aux2=$null;aux3=$null;aux4=$null}
+        }elseif($i -ge 106 -and $i -le 109){
+            [pscustomobject][ordered]@{at=$r.at;source='DRIVER_CACHE';name=@('AUD_CLOCK','ABOX_DMA','MFC_OWNER','ISPPRE_OWNER')[$i-106];valid=$r.valid;errno=$r.errno;word0=$null;word1=$null;word2=$null;word3=$null;rate_khz=$null;pll_khz=$null;mux=$null;divider=$null;busd=$null;switch_mux=$null;gate=$null;ctrl=$null;vsel=$null;ctrl_errno=$null;vsel_errno=$null;configured_uv=$null;cache_age_ms=if($i -lt 108){$r.age}else{$null};aux0=$r.raw;aux1=$r.bkhz;aux2=$r.lkhz;aux3=$r.bmeas;aux4=$r.lmeas}
+        }
+    })
+    if($out.Count){$out|Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath "$Stem.hardware54.csv"}
+}
 function P12753-ReadAudit([string]$Stem,$CP){
+    if($CP.Module -eq 'HARDWARE54' -and -not $P12754){throw 'P12754 recovery requires -P12754'}
     if((P12-Query 'p1273_boot_identity') -ne $CP.Nonce){throw 'P12753 recovery boot identity changed'}
     $s=P125-Fields (P12-Query 'p12753_status')
     if($s.state -ne '3' -or $s.request -ne [string]$CP.Request -or $s.arm -ne $CP.Arm -or [int]$s.count -gt 96){throw 'P12753 frozen identity missing; no new arm'}
     $s|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath "$Stem.audit53-status.json"
     $out="$Stem.audit53-power.json"
-    [pscustomobject]@{version=1;power_verified=$false;module=$CP.Module;reason=$s.reason;stop_mask=$s.mask;note='Frozen readback incomplete'}|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath $out
+    $note=if([uint64]$s.start -eq 0){'Aborted before measurement; no samples to recover'}else{'Frozen readback incomplete'}
+    [pscustomobject]@{version=1;power_verified=$false;module=$CP.Module;reason=$s.reason;stop_mask=$s.mask;note=$note}|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath $out
+    if($P12754){P12754-Require;P12-Query 'p12754_wait'|Set-Content -Encoding UTF8 -LiteralPath "$Stem.wait54.txt"}
+    if([uint64]$s.start -eq 0){throw "P12753 never entered measurement: reason=$($s.reason) mask=$($s.mask); no samples to recover"}
     $rows=@()
     for($i=0;$i -lt [int]$s.count;$i++){
-        [void](P12-Query 'p12753_select' "$i")
-        $r=P125-Fields (P12-Query 'p12753_page')
+        if($P12754){$r=P12754-FrozenRow $s $CP $i}else{
+            [void](P12-Query 'p12753_select' "$i")
+            $r=P125-Fields (P12-Query 'p12753_page')
+        }
         if($r.select -ne [string]$i -or $r.phase -ne $s.start){throw 'P12753 row identity changed'}
         $rows+=[pscustomobject]$r
         $rows|Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath "$Stem.audit53-rows.csv"
@@ -1322,6 +1387,17 @@ function P12753-ReadAudit([string]$Stem,$CP){
     $again=P125-Fields (P12-Query 'p12753_status')
     foreach($k in @('state','request','arm','start','end','count','reason','mask')){if($again[$k] -ne $s[$k]){throw 'P12753 frozen phase changed'}}
     if([uint64]$s.start -eq 0 -or [uint64]$s.end -le [uint64]$s.start){throw "P12753 never entered measurement: reason=$($s.reason) mask=$($s.mask)"}
+    if($P12754){P12754-ExportHardware $Stem $rows}
+    if($CP.Module -eq 'HARDWARE54'){
+        P12754-FrozenIdentity $s $CP
+        if($s.reason -ne '10' -or $s.mask -ne '0' -or $s.drops -ne '0'){throw 'P12754 hardware audit interrupted; partial evidence retained'}
+        $samples=@($rows|Where-Object {$_.kind -eq '1'})
+        $get=@($rows|Where-Object {$_.kind -eq '2' -and [int]$_.index -lt 13})
+        if($samples.Count -lt 24 -or $get.Count -ne 13 -or @($get.index|Select-Object -Unique).Count -ne 13 -or @($samples|Where-Object {$_.policy -ne '0' -or $_.driver -ne '0' -or $_.mask -ne '0' -or $_.valid -ne '1'}).Count){throw 'P12754 hardware audit incomplete or policy changed'}
+        [pscustomobject]@{version=1;power_verified=$false;diagnostic=$true;module=$CP.Module;boot=$CP.Nonce;start=$s.start;end=$s.end;reason=$s.reason;get_attempted=$get.Count;get_valid=@($get|Where-Object valid -eq '1').Count;thermal_rows=$samples.Count;note='Connected hardware audit complete, not battery power. INT/DISP downstream rate not decoded; unavailable is not zero.'}|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath $out
+        $script:P125Report.Add('P12754 connected hardware audit complete; raw registers and VSEL, not battery power; unsupported clock paths remain unavailable')
+        Life-Say 'P12754 hardware audit complete (diagnostic only)';return
+    }
     $t=P125-ReadSnapshot 'AUDIT53-POST' -CountsOnly
     $e=P127-Read
     $d=P126-Status
@@ -1359,14 +1435,24 @@ function P12753-ReadAudit([string]$Stem,$CP){
         'TICKER' {(P12753-Diff $a.Ticker $e.Ticker 'wait') -gt 0}
         default {$true}
     }
+    $rail=@($rows|Where-Object {$_.kind -eq '2' -and [int]$_.index -eq 104})
+    $railVerified=$rail.Count -eq 2 -and @($rail|Where-Object {$_.valid -eq '1' -and $_.opp_valid -eq '1'}).Count -eq 2
+    if($P12754 -and $CP.Module -match '^LITTLE(949|832|715|598)$'){
+        $target=[int]$Matches[1];$thermal=@($rows|Where-Object {$_.kind -eq '1'})
+        $matched=@($thermal|Where-Object {[int]$_.lkhz -eq 1000*$target -and [Math]::Abs([double]$_.lmeas-$target) -le .03*$target})
+        $rate=P125-Fields (P12-Query 'p12754_rate')
+        $rate|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath "$Stem.restore54.json"
+        $restore=$restore -and $rate.fresh -eq '1' -and [uint64]$rate.cur -ge 1053000 -and [Math]::Abs(1000.0*[double]$rate.meas-[double]$rate.cur) -le .03*[double]$rate.cur
+        $applied=$thermal.Count -gt 0 -and $matched.Count -ge [Math]::Ceiling(.8*$thermal.Count) -and $railVerified -and (P12753-Diff $a.Status $e.Status 'floor_hits') -gt 0 -and [uint64]$e.Status.little_cur -ge 1053000 -and $e.Status.ufs_safe -eq '1'
+    }
     $names=@('MIF','INT','CPUCL0','CPUCL1','G3D','INTCAM','FSYS0','CAM','DISP','AUD','IVA','SCORE','CP')
-    $bus=@($rows|Where-Object {$_.kind -eq '2'}|ForEach-Object {
+    $bus=@($rows|Where-Object {$_.kind -eq '2' -and [int]$_.index -lt 13}|ForEach-Object {
         [pscustomobject]@{domain=$names[[int]$_.index];index=$_.index;at=$_.at;errno=$_.errno;raw=$_.raw;rate_khz=if($_.valid -eq '1'){$_.raw}else{$null};opp_table_uv=if($_.opp_valid -eq '1'){$_.opp_uv}else{$null};latency=$_.latency}
     })
     if($bus.Count){$bus|Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath "$Stem.audit53-bus.csv"}
     $summary.power_verified=$summary.power_verified -and $restore -and $t.Status.reason -eq '10' -and ((P12-Query 'p1273_boot_identity') -eq $CP.Nonce)
     if(-not $summary.power_verified){$summary.mean_discharge_w=$null;$summary.discharge_wh=$null}
-    $extra=[ordered]@{boot=$CP.Nonce;module=$CP.Module;request=$s.request;arm=$s.arm;start=$s.start;end=$s.end;policy=$s.policy;reason=$s.reason;stop_mask=$s.mask;applied=[bool]$applied;restored=[bool]$restore;driver_hits=$hits;bus_attempted=$bus.Count;bus_valid=@($bus|Where-Object {$null -ne $_.rate_khz}).Count;diagnostic=$CP.Module -eq 'BUS';note='Battery only, no extrapolation; driver deltas include setup/restore; sampled residency, not rail power'}
+    $extra=[ordered]@{boot=$CP.Nonce;module=$CP.Module;request=$s.request;arm=$s.arm;start=$s.start;end=$s.end;policy=$s.policy;reason=$s.reason;stop_mask=$s.mask;applied=[bool]$applied;restored=[bool]$restore;driver_hits=$hits;bus_attempted=$bus.Count;bus_valid=@($bus|Where-Object {$null -ne $_.rate_khz}).Count;diagnostic=$CP.Module -eq 'BUS';rail_verified=[bool]$railVerified;note='Battery only, no extrapolation; driver deltas include setup/restore; sampled residency, not rail power'}
     foreach($k in $extra.Keys){$summary|Add-Member -NotePropertyName $k -NotePropertyValue $extra[$k]}
     $summary|ConvertTo-Json -Depth 6|Set-Content -Encoding UTF8 -LiteralPath $out
     Life-Say "P12753 $($CP.Module) verified=$($summary.power_verified) applied=$applied restored=$restore mean_W=$($summary.mean_discharge_w)"
@@ -1378,11 +1464,18 @@ function P12753-RunAudit([string]$Stem){
     if($g.enabled -ne '1' -or $g.at -eq '0'){throw 'P12753 boot guard not running'}
     $s=P125-Fields (P12-Query 'p12753_status')
     if($s.state -notin @('0','3') -or (P126-Status).mode -ne '0' -or (P127-Status).mode -ne '0'){throw 'P12753 previous lease or audit active'}
-    $codes=@{STOCK120=1;BASE15=2;PSR=3;LITTLE949=4;ABOX=5;BT=6;WIFI=7;TICKER=8;BUS=9;STOCK60=10}
+    if($P12754){
+        P12754-Require;P12754-PriorFloor $Audit53Module
+        $g|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath "$Stem.preflight54.json"
+        $w=P125-Fields (P12-Query 'p12754_wait')
+        if($w.input_seen -ne '1'){throw 'P12754 requires a real touch event this boot before screen OFF'}
+        if([int]$g.big -gt 60000 -or [int]$g.lit -gt 59000 -or [int]$g.gpu -gt 60000){throw 'P12754 cool first: BIG<=60C LITTLE<=59C GPU<=60C'}
+    }
+    $codes=@{STOCK120=1;BASE15=2;PSR=3;LITTLE949=4;ABOX=5;BT=6;WIFI=7;TICKER=8;BUS=9;STOCK60=10;LITTLE832=11;LITTLE715=12;LITTLE598=13}
     $code=$codes[$Audit53Module];$seconds=if($code -in @(1,9)){120}else{60}
     $cp=[pscustomobject]@{Nonce=(P12-Query 'p1273_boot_identity');Module=$Audit53Module;Request=$code;Seconds=$seconds;Arm='0';BeforeTimer=(P125-ReadSnapshot 'AUDIT53-PRE' -CountsOnly);BeforeEnergy=(P127-Read);Before126=(P126-Status);BeforePSR=(P125-Fields (P12-Query 'p1273_psr'))}
     $cp|Export-Clixml -Depth 12 -LiteralPath "$Stem.audit53-checkpoint.clixml"
-    [void](P12-Query 'p12753_arm' "$code")
+    try{[void](P12-Query 'p12753_arm' "$code")}catch{if($P12754){P12-Query 'p12754_wait'|Set-Content -Encoding UTF8 -LiteralPath "$Stem.wait54.txt"};throw}
     $s=P125-Fields (P12-Query 'p12753_status')
     if($s.state -ne '1' -or $s.request -ne [string]$code -or $s.arm -eq '0'){throw 'P12753 arm not confirmed; bounded expiry'}
     $cp.Arm=$s.arm
@@ -1390,11 +1483,26 @@ function P12753-RunAudit([string]$Stem){
     P125-Offline (95+$seconds)
     P12753-ReadAudit $Stem $cp
 }
+function P12754-RunHardware([string]$Stem){
+    P12754-Require
+    $cp=[pscustomobject]@{Nonce=(P12-Query 'p1273_boot_identity');Module='HARDWARE54';Request=14;Seconds=60;Arm='0'}
+    try{[void](P12-Query 'p12753_arm' '14')}catch{P12-Query 'p12754_wait'|Set-Content -Encoding UTF8 -LiteralPath "$Stem.wait54.txt";throw}
+    $s=P125-Fields (P12-Query 'p12753_status')
+    if($s.state -ne '1' -or $s.request -ne '14' -or $s.arm -eq '0'){throw 'P12754 arm unconfirmed; bounded expiry'}
+    $cp.Arm=$s.arm;$cp|Export-Clixml -Depth 5 -LiteralPath "$Stem.audit53-checkpoint.clixml"
+    $until=(Life-Now).AddSeconds(155)
+    while($s.state -ne '3' -and (Life-Now) -lt $until){
+        P125-PumpOff 3
+        $s=P125-Fields (P12-Query 'p12753_status')
+        if($s.arm -ne $cp.Arm -or $s.request -ne '14'){throw 'P12754 phase identity changed'}
+    }
+    P12753-ReadAudit $Stem $cp
+}
 function P12753-Compare($A,$B,$C){
     foreach($r in @($A,$B,$C)){
         if($r.version -ne 1 -or -not $r.power_verified -or -not $r.applied -or -not $r.restored -or $r.diagnostic -or $r.mean_discharge_w -le 0){throw 'P12753 comparison requires three verified applied restored non-diagnostic reports'}
     }
-    $base=if($B.module -eq 'BASE15'){'STOCK60'}elseif($B.module -in @('PSR','LITTLE949','ABOX','BT','WIFI','TICKER')){'BASE15'}else{throw 'P12753 unsupported B module'}
+    $base=if($B.module -eq 'BASE15'){'STOCK60'}elseif($B.module -in @('PSR','LITTLE949','LITTLE832','LITTLE715','LITTLE598','ABOX','BT','WIFI','TICKER')){'BASE15'}else{throw 'P12753 unsupported B module'}
     if($A.module -ne $base -or $C.module -ne $base -or $A.boot -ne $B.boot -or $B.boot -ne $C.boot -or [uint64]$A.end -ge [uint64]$B.start -or [uint64]$B.end -ge [uint64]$C.start){throw 'P12753 wrong A/B/A order, baseline or boot'}
     foreach($r in @($B,$C)){
         if([Math]::Abs($r.window_s-$A.window_s) -gt 0.01 -or [Math]::Abs($r.start_big_mc-$A.start_big_mc) -gt 2000 -or [Math]::Abs($r.start_lit_mc-$A.start_lit_mc) -gt 2000 -or [Math]::Abs($r.mean_voltage_uv-$A.mean_voltage_uv) -gt 150000){throw 'P12753 unmatched thermal/voltage/window conditions'}
@@ -1404,7 +1512,12 @@ function P12753-Compare($A,$B,$C){
     [pscustomobject]@{module=$B.module;baseline=$base;A0_W=$A.mean_discharge_w;B_W=$B.mean_discharge_w;A1_W=$C.mean_discharge_w;delta_mW=1000*($baseW-$B.mean_discharge_w);note='Marginal measured difference, not additive or isolated rail power'}
 }
 function P12753-Options {
+    if($Scenario -eq 'Hardware54' -and (-not $P12754 -or $P12752Idle)){throw 'Hardware54 requires -P12754, no -P12752Idle'}
+    if(($Scenario -eq 'Audit53' -and $Audit53Module -in @('LITTLE832','LITTLE715','LITTLE598')) -or ($Scenario -eq 'FunctionalGate' -and $GateModule -in @('LITTLE832','LITTLE715','LITTLE598'))){
+        if(-not $P12754 -or -not $AllowLowerFloor -or $Audit53Reports.Count -ne 3){throw 'P12754 deeper floor requires prior A/B/A JSON paths and explicit opt-in'}
+    }
     if($Scenario -eq 'Audit53'){
+        if($P12754 -and $Audit53Module -eq 'BUS'){throw 'P12754 use Hardware54 connected instead of legacy BUS'}
         if(-not $AllowOfflineTrial -or $P12752Idle){throw 'Audit53 requires -AllowOfflineTrial, without -P12752Idle'}
         if($Audit53Module -eq 'PSR'){
             if(-not $Audit53PriorReport){throw 'PSR requires reviewed same-boot connected PSR A/B/A and wake/no-tear confirmation'}
@@ -1412,7 +1525,7 @@ function P12753-Options {
             if($r -notmatch '(?m)^P127 MODULE PSR ABA_COMPLETE applied=True\s*$' -or $r -notmatch '(?m)^STOP=COMPLETE\s*$'){throw 'PSR prior report lacks completed applied A/B/A'}
         }
     }
-    if($Scenario -eq 'Audit53Recover' -and -not $Audit53Checkpoint){throw 'Audit53Recover requires -Audit53Checkpoint'}
+    if($Scenario -eq 'Audit53Recover' -and (-not $Audit53Checkpoint -or $P12752Idle)){throw 'Audit53Recover requires -Audit53Checkpoint, without -P12752Idle'}
 }
 function P125-Run {
     P12752-CheckOptions
@@ -1440,6 +1553,7 @@ function P125-Run {
         Life-SyncReadOnly
         if($Scenario -eq 'Guard53'){
             if((P12-Query 'p12753_revision') -ne '1'){throw 'P12753 ABI mismatch'}
+            if($P12754){P12754-Require;P12-Query 'p12754_wait'|Set-Content -Encoding UTF8 -LiteralPath "$stem.wait54.txt"}
             foreach($key in @('p12753_guard','p12753_status','p1273_boot_identity')){$v=P12-Query $key;Add-Content -LiteralPath "$stem.guard53.txt" -Encoding UTF8 -Value "$key $v";Write-Host "$key $v"}
             return
         }
@@ -1495,6 +1609,7 @@ function P125-Run {
         P125-PumpOff 25
         $g=P12-Query 'g3d_lab_stats'
         if($g -notmatch ' domain=0 pll=0 ' -or $g -notmatch ' fault=0 '){throw 'P125 independent GPU OFF evidence missing'}
+        if($Scenario -eq 'Hardware54'){P12754-RunHardware $stem;return}
         if($Scenario -eq 'Audit53'){
             P12753-RunAudit $stem
             return

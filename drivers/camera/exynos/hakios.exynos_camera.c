@@ -231,6 +231,14 @@
  * GPL: read for these facts, not copied). The SMC's convention and the lesson of the half-off domain: hakios.mali.c.
  */
 #include <kern/clock.h>
+#if __has_include(<kern/hakios_p125.h>)
+#include <kern/hakios_p125.h>
+#define P54_CAM_SET(bits) ((void)__atomic_fetch_or(&hakios_p12754_cam_state,(bits),__ATOMIC_RELEASE))
+#define P54_CAM_CLEAR(bits) ((void)__atomic_fetch_and(&hakios_p12754_cam_state,~(uint32_t)(bits),__ATOMIC_RELEASE))
+#else
+#define P54_CAM_SET(bits) ((void)0)
+#define P54_CAM_CLEAR(bits) ((void)0)
+#endif
 #include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <mach/mach_time.h>
@@ -712,11 +720,11 @@ rear_sensor_up(void)
 		    b1ctrl1_found, b1ctrl2_found);
 		return false;
 	}
-	powered = true;
+	powered = true;P54_CAM_SET(1u);
 	if (!buck1_on() || !hakios_s9rear_up()) {
 		hakios_s9rear_down();
 		buck1_off();
-		powered = false;
+		powered = false;P54_CAM_CLEAR(1u);
 		return false;
 	}
 	hakios_s9rear_lens_up();        /* the lens's bus; the OIS and the aperture as their boot-args say */
@@ -735,7 +743,7 @@ rear_power_down(void)
 	hakios_s9rear_lens_down();
 	hakios_s9rear_down();
 	buck1_off();
-	powered = false;
+	powered = false;P54_CAM_CLEAR(1u);
 }
 
 /* a pin: an output (CON nibble 1) at the level given */
@@ -804,7 +812,7 @@ power_down(void)
 		wr(cmu_top, CIS1_MUX, mux_found);
 		clock_mine = false;
 	}
-	powered = false;
+	powered = false;P54_CAM_CLEAR(1u);
 	say("exynos_camera: powered down: MCLK and reset low, the bus pins inputs, BUCK2 and the LDOs %s; CIS_CLK1's gate "
 	    "%x again\n", (mine[VDDD] || mine[VDDA] || mine[VDDIO] || mine[VDDAF] || buck2_mine) ?
 	    "NOT ALL OFF (a write failed)" : "off as found", gate_found);
@@ -1159,7 +1167,7 @@ dma_stop(void)
 	}
 	if (dma_on) {
 		wr(wdma, DMA_CTRL, rd(wdma, DMA_CTRL) & ~(DMA_ON | DMA_UPDT_PTR_EN));
-		dma_on = false;
+		dma_on = false;P54_CAM_CLEAR(4u);
 	}
 	if (pattern_on) {
 		wr(cdma, TP_ENABLE, rd(cdma, TP_ENABLE) & ~TP_ON);
@@ -1281,7 +1289,7 @@ isp_down(void)
 		if ((uint32_t)answer != 0) {
 			say("exynos_camera: the protection was not saved: the domain is left ON\n");
 		} else {
-			domain_up = false;
+			domain_up = false;P54_CAM_CLEAR(8u);
 			wr(pmu, PMU_ISPPRE_CONFIG, rd(pmu, PMU_ISPPRE_CONFIG) & ~PD_ON);
 			if (!wait_for(pmu, PMU_ISPPRE_STATUS, PD_ON, 0, PD_WAIT_US, false)) {
 				say("exynos_camera: the domain did not go off (status %#x): on again, its protection restored, left on\n",
@@ -1295,7 +1303,7 @@ isp_down(void)
 				}
 			}
 		}
-		domain_mine = false;
+		domain_mine = false;P54_CAM_CLEAR(2u);
 		say("exynos_camera: ISPPRE: configuration %#x, status %#x\n", rd(pmu, PMU_ISPPRE_CONFIG),
 		    rd(pmu, PMU_ISPPRE_STATUS));
 	}
@@ -1361,6 +1369,10 @@ isp_up(void)
 	}
 	iso_found = rd(pmu, PMU_DPHY_ISO_CSIS1);
 	status = rd(pmu, PMU_ISPPRE_STATUS);
+#if __has_include(<kern/hakios_p125.h>)
+	uint32_t unknown=UINT32_MAX;
+	(void)__atomic_compare_exchange_n(&hakios_p12754_cam_first,&unknown,status,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);
+#endif
 	say("exynos_camera: 3: DPU status %#x; ISPPRE configuration %#x, status %#x; MEMORY_ISPPRE_OPTION %#x; the D-PHY's "
 	    "isolation (0x14060730) %#x\n", rd(pmu, PMU_DPU_STATUS), rd(pmu, PMU_ISPPRE_CONFIG), status,
 	    rd(pmu, PMU_ISPPRE_MEMORY), iso_found);
@@ -1373,14 +1385,14 @@ isp_up(void)
 	} else {
 		say("exynos_camera: 3: ISPPRE on: configuration [3:0] = 0xF, status waited for (%u ms at the most)\n",
 		    PD_WAIT_US / 1000);
-		domain_mine = true;
+		domain_mine = true;P54_CAM_SET(2u);
 		wr(pmu, PMU_ISPPRE_CONFIG, rd(pmu, PMU_ISPPRE_CONFIG) | PD_ON);
 		if (!wait_for(pmu, PMU_ISPPRE_STATUS, PD_ON, PD_ON, PD_WAIT_US, true)) {
 			say("exynos_camera: 3: the domain did not come on (status %#x): its configuration back to off\n",
 			    rd(pmu, PMU_ISPPRE_STATUS));
 			wr(pmu, PMU_ISPPRE_CONFIG, rd(pmu, PMU_ISPPRE_CONFIG) & ~PD_ON);
 			(void)wait_for(pmu, PMU_ISPPRE_STATUS, PD_ON, 0, PD_WAIT_US, true);
-			domain_mine = false;
+			domain_mine = false;P54_CAM_CLEAR(2u);
 			return false;
 		}
 		say("exynos_camera: 3: the domain is on (status %#x); about to make SMC %#x (%u, %#x, 0): the DTZPC restore; "
@@ -1392,11 +1404,11 @@ isp_up(void)
 			    "restored)\n", answer == (uint64_t)-1 ? "the call is not known to whoever answered it" : "a refusal");
 			wr(pmu, PMU_ISPPRE_CONFIG, rd(pmu, PMU_ISPPRE_CONFIG) & ~PD_ON);
 			(void)wait_for(pmu, PMU_ISPPRE_STATUS, PD_ON, 0, PD_WAIT_US, true);
-			domain_mine = false;
+			domain_mine = false;P54_CAM_CLEAR(2u);
 			return false;
 		}
 	}
-	domain_up = true;
+	domain_up = true;P54_CAM_SET(8u);
 
 	say("exynos_camera: 3: map CMU_ISPPRE, SYSREG_ISPPRE, CSIS1, its D-PHY, its WDMA and the DMA common%s%s\n",
 	    cam_mmu_probe ? ", the SysMMU" : "", cam_probe ? ", the other CSISs' DMA commons" : "");
@@ -1669,7 +1681,7 @@ dma_start(void)
 		wr(wdma, DMA_ADDR(i), (uint32_t)buffer_pa);
 	}
 	wr(wdma, VCMN + VCMN_INT_SRC, rd(wdma, VCMN + VCMN_INT_SRC));
-	dma_on = true;
+	dma_on = true;P54_CAM_SET(4u);
 	wr(wdma, DMA_CTRL, rd(wdma, DMA_CTRL) | DMA_ON | DMA_UPDT_PTR_EN);
 }
 
@@ -2135,7 +2147,7 @@ stream_start(void)
 		wr(wdma, DMA_ADDR(i), (uint32_t)(buffer_pa + (uint64_t)(i % RING_SLOTS) * SLOT_BYTES));
 	}
 	wr(wdma, VCMN + VCMN_INT_SRC, rd(wdma, VCMN + VCMN_INT_SRC));
-	dma_on = true;
+	dma_on = true;P54_CAM_SET(4u);
 	wr(wdma, DMA_CTRL, rd(wdma, DMA_CTRL) | DMA_ON | DMA_UPDT_PTR_EN);
 	say("exynos_camera: 5: the link on (UPDATE_SHADOW, D-PHY, clock lane, no Q-channel, CSI_EN)\n");
 	wr(csis, CSIS_CMN_CTRL, rd(csis, CSIS_CMN_CTRL) | CMN_UPDATE_SHADOW);
@@ -2539,7 +2551,7 @@ sensor_up(void)
 		return false;
 	}
 	say("exynos_camera: 2: the front camera's power-up (Android's order for star: BUCK2, VDDAF, VDDA, VDDIO, VDDD)\n");
-	powered = true;
+	powered = true;P54_CAM_SET(1u);
 	clock_on();
 	pin_out(peric0 + GPG2, RESET_PIN, false);
 	if (!buck2_on()) {

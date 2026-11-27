@@ -12,6 +12,13 @@
 #define P1273_G_C5       64u
 #define P1273_G_C6      128u
 #define P1273_G_BASE5   31u
+/* Keep bits 8/9 reserved for missing/fault status. */
+#define P12754_G_832 1024u
+#define P12754_G_715 2048u
+#define P12754_G_598 4096u
+static inline unsigned p12754_floor_prereq(unsigned mode){
+    return mode==33?P1273_G_FLOOR:mode==49?(P1273_G_FLOOR|P12754_G_832):mode==65?(P1273_G_FLOOR|P12754_G_832|P12754_G_715):0;
+}
 static inline unsigned p1273_gate_bit(unsigned mode)
 {
     switch(mode){
@@ -21,6 +28,9 @@ static inline unsigned p1273_gate_bit(unsigned mode)
     case 129:return P1273_G_WIFI;
     case 513:return P1273_G_TICKER;
     case 17:return P1273_G_FLOOR;
+    case 33:return P12754_G_832;
+    case 49:return P12754_G_715;
+    case 65:return P12754_G_598;
     case 903:return P1273_G_C5;
     case 919:return P1273_G_C6;
     default:return 0;
@@ -59,7 +69,8 @@ static inline unsigned p1273_gate_missing(unsigned mode,const struct p1273_gate_
     if((need&P1273_G_WIFI) && (!e->wifi_attach || e->wifi_attach!=e->wifi_detach ||
         !e->wifi_handled || !e->wifi_rx || !e->wifi_tx || !e->wifi_post_rx || !e->wifi_post_tx))bad|=P1273_G_WIFI;
     if((need&P1273_G_TICKER) && (!e->ticker_wait || !e->ticker_due || !e->ticker_wake || !e->ticker_cancel))bad|=P1273_G_TICKER;
-    if((need&P1273_G_FLOOR) && (!e->floor_hits || !e->floor_readback || !e->floor_restored))bad|=P1273_G_FLOOR;
+    unsigned floor=need&(P1273_G_FLOOR|P12754_G_832|P12754_G_715|P12754_G_598);
+    if(floor && (!e->floor_hits || !e->floor_readback || !e->floor_restored))bad|=floor;
     return bad;
 }
 #endif

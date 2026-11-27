@@ -7,6 +7,9 @@ int main(void)
     for(unsigned m=0;m<1024;m++){
         unsigned bit=0;
         for(unsigned i=0;i<8;i++)if(m==modes[i])bit=1u<<i;
+        if(m==33)bit=P12754_G_832;
+        if(m==49)bit=P12754_G_715;
+        if(m==65)bit=P12754_G_598;
         assert(p1273_gate_bit(m)==bit);
         for(unsigned q=0;q<256;q++){
             assert(!p1273_gate_combined(m,q,false));
@@ -26,6 +29,11 @@ int main(void)
         .floor_hits=1,.floor_readback=1,.floor_restored=true,.fault_free=true
     };
     for(unsigned i=0;i<8;i++)assert(!p1273_gate_missing(modes[i],&e));
+    assert(p12754_floor_prereq(33)==P1273_G_FLOOR);
+    assert(p12754_floor_prereq(49)==(P1273_G_FLOOR|P12754_G_832));
+    assert(p12754_floor_prereq(65)==(P1273_G_FLOOR|P12754_G_832|P12754_G_715));
+    for(unsigned m=33;m<=65;m+=16)assert(!p1273_gate_missing(m,&e));
+    e.floor_readback=0;assert(p1273_gate_missing(65,&e)==P12754_G_598);e.floor_readback=1;
     e.usb_up=0;assert(p1273_gate_missing(3,&e)==1);
     e.abox_resume=0;e.bt_post_rx=0;e.wifi_handled=0;e.ticker_cancel=0;e.floor_restored=false;
     assert(p1273_gate_missing(919,&e)==62);

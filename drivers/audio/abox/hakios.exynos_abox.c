@@ -1266,6 +1266,9 @@ stream_run(uint64_t tone_until_us, uint64_t until_us)
 	uint32_t next_fill = 0, last_pos = 0, reports = 0;
 	bool moved = false, by_clock = false, muted = false, said_outside = false;
 	bool p127_failed=false;
+#if __has_include(<kern/hakios_p125.h>)
+    uint64_t p54_last=0;
+#endif
 
 	for (;;) {
 		uint64_t now = now_us();
@@ -1283,6 +1286,21 @@ stream_run(uint64_t tone_until_us, uint64_t until_us)
 			return false;
 		}
 		(void)dma->position(&pos, &status);
+#if __has_include(<kern/hakios_p125.h>)
+        /* Sample only on the live stream owner, at most once per second
+         * during explicit connected hardware audit. No wakeup or power write. */
+        if(__atomic_load_n(&hakios_p12754_hw_observe,__ATOMIC_ACQUIRE) &&
+           (!p54_last || now-p54_last>=1000000u)){
+            uint32_t v[10]={rd(&cmu,CMU_PLL_CON0),rd(&cmu,CMU_DIV_AUDIF),rd(&cmu,CMU_DIV_UAIF1),
+                rd(&abox,ABOX_SYSPOWER_CTRL),rd(&abox,ABOX_QCHANNEL_DISABLE),
+                rd(&abox,R0(RDMA_CTRL0)),status,rd(&cmu,CMU_QCH_ACLK),rd(&cmu,CMU_QCH_BCLK1),
+                (sink_head!=sink_tail?1u:0u)|(amp_running?2u:0u)|(hp_on?4u:0u)|(hakios_audio_input_wanted()?8u:0u)};
+            __atomic_store_n(&hakios_p12754_audio_at,0,__ATOMIC_RELEASE);
+            for(unsigned i=0;i<10;i++)__atomic_store_n(&hakios_p12754_audio[i],v[i],__ATOMIC_RELAXED);
+            __atomic_store_n(&hakios_p12754_audio_at,mach_absolute_time(),__ATOMIC_RELEASE);
+            p54_last=now;
+        }
+#endif
 		if (pos >= RING_BYTES) {
 			outside++;
 			if (!said_outside) {

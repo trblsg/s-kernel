@@ -1,0 +1,14 @@
+const assert=require('assert'),fs=require('fs'),path=require('path');
+const read=p=>fs.readFileSync(path.join(__dirname,'../..',p),'utf8');
+const h=read('drivers/power/exynos/hakios.p12753.h'),s=read('drivers/power/exynos/hakios.p125_sysctl.h'),g=read('drivers/power/exynos/hakios.p1273_gate.h'),host=read('tools/s9-p125-timer-serial.ps1'),dual=read('tools/s9-p12-dual-serial.ps1');
+for(const token of ['p12754_revision=1','v==14?67000:60001','v==14?66000:59001','p12754_wait_note','p12754_rate_sysctl','p12754_hw_observe','p12753_request==14','100+i:i<23?i-10','0x1b800000u,0x2000','0x1a240000u,0x3000','0x1f,0x22,0x2a','300000u+6250u*v','p12754_hw_row(104,now)','now-p12753_start>=p1274_ticks_ms(10000u+30000u*p12754_hw_step)']) assert(h.includes(token),token);
+const branch=h.slice(h.indexOf('if(connected){'),h.indexOf('unsigned policy=p12753_policy(p12753_request);',h.indexOf('if(connected){')));
+assert(!/p127_arm_mode|hakios_p125_lease|hakios_p127_lease/.test(branch));
+assert(!/hakios_acpm_dvfs_set|hakios_acpm_pmic_write|CPU_SUSPEND|CPU_OFF|ml_io_write|thread_create/.test(h));
+for(const [mode,bit] of [[33,'832'],[49,'715'],[65,'598']])assert(g.includes('case '+mode+':return P12754_G_'+bit));
+assert(g.includes('mode==65?(P1273_G_FLOOR|P12754_G_832|P12754_G_715)'));
+assert(s.includes('p1273_gate_valid_until[13]') && s.includes('p12754_floor_prereq(mode)') && s.includes('p12754_rate_cur=l->cur'));
+for(const [f,t] of [['drivers/media/mfc/hakios.exynos_mfc.c','hakios_p12754_mfc_first'],['drivers/camera/exynos/hakios.exynos_camera.c','hakios_p12754_cam_first'],['drivers/audio/abox/hakios.exynos_abox.c','hakios_p12754_hw_observe']])assert(read(f).includes(t));
+for(const t of ['Hardware54','P12754-FrozenIdentity','P12754-PriorFloor','P12754-ExportHardware','no samples to recover','rail_verified','restore54.json'])assert(host.includes(t),t);
+for(const t of ['p12754_revision','p12754_wait','p12754_rate','^1[1-4]$'])assert(dual.includes(t),t);
+console.log('P12754 source contracts PASS: opt-in, bounded hardware audit, staged floor, read-only evidence and recovery (not native compile)');

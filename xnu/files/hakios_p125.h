@@ -45,6 +45,10 @@ extern uint64_t hakios_p125_lease, hakios_p125_start, hakios_p125_end;
 extern uint32_t hakios_p125_stop_reason;
 /* P12753 passive audit owns observation separately from P127 policy. */
 extern uint32_t hakios_p12753_busy,hakios_p12753_observe;
+/* P12754 driver-owned cached evidence, never a power-control interface. */
+extern uint32_t hakios_p12754_hw_observe,hakios_p12754_mfc_first,hakios_p12754_mfc_state,hakios_p12754_cam_first,hakios_p12754_cam_state;
+extern uint32_t hakios_p12754_audio[10];
+extern uint64_t hakios_p12754_audio_at;
 extern uint64_t hakios_p12753_fg_link,hakios_p12753_usb_down,hakios_p12753_usb_up,hakios_p12753_display_on;
 extern uint64_t hakios_p125_usb_down_at,hakios_p125_usb_up_at;
 /* Fixed OFFLINE window: active only for the new opt-in mode3 path. */

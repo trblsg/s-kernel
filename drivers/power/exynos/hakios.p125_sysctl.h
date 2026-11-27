@@ -533,6 +533,8 @@ static bool p1273_rate_matches(uint32_t measured_mhz,uint32_t requested_khz)
     return actual && requested_khz && actual*100>=97ULL*requested_khz &&
         actual*100<=103ULL*requested_khz;
 }
+static uint64_t p12754_rate_at;
+static uint32_t p12754_rate_cur,p12754_rate_meas;
 static void p1273_measured_sample(uint64_t now)
 {
     struct cluster *l=&clusters[0],*b=&clusters[1];
@@ -544,6 +546,7 @@ static void p1273_measured_sample(uint64_t now)
             hakios_p1273_event(P1273_FLOOR_STOCK,1);
     }
     lck_spin_lock(&p1273_cap_lock);
+    p12754_rate_at=now;p12754_rate_cur=l->cur;p12754_rate_meas=l->measured;
     if(p1273_cap_state==3 && p1273_cap_request<3 && now<p1273_cap_until){
         uint32_t lc=p1273_cap_target(p1273_cap_request,0),bc=p1273_cap_target(p1273_cap_request,1);
         if(l->cur<=lc && b->cur<=bc && p1273_rate_matches(l->measured,l->cur) &&
@@ -568,7 +571,12 @@ static struct p1273_gate_counts p1273_gate_pre,p1273_gate_post;
 static unsigned p1273_gate_phase,p1273_gate_mode,p1273_gate_generation,p1273_gate_ack_generation;
 static unsigned p1273_gate_qualified,p1273_gate_last_missing;
 static uint64_t p1273_gate_expiry,p1273_gate_lease,p1273_gate_fault_mark;
-static uint64_t p1273_gate_valid_until[8];
+static uint64_t p1273_gate_valid_until[13];
+static bool p12754_optin(void){
+    static int cached=-1;int enabled=__atomic_load_n(&cached,__ATOMIC_ACQUIRE);
+    if(enabled<0){int v=0,p=0;enabled=PE_parse_boot_argn("p12754",&v,sizeof(v)) && v==1 && PE_parse_boot_argn("p12753",&p,sizeof(p)) && p==1;__atomic_store_n(&cached,enabled,__ATOMIC_RELEASE);}
+    return enabled!=0;
+}
 static uint64_t
 p1273_gate_faults(void)
 {
@@ -605,9 +613,12 @@ p1273_gate_refresh_locked(uint64_t now)
     if(p1273_gate_phase && now>=p1273_gate_expiry)p1273_gate_clear_locked();
     uint64_t faults=p1273_gate_faults();
     if(p1273_gate_qualified && faults!=p1273_gate_fault_mark)p1273_gate_qualified=0;
-    for(unsigned i=0;i<8;i++)
+    for(unsigned i=0;i<13;i++)
         if(now>=p1273_gate_valid_until[i])p1273_gate_qualified&=~(1u<<i);
     /* Higher qualification cannot outlive its prerequisites. */
+    if(!(p1273_gate_qualified&P1273_G_FLOOR))p1273_gate_qualified&=~(P12754_G_832|P12754_G_715|P12754_G_598);
+    if(!(p1273_gate_qualified&P12754_G_832))p1273_gate_qualified&=~(P12754_G_715|P12754_G_598);
+    if(!(p1273_gate_qualified&P12754_G_715))p1273_gate_qualified&=~P12754_G_598;
     if(!p1273_gate_combined(903,p1273_gate_qualified,true))
         p1273_gate_qualified&=~(P1273_G_C5|P1273_G_C6);
     if(!p1273_gate_combined(919,p1273_gate_qualified,true))
@@ -689,6 +700,8 @@ p1273_gate_begin_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__u
         lck_spin_unlock(&p1273_gate_lock);return EPERM;
     }
     if(p1273_gate_phase){lck_spin_unlock(&p1273_gate_lock);return EBUSY;}
+    unsigned prior=p12754_floor_prereq((unsigned)v);
+    if(prior && (!p12754_optin() || (p1273_gate_qualified&prior)!=prior)){lck_spin_unlock(&p1273_gate_lock);return EPERM;}
     if(p1273_gate_required(v) && !p1273_gate_combined(v,p1273_gate_qualified,enabled)){
         lck_spin_unlock(&p1273_gate_lock);return EPERM;
     }
@@ -709,7 +722,7 @@ p1273_gate_stop_ok_locked(void)
     if(__atomic_load_n(&hakios_p1273_last_stop_lease,__ATOMIC_ACQUIRE)!=p1273_gate_lease)return false;
     unsigned reason=__atomic_load_n(&hakios_p1273_last_stop_reason,__ATOMIC_ACQUIRE);
     /* LITTLE qualification must prove wake revokes the live floor lease. */
-    return p1273_gate_mode==17?reason==4:reason==0;
+    return (p1273_gate_mode==17 || p12754_floor_prereq(p1273_gate_mode))?reason==4:reason==0;
 }
 static int
 p1273_gate_review_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unused int arg2,struct sysctl_req *req)
@@ -746,13 +759,14 @@ p1273_gate_ack_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unu
     p1273_gate_refresh_locked(now);
     if(v<=0 || (unsigned)v!=p1273_gate_generation || p1273_gate_phase!=3 ||
         !p1273_gate_idle() || !p1273_gate_stop_ok_locked() ||
+        (p12754_floor_prereq(p1273_gate_mode) && (p1273_gate_qualified&p12754_floor_prereq(p1273_gate_mode))!=p12754_floor_prereq(p1273_gate_mode)) ||
         (p1273_gate_required(p1273_gate_mode) && !p1273_gate_combined(p1273_gate_mode,p1273_gate_qualified,true))){
         lck_spin_unlock(&p1273_gate_lock);return EPERM;
     }
     p1273_gate_last_missing=p1273_gate_missing_locked();
     if(p1273_gate_last_missing){lck_spin_unlock(&p1273_gate_lock);return EPERM;}
     unsigned bit=p1273_gate_bit(p1273_gate_mode);
-    for(unsigned i=0;i<8;i++)if(bit==(1u<<i))p1273_gate_valid_until[i]=now+span;
+    for(unsigned i=0;i<13;i++)if(bit==(1u<<i))p1273_gate_valid_until[i]=now+span;
     p1273_gate_fault_mark=p1273_gate_pre.faults;
     p1273_gate_qualified|=bit;
     p1273_gate_ack_generation=p1273_gate_generation;
@@ -812,6 +826,14 @@ p127_guard(void)
     }
     if(!reason && !hakios_p127_mode())reason=1;
     unsigned mode=hakios_p127_mode();
+    if(!reason && p12754_optin() && P127_FLOOR(mode)>=2){
+        lck_spin_lock(&p1273_gate_lock);p1273_gate_refresh_locked(mach_absolute_time());
+        unsigned prior=p12754_floor_prereq(mode);
+        bool allowed=prior && (p1273_gate_qualified&prior)==prior &&
+            ((p1273_gate_phase==2 && p1273_gate_mode==mode && p1273_gate_lease==lease) ||
+             (p1273_gate_qualified&p1273_gate_bit(mode)));
+        lck_spin_unlock(&p1273_gate_lock);if(!allowed)reason=11;
+    }
     if(!reason && p1273_gate_required(mode)){
         lck_spin_lock(&p1273_gate_lock);
         p1273_gate_refresh_locked(mach_absolute_time());
@@ -869,6 +891,9 @@ p127_arm_mode(int v)
        (p1273_gate_phase!=1 && !(p1273_gate_qualified&p1273_gate_bit(v))))){
         lck_spin_unlock(&p1273_gate_lock);return EPERM;
     }
+    unsigned prior=p12754_floor_prereq((unsigned)v);
+    if(p12754_optin() && P127_FLOOR(v)>=2 && (!prior || (p1273_gate_qualified&prior)!=prior ||
+       (p1273_gate_phase!=1 && !(p1273_gate_qualified&p1273_gate_bit(v))))){lck_spin_unlock(&p1273_gate_lock);return EPERM;}
     if(p1273_gate_phase && (p1273_gate_phase!=1 || p1273_gate_mode!=(unsigned)v)){
         lck_spin_unlock(&p1273_gate_lock);return EBUSY;
     }

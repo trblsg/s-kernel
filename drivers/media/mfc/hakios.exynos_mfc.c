@@ -55,6 +55,14 @@
 #include <sys/hakios.mfc.h>
 #include <sys/hakios.physmap.h>
 #include <sys/hakios.log.h>
+#if __has_include(<kern/hakios_p125.h>)
+#include <kern/hakios_p125.h>
+#define P54_MFC_SET(bits) ((void)__atomic_fetch_or(&hakios_p12754_mfc_state,(bits),__ATOMIC_RELEASE))
+#define P54_MFC_CLEAR(bits) ((void)__atomic_fetch_and(&hakios_p12754_mfc_state,~(uint32_t)(bits),__ATOMIC_RELEASE))
+#else
+#define P54_MFC_SET(bits) ((void)0)
+#define P54_MFC_CLEAR(bits) ((void)0)
+#endif
 
 /* a file of the small image (drivers/storage/hakios.image.c), as hakios.bcm4361_bt.c and hakios.ssp.c take theirs */
 extern const uint8_t *hakios_image_file(const char *dir, const char *name, uint64_t *size, int *disk_out);
@@ -1089,7 +1097,7 @@ mfc_open(dev_t dev __unused, int flags __unused, int type __unused, proc_t p __u
 	} else if (mfc_opens != 0) {
 		error = EBUSY;                  /* one client at a time; VideoToolbox's next session stays in software */
 	} else {
-		mfc_opens = 1;
+		mfc_opens = 1;P54_MFC_SET(32u);
 	}
 	lck_mtx_unlock(mfc_lock);
 	return error;
@@ -1102,7 +1110,7 @@ mfc_close(dev_t dev __unused, int flags __unused, int type __unused, proc_t p __
 	if (!dead) {
 		inst_close();
 	}
-	mfc_opens = 0;
+	mfc_opens = 0;P54_MFC_CLEAR(32u);
 	if (irq_on) {
 		say("exynos_mfc: interrupts so far: %llu, answers they missed %llu\n", irq_count, irq_missed);
 	}
@@ -1277,10 +1285,12 @@ mfc_thread(void *arg __unused, wait_result_t w __unused)
 		dead = 1;
 		goto out;
 	}
+	if(steps>=2)P54_MFC_SET(2u);
 	if (steps >= 3 && !firmware_start()) {
 		dead = 1;
 		goto out;
 	}
+	if(steps>=3)P54_MFC_SET(4u);
 	if (steps >= 4) {
 		lck_mtx_lock(mfc_lock);
 		self_test();
@@ -1299,10 +1309,12 @@ mfc_thread(void *arg __unused, wait_result_t w __unused)
 		if (major < 0 || devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "hakios-mfc") == NULL) {
 			say("exynos_mfc: 5: no /dev/hakios-mfc\n");
 		} else {
+			P54_MFC_SET(8u);
 			say("exynos_mfc: 5: /dev/hakios-mfc\n");
 		}
 	}
 out:
+	if(dead)P54_MFC_SET(16u);
 	say("exynos_mfc: mfc=%u done%s\n", steps, dead ? ": THE BLOCK IS LEFT ALONE, video stays in software" : "");
 	thread_terminate(current_thread());
 }
@@ -1323,6 +1335,10 @@ hakios_exynos_mfc_init(void)
 	pmu = (volatile uint8_t *)ml_io_map(PMU_PA, PMU_SIZE);
 	cmu_top = (volatile uint8_t *)ml_io_map(CMU_TOP_PA, CMU_SIZE);
 	cmu_busc = (volatile uint8_t *)ml_io_map(CMU_BUSC_PA, CMU_SIZE);
+	P54_MFC_SET(1u);
+#if __has_include(<kern/hakios_p125.h>)
+	if(pmu)__atomic_store_n(&hakios_p12754_mfc_first,rd(pmu,PMU_STATUS),__ATOMIC_RELEASE);
+#endif
 	look("1");
 	if (steps >= 2 && kernel_thread_start(mfc_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
