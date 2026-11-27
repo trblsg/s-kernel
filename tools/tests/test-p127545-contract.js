@@ -3,6 +3,15 @@ const read=p=>fs.readFileSync(path.join(__dirname,'../..',p),'utf8');
 const s=read('drivers/power/exynos/hakios.p125_sysctl.h'),h=read('drivers/power/exynos/hakios.p12753.h'),w=read('wifi/lx/brcmfmac/lx_pci.c'),p=read('drivers/display/panel/hakios.s6e3ha8.c'),d=read('drivers/display/dpu/hakios.exynos_dpu.c');
 assert(s.includes('P127545_COMPOSITE 69u') && s.includes('p127545_composite_locked((unsigned)v)'));
 assert(h.includes('p127545_wait_ms=extended?150000:90000') && h.includes('wait|=4096u'));
+// Native starlte compile regression: the pilot must use the same local
+// atomic cancellation flag as arm/cancel and the main governor tick.
+const cancelDecl=h.indexOf('static uint32_t p12753_cancel,');
+const pilot=h.indexOf('__atomic_load_n(&p12753_cancel,__ATOMIC_ACQUIRE) || post.mask ||');
+assert(cancelDecl>=0 && pilot>cancelDecl,'pilot cancellation flag must be declared before use');
+assert(!/\bhakios_p12753_cancel\b/.test(h),'undeclared pilot cancellation flag');
+assert(h.includes('__atomic_store_n(&p12753_cancel,1,__ATOMIC_RELEASE)'));
+assert(h.includes('__atomic_store_n(&p12753_cancel,0,__ATOMIC_RELEASE)'));
+assert(h.includes('if(__atomic_load_n(&p12753_cancel,__ATOMIC_ACQUIRE)){p12753_finish(6,P53_CANCEL'));
 assert(w.includes('quiet<200000000ull?20:quiet<1000000000ull?40:80'));
 assert(p.includes('fresh_off_ok && first && !brightness_error') && p.includes('clock_interval_to_deadline(250,NSEC_PER_MSEC,&fresh_deadline)'));
 assert(p.includes('now<fresh_deadline && rd(DSIM_CONFIG)==fresh_dsim && hakios_p127545_frame_latched(gen)'));

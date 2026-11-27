@@ -541,7 +541,7 @@ static void p12753_audit_tick(uint64_t now){
             struct p12753_row post={0};p12753_sample(&post,done);
             if(hakios_display_requested_on()!=0 || __atomic_load_n(&hakios_p12753_display_on,__ATOMIC_ACQUIRE)!=on ||
                __atomic_load_n(&hakios_p12753_usb_down,__ATOMIC_ACQUIRE)!=down || __atomic_load_n(&hakios_p12753_usb_up,__ATOMIC_ACQUIRE)!=up ||
-               __atomic_load_n(&hakios_p12753_cancel,__ATOMIC_ACQUIRE) || post.mask ||
+               __atomic_load_n(&p12753_cancel,__ATOMIC_ACQUIRE) || post.mask ||
                p12753_temp_mask(post.big,post.lit,post.gpu,post.bat,post.age,76000,70000,72000,47))ok=false;
             if(!ok){if(mfc)hakios_p127545_mfc_invalidate();else if(cam)hakios_p127545_cam_invalidate();else hakios_p545_disp_invalidate();}
             lck_spin_lock(&p12753_lock);p12753_start=now;p12753_until=done;lck_spin_unlock(&p12753_lock);
