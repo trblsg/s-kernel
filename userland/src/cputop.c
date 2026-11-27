@@ -140,7 +140,7 @@ main(int argc, char **argv)
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	/* The actual S9 image already runs this 5s sampler; thermald may exit
 	 * when thermal_pressure is absent. No additional periodic idle wake. */
-	bool audio_enabled=looks==0 && seconds<=5 && geteuid()==0 && audio_read("kern.hakios.p12754_revision")==3;
+	bool audio_enabled=looks==0 && seconds<=5 && geteuid()==0 && audio_read("kern.hakios.p12754_revision")>=3;
 	for (unsigned look = 0; looks == 0 || look <= looks; look++) {
 		if(audio_enabled)audio_tick();
 		p12751_persist_next();

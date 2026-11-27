@@ -51,6 +51,7 @@ $script:P12752ProfileAllowed=$false
 $script:P12751NextAllowed=$false
 $script:P1273GateAllowed=$false
 $script:P127542GpuAllowed=$false
+$script:P127543AssistAllowed=$false
 $script:P1273CombinedAllowed=$false
 $script:P1272ProbeLines=New-Object 'System.Collections.Generic.List[string]'
 $script:P12PreflightVerified=$false
@@ -129,8 +130,11 @@ function P12-ReplyShape([string]$Name,[string]$Reply,[bool]$Mixed){
         '^p12751_revision$' {return ($Reply -ceq '1')}
         '^p12752_revision$' {return ($Reply -ceq '1')}
         '^p12753_revision$' {return ($Reply -ceq '1')}
-        '^p12754_revision$' {return ($Reply -cmatch '^[123]$')}
+        '^p12754_revision$' {return ($Reply -cmatch '^[1234]$')}
         '^(mali_irq|p127542_g2)$' {return ($Reply -cmatch '^[01]$')}
+        '^p127543_wait$' {return ($Reply -cmatch "^version=1 deadline=$dec plateau=[01]$")}
+        '^p127543_rail$' {return ($Reply -cmatch "^version=1 generation=$dec count=[0-2] attempts=[0-4] uv0=$dec uv1=$dec$")}
+        '^p127543_assist$' {return ($Reply -cmatch '^(0|1|5|17|33|49|65|129|257|513)$')}
         '^p127542_audio$' {return ($Reply -cmatch '^(0|[1-9]\d{0,7})$')}
         '^p127542_audio_result$' {return ($Reply -cmatch '^(0|-?[1-9]\d{0,7})$')}
         '^p1231_ufs_stats$' {return ($Reply -cmatch "^version=1 nufs=[01] switched=[01] step=$dec selftest=-?$dec fences=-?$dec dead=[01] loader_core_taken=[01] loader_gone=[01] floor_safe=[01] native_reads=$dec loader_reads=$dec read_errors=$dec writes=$dec write_errors=$dec refused=$dec write_busy=[01] native_inflight=$dec native_read_calls=$dec native_read_wall_us=$dec native_write_calls=$dec native_write_wall_us=$dec write_refused=$dec$")}
@@ -285,7 +289,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
     }
     if($script:P12752IdleAllowed -or $script:P1274HostEnabled){$allowed+=@('p12751_boot_latch','p12752_revision','p12752_eligibility','p12752_idle_mode','p12752_idle_info','p12752_idle_select','p12752_idle_page','p12752_profile')}
     if($script:P12753HostEnabled){$allowed+=@('p12753_revision','p12753_guard','p12753_status','p12753_arm','p12753_select','p12753_page')}
-    if($script:P12754HostEnabled){$allowed+=@('p12754_revision','p12754_wait','p12754_rate','p127541_stats','p1231_ufs_stats','p127542_audio','p127542_audio_result','mali_irq','p127542_g2')}
+    if($script:P12754HostEnabled){$allowed+=@('p12754_revision','p12754_wait','p12754_rate','p127541_stats','p1231_ufs_stats','p127542_audio','p127542_audio_result','mali_irq','p127542_g2','p127543_wait','p127543_rail','p127543_assist')}
     if($Name -notin $allowed){throw "P12 sysctl disallowed $Name"}
     if($script:P124HostEnabled -and $Name -eq 'p1231_hash_mode' -and $Value -eq '1'){throw 'P12.4 rejects scalar thermal trial'}
     if($Value -ne '' -and -not (
@@ -311,6 +315,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
         ($script:P1273HostEnabled -and $Name -eq 'p1273_gate_begin' -and $Value -eq '0') -or
         ($script:P1273HostEnabled -and $script:P1273GateAllowed -and $Name -eq 'p1273_gate_begin' -and $Value -in @('3','5','17','129','257','513','903','919')) -or
         ($script:P12754HostEnabled -and $script:P1273GateAllowed -and $Name -eq 'p1273_gate_begin' -and $Value -in @('33','49','65')) -or
+        ($script:P12754HostEnabled -and $script:P127543AssistAllowed -and $Name -eq 'p127543_assist' -and $Value -in @('0','1','5','17','33','49','65','129','257','513')) -or
         ($script:P12754HostEnabled -and $script:P127542GpuAllowed -and $Name -in @('mali_irq','p127542_g2') -and $Value -in @('0','1')) -or
         ($script:P12754HostEnabled -and $script:P1273GateAllowed -and $Name -eq 'p127542_audio' -and $Value -match '^[1-9]\d{0,7}$') -or
         ($script:P1273HostEnabled -and $script:P1273GateAllowed -and $Name -in @('p1273_gate_review','p1273_gate_ack') -and $Value -match '^[1-9]\d{0,9}$' -and [uint64]$Value -le 99999999) -or
@@ -338,6 +343,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
     if($script:P1272HostEnabled){$restore+='p1272_probe_request'}
     if($script:P1273HostEnabled){$restore+=@('p1273_trace_mode','p1273_cap_mode','p1273_offline_s','p1273_gate_begin')}
     if($script:P127542GpuAllowed){$restore+=@('mali_irq','p127542_g2')}
+    if($script:P127543AssistAllowed){$restore+=@('p127543_assist')}
     if($script:P1274HostEnabled){$restore+='p12741_profile'}
     # P12752 recorder cleanup is an opt-in zero-only restore, not a new bypass.
     if($script:P12752IdleAllowed){$restore+='p12752_idle_mode'}

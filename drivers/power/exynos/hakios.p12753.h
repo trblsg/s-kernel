@@ -38,11 +38,14 @@ static bool p12753_mapped;
 /* P12754 extension, old P12753 page ABI retained. */
 static unsigned p12754_wait_mask,p12754_wait_seen,p12754_preflight,p12754_hw_step;
 static uint64_t p12754_quiet_max;
+static uint64_t p127543_flat_at;
+static int32_t p127543_flat_excess;
+static bool p127543_plateau;
 static vm_offset_t p12754_mif,p12754_top;
 static bool p12754_cmu_mapped;
 static unsigned p127541_events[12],p127541_skips;
 static uint64_t p127541_ticks[12],p127541_note_at,p127541_busy_at;
-static int p12754_revision=3;
+static int p12754_revision=4;
 SYSCTL_INT(_kern_hakios,OID_AUTO,p12754_revision,CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,&p12754_revision,0,"P12754 extension ABI");
 static int p12753_revision=1;
 SYSCTL_INT(_kern_hakios,OID_AUTO,p12753_revision,CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,&p12753_revision,0,"P12753 ABI");
@@ -114,6 +117,7 @@ static void p12753_guard_tick(uint64_t now){
     __atomic_store_n(&p12753_lcap,lc,__ATOMIC_RELEASE);
     lck_spin_unlock(&p12753_lock);
     if(bc!=oldb || lc!=oldl)say("p12753-guard: at=%llu mask=%u big=%d lit=%d gpu=%d bat=%d slope=%d bcap=%u lcap=%u\n",(unsigned long long)now,m,b,l,g,bat,slope,bc,lc);
+    p127543_floor_rail_tick(now);
 }
 static uint32_t p12753_ceiling(struct cluster *c,uint32_t stock){
     uint32_t cap=c==&clusters[1]?__atomic_load_n(&p12753_bcap,__ATOMIC_ACQUIRE):__atomic_load_n(&p12753_lcap,__ATOMIC_ACQUIRE);
@@ -338,6 +342,7 @@ static int p12753_arm_sysctl(__unused struct sysctl_oid *o,__unused void *a,__un
         if(p12754_preflight){lck_spin_unlock(&p12753_lock);return EPERM;}
     }
     p12754_wait_mask=p12754_wait_seen=p12754_hw_step=0;p12754_quiet_max=0;
+    p127543_flat_at=0;p127543_flat_excess=0;p127543_plateau=false;
     p127541_skips=0;p127541_note_at=p127541_busy_at=0;
     bzero(p127541_events,sizeof(p127541_events));bzero(p127541_ticks,sizeof(p127541_ticks));
     p12753_request=(unsigned)v;p12753_arm_at=now;p12753_wait_until=now+p1274_ticks_ms(90000);
@@ -367,7 +372,13 @@ static void p12753_audit_tick(uint64_t now){
     if(__atomic_load_n(&p12753_cancel,__ATOMIC_ACQUIRE)){p12753_finish(6,P53_CANCEL,now,&r);return;}
     if(hard&(P53_BIG|P53_LIT|P53_GPU|P53_BAT)){p12753_finish(2,hard,now,&r);return;}
     if(p12753_state==1){
-        if(down>p12753_arm_at){lck_spin_lock(&p12753_lock);p12753_down=down;lck_spin_unlock(&p12753_lock);}
+        if(down>p12753_arm_at){
+            lck_spin_lock(&p12753_lock);
+            /* Grant once after a prompt disconnect, never renew on another link cycle. */
+            if(!p12753_down && p12754_optin() && p12753_request!=14 && down-p12753_arm_at<=p1274_ticks_ms(15000))
+                p12753_wait_until=down+p1274_ticks_ms(90000);
+            p12753_down=down;lck_spin_unlock(&p12753_lock);
+        }
         if(now>=p12753_wait_until){p12753_finish(8,P53_TIMEOUT,now,&r);return;}
         if(!p12753_other_idle()){p12754_wait_note(1024u,now);p12753_finish(6,P53_CONFLICT,now,&r);return;}
         if(down>p12753_arm_at && up>down){p12753_finish(8,P53_LINK,now,&r);return;}
@@ -386,6 +397,21 @@ static void p12753_audit_tick(uint64_t now){
         if(!connected && !hakios_p123_input_quiet(now))wait|=512u;
         if(p12753_quiet && on>=p12753_quiet)wait|=2048u;
         p12754_wait_note(wait,now);
+        /* If all other conditions settle but temperature stays above the
+         * admission ceiling, stop instead of consuming the entire battery wait.
+         * 30 seconds without at least 0.5C progress; reset on any other blocker.
+         * Safety thresholds and quiet requirement below remain unchanged. */
+        if(!connected && p12754_optin() && wait==32u && headroom && !(r.mask&P53_INVALID)){
+            int32_t excess=MAX(r.big-60000,MAX(r.lit-59000,r.gpu-60000));
+            if(excess>0 && r.bat<45){
+                if(!p127543_flat_at || excess<=p127543_flat_excess-500){
+                    p127543_flat_at=now;p127543_flat_excess=excess;
+                }else if(now-p127543_flat_at>=p1274_ticks_ms(30000)){
+                    lck_spin_lock(&p12753_lock);p127543_plateau=true;lck_spin_unlock(&p12753_lock);
+                    p12753_finish(8,P53_TIMEOUT,now,&r);return;
+                }
+            }else p127543_flat_at=0;
+        }else p127543_flat_at=0;
         bool quiet=connected?wait==0:(down>p12753_arm_at && down>up && fresh && !(fg&1u) && at>=down && off && gpuoff &&
             !r.mask && !headroom && r.bs+r.ls<150u && !hakios_p124_ufs_busy() && hakios_p123_input_quiet(now));
         if(!quiet || (p12753_quiet && on>=p12753_quiet)){p12753_quiet=0;return;}
@@ -528,6 +554,15 @@ static void p12753_audit_tick(uint64_t now){
         p12753_append(&r);previous_row=now;previous_phase=p12753_start;
     }
 }
+/* Read-only disposition of a bounded thermal WAIT. No new hardware samples. */
+static int p127543_wait_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
+    char buf[160];
+    lck_spin_lock(&p12753_lock);
+    snprintf(buf,sizeof(buf),"version=1 deadline=%llu plateau=%u",
+        (unsigned long long)p12753_wait_until,p127543_plateau?1u:0u);
+    lck_spin_unlock(&p12753_lock);return SYSCTL_OUT(req,buf,strlen(buf)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p127543_wait,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p127543_wait_sysctl,"A","P127543 bounded wait disposition");
 static int p12753_status_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
     char buf[500];uint64_t hz=0;nanoseconds_to_absolutetime(NSEC_PER_SEC,&hz);
     lck_spin_lock(&p12753_lock);

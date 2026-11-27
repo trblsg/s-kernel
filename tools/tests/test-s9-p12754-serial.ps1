@@ -35,6 +35,14 @@ Check (P12-ReplyShape 'p127541_stats' $stat $true) 'revision 2 stats shape'
 Check (-not (P12-ReplyShape 'p127541_stats' ($stat -replace ' t2048=260000$','') $true)) 'truncated stats refused'
 Check (P12-ReplyShape 'p12754_revision' '2' $true) 'revision 2 shape'
 Check (P12-ReplyShape 'p12754_revision' '3' $true) 'revision 3 shape'
+Check (P12-ReplyShape 'p12754_revision' '4' $true) 'revision 4 shape'
+Check (P12-ReplyShape 'p127543_wait' 'version=1 deadline=123456 plateau=1' $true) 'plateau disposition'
+Check (P12-ReplyShape 'p127543_rail' 'version=1 generation=2 count=2 attempts=2 uv0=731250 uv1=731250' $true) 'rail gate evidence'
+Check (-not (P12-ReplyShape 'p127543_rail' 'version=1 generation=2 count=3 attempts=2 uv0=731250 uv1=731250' $true)) 'reject extra samples'
+Check (P12-ReplyShape 'p127543_assist' '17' $true) 'assist mode'
+Check (-not (P12-ReplyShape 'p127543_assist' '81' $true)) 'no unqualified 455 assist'
+Check ((P127543-ThermalExcess @{big=62000;lit=60500;gpu=59000}) -eq 2000) 'thermal plateau excess'
+Check ((P127543-ThermalExcess @{big=59000;lit=58000;gpu=59000}) -eq -1000) 'within headroom'
 Check (P12-ReplyShape 'p127542_audio' '17' $true) 'headless request generation'
 Check (P12-ReplyShape 'p127542_audio_result' '-17' $true) 'headless failure generation'
 Check (-not (P12-ReplyShape 'p127542_audio_result' '17 extra' $true)) 'reject mixed result'
@@ -96,3 +104,27 @@ Refuse {P127542-HeadlessReview '17' 'unused'} 'timed out'
 $script:mockResult='17';$script:mockKey=[ConsoleKey]::N
 Refuse {P127542-HeadlessReview '17' 'unused'} 'operator rejected'
 Write-Host 'P127542 headless generation, failed worker, early Y, operator rejection and no-screen gate PASS (mock only)'
+# Rev4 floor review does not treat Y alone as kernel evidence.
+$script:mockGateMissing='32';$script:mockGateGeneration='17';$script:mockGateReads=0
+function P1273-GateStatus {
+    $script:mockGateReads++
+    return @{phase='3';generation=$script:mockGateGeneration;missing=$script:mockGateMissing}
+}
+$script:LifeState='OFF';$script:mockKey=[ConsoleKey]::Y
+Refuse {P127543-FloorReview '17'} 'screen changed'
+$script:LifeState='ON';$script:mockGateMissing='32'
+Refuse {P127543-FloorReview '17'} 'measured stock evidence missing'
+$script:mockGateMissing='0';$script:mockKey=$null
+Refuse {P127543-FloorReview '17'} 'operator or measured stock'
+$script:mockKey=[ConsoleKey]::Y;$script:mockGateGeneration='18'
+Refuse {P127543-FloorReview '17'} 'identity changed'
+$script:mockGateGeneration='17'
+P127543-FloorReview '17'
+$script:mockKey=[ConsoleKey]::N
+Refuse {P127543-FloorReview '17'} 'operator rejected'
+Refuse {P127543-NetworkReview 'WIFI'} 'requires OFF'
+$script:LifeState='OFF';Refuse {P127543-NetworkReview 'BT'} 'operator rejected'
+$script:mockKey=$null;Refuse {P127543-NetworkReview 'TICKER'} 'timeout'
+$script:mockKey=[ConsoleKey]::Y;P127543-NetworkReview 'WIFI'
+Check (P12-ReplyShape 'p127543_assist' '1' $true) 'existing BASE15 explicit assist'
+Write-Host 'P127543 floor review actual evidence+operator, generation mismatch, network refusal and bounded assist shape PASS (mock only)'

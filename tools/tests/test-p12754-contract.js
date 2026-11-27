@@ -1,7 +1,7 @@
 const assert=require('assert'),fs=require('fs'),path=require('path');
 const read=p=>fs.readFileSync(path.join(__dirname,'../..',p),'utf8');
 const h=read('drivers/power/exynos/hakios.p12753.h'),s=read('drivers/power/exynos/hakios.p125_sysctl.h'),g=read('drivers/power/exynos/hakios.p1273_gate.h'),host=read('tools/s9-p125-timer-serial.ps1'),dual=read('tools/s9-p12-dual-serial.ps1');
-for(const token of ['p12754_revision=3','v==14?67000:60001','v==14?66000:59001','p12754_wait_note','p12754_rate_sysctl','p12754_hw_observe','p12753_request==14','100+i:i<23?i-10','0x1b800000u,0x2000','0x1a240000u,0x3000','0x1f,0x22,0x2a','300000u+6250u*v','p12754_hw_row(104,now)','now-p12753_start>=p1274_ticks_ms(10000u+30000u*p12754_hw_step)']) assert(h.includes(token),token);
+for(const token of ['p12754_revision=4','v==14?67000:60001','v==14?66000:59001','p12754_wait_note','p12754_rate_sysctl','p12754_hw_observe','p12753_request==14','100+i:i<23?i-10','0x1b800000u,0x2000','0x1a240000u,0x3000','0x1f,0x22,0x2a','300000u+6250u*v','p12754_hw_row(104,now)','now-p12753_start>=p1274_ticks_ms(10000u+30000u*p12754_hw_step)']) assert(h.includes(token),token);
 const branch=h.slice(h.indexOf('if(connected){'),h.indexOf('unsigned policy=p12753_policy(p12753_request);',h.indexOf('if(connected){')));
 assert(!/p127_arm_mode|hakios_p125_lease|hakios_p127_lease/.test(branch));
 assert(!/hakios_acpm_dvfs_set|hakios_acpm_pmic_write|CPU_SUSPEND|CPU_OFF|ml_io_write|thread_create/.test(h));
@@ -43,4 +43,14 @@ assert(ab.includes('clock_interval_to_deadline(100,NSEC_PER_MSEC,&deadline)') &&
 assert(s.includes('15ULL*NSEC_PER_SEC') && gl.includes('g2_bind_on || e->p127542_g2') && gl.includes('e->g2.verify_serial==1'));
 assert(gl.includes('if(p122_enabled && g2_bind_on)') && host.includes('P127542-HeadlessReview') && host.includes('P127542-Foreground') && host.includes('WaitCoolSeconds'));
 assert(host.includes('worker_result=$result operator_confirmed=1') && host.includes('P12-EarlyThermalGuard'));
-console.log('P12754 revision 3 source contracts PASS: unchanged offline safety, headless gate, bounded ABOX wake and foreground trials (not native compile)');
+assert(g.includes('reason!=4 && reason!=7') && g.includes('stop<armed || on<armed'));
+assert(s.includes('p127543_floor_wake(reason,p127543_gate_armed,stop,on,tolerance)') && s.includes('p127543_gate_wake'));
+assert(impl.includes('hakios_p127543_stop_at,mach_absolute_time()') && impl.includes('hakios_p127_audio_wake();'));
+assert(s.includes('p127543_rail_count!=2') && s.includes('p127543_rail_attempts<4') && s.includes('hakios_acpm_pmic_read(HAKIOS_ACPM_PMIC_PMIC,0x23,&v)'));
+assert(h.includes('p127543_floor_rail_tick(now)') && h.includes('p127543_flat_excess-500') && h.includes('p1274_ticks_ms(30000)'));
+assert(h.includes('p12753_wait_until=down+p1274_ticks_ms(90000)') && h.includes('down-p12753_arm_at<=p1274_ticks_ms(15000)'));
+assert(s.includes('p127_arm_mode_internal(v,true)') && s.includes('(p1273_gate_qualified&need)!=need') && s.includes('p127543_assist_lease'));
+assert(host.includes('P125-PumpOff 18') && host.includes('ConnectedFloorReport') && host.includes('ufs_errors_unchanged') && host.includes('P127543-IdleAssist'));
+assert(host.includes('mach uptime $uptime s (metadata, not admission)') && host.includes('thermal plateau before arm') && host.includes('P127543-NetworkReview'));
+assert(dual.includes('p127543_wait') && dual.includes('p127543_rail') && dual.includes('p127543_assist'));
+console.log('P12754 revision 4 source contracts PASS: paired wake/touch, bounded rail gate, assist, thermal plateau and unchanged offline safety (not native compile)');

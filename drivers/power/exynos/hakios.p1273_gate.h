@@ -45,6 +45,12 @@ static inline bool p1273_gate_combined(unsigned mode,unsigned qualified,bool ena
     unsigned required=p1273_gate_required(mode);
     return enabled && required && (qualified&required)==required;
 }
+/* Stop is published with the exact lease. Reason7 only originates in the
+ * real touch callback. Both events must be from this active lease window. */
+static inline bool p127543_floor_wake(unsigned reason,uint64_t armed,uint64_t stop,uint64_t on,uint64_t tolerance){
+    if((reason!=4 && reason!=7) || !armed || stop<armed || on<armed || !tolerance)return false;
+    return (stop>=on?stop-on:on-stop)<=tolerance;
+}
 struct p1273_gate_evidence {
     uint64_t usb_quiet,usb_down,usb_up;
     uint64_t abox_stop,abox_resume,abox_wait,audio_feed,audio_capture,audio_dma;

@@ -241,7 +241,7 @@ unsigned hakios_p127_mode(void)
     return now<(v&~(uint64_t)P127_MASK)?(unsigned)(v&P127_MASK):0;
 }
 uint32_t hakios_p1273_gate_watch,hakios_p1273_last_stop_reason;
-uint64_t hakios_p1273_events[2][P1273_EVENT_COUNT],hakios_p1273_last_stop_lease,hakios_p1273_fault_seq;
+uint64_t hakios_p1273_events[2][P1273_EVENT_COUNT],hakios_p1273_last_stop_lease,hakios_p1273_fault_seq,hakios_p127543_stop_at;
 void hakios_p1273_event(unsigned event,uint64_t count)
 {
     if(event==P1273_BT_ERROR || event==P1273_TICK_FAIL)
@@ -257,6 +257,7 @@ void hakios_p127_stop(unsigned reason)
     if(v){
         __atomic_store_n(&hakios_p127_reason,reason,__ATOMIC_RELEASE);
         __atomic_store_n(&hakios_p1273_last_stop_reason,reason,__ATOMIC_RELAXED);
+        __atomic_store_n(&hakios_p127543_stop_at,mach_absolute_time(),__ATOMIC_RELAXED);
         __atomic_store_n(&hakios_p1273_last_stop_lease,v,__ATOMIC_RELEASE);
         /* Policy removal must wake even after mode becomes zero. */
         if(v&P127_ABOX){
@@ -329,6 +330,7 @@ void hakios_p125_usb_event(unsigned connected)
 {
     /* Retain physical link timestamps even after audit freeze. */
     __atomic_store_n(connected?&hakios_p12753_usb_up:&hakios_p12753_usb_down,mach_absolute_time(),__ATOMIC_RELEASE);
+    hakios_p127_audio_wake();
     hakios_p1273_event(connected?P1273_USB_UP:P1273_USB_DOWN,1);
     if(p1274_live(mach_absolute_time()) && p1274_writer_enter(mach_absolute_time())){
         uint64_t zero=0,at=mach_absolute_time();

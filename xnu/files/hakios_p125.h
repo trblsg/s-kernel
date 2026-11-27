@@ -95,7 +95,7 @@ enum p1273_event {
 };
 extern uint32_t hakios_p1273_gate_watch;
 extern uint64_t hakios_p1273_events[2][P1273_EVENT_COUNT];
-extern uint64_t hakios_p1273_last_stop_lease,hakios_p1273_fault_seq;
+extern uint64_t hakios_p1273_last_stop_lease,hakios_p1273_fault_seq,hakios_p127543_stop_at;
 extern uint32_t hakios_p1273_last_stop_reason;
 #define P127_FG_SLOTS 64u
 struct p127_fg_row {uint64_t seq,ticks; int32_t ua,avg_ua; uint32_t uv,external,charger,qh;};

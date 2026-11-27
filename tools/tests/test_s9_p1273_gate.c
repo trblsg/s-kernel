@@ -3,6 +3,15 @@
 #include <stdio.h>
 int main(void)
 {
+    assert(p127543_floor_wake(4,100,200,199,20));
+    assert(p127543_floor_wake(7,100,200,205,20));
+    assert(p127543_floor_wake(7,100,205,200,20));
+    assert(!p127543_floor_wake(7,100,200,99,20));
+    assert(!p127543_floor_wake(7,100,99,200,20));
+    assert(!p127543_floor_wake(7,100,200,221,20));
+    assert(!p127543_floor_wake(0,100,200,200,20));
+    assert(!p127543_floor_wake(2,100,200,200,20));
+    assert(!p127543_floor_wake(7,0,200,200,20));
     const unsigned modes[]={3,5,257,129,513,17,903,919};
     for(unsigned m=0;m<1024;m++){
         unsigned bit=0;

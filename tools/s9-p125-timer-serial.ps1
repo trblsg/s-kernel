@@ -4,7 +4,7 @@
 param(
  [ValidatePattern('^COM[0-9]+$')][string]$Port='COM125',
  [string]$ReconnectPort='',
- [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump','DriverTrials','EnergyTrials','EnergyOffline','Idle52','Idle52Offline','Idle52Recover','Audit53','Audit53Recover','Audit53Compare','Guard53','Hardware54','Foreground542','GpuCacheCheck','P1273Diagnostics','BusTrace','ThermalTrace','ThermalTraceDump','ThermalGpuDump','OffBurstCapABA','OfflineABA','FunctionalGate','CombinedConnected')][string]$Scenario='Trace',
+ [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump','DriverTrials','EnergyTrials','EnergyOffline','Idle52','Idle52Offline','Idle52Recover','Audit53','Audit53Recover','Audit53Compare','Guard53','Hardware54','Foreground542','IdleAssist543','GpuCacheCheck','P1273Diagnostics','BusTrace','ThermalTrace','ThermalTraceDump','ThermalGpuDump','OffBurstCapABA','OfflineABA','FunctionalGate','CombinedConnected')][string]$Scenario='Trace',
  [ValidateRange(30,90)][int]$TraceSeconds=60,
  [ValidateRange(12,40)][int]$AggregateSeconds=20,
  [string]$SymbolMap='',
@@ -29,10 +29,14 @@ param(
  [switch]$AllowOffCap,
  [switch]$AllowStrongerCap,
  [ValidateSet('ABOX','BT','WIFI','TICKER','LITTLE949','COMBINED5','COMBINED6')][string]$OfflineModule='LITTLE949',
- [ValidateSet('USB','ABOX','BT','WIFI','TICKER','LITTLE949','LITTLE832','LITTLE715','LITTLE598','COMBINED5','COMBINED6')][string]$GateModule='USB',
+ [ValidateSet('USB','BASE15','ABOX','BT','WIFI','TICKER','LITTLE949','LITTLE832','LITTLE715','LITTLE598','COMBINED5','COMBINED6')][string]$GateModule='USB',
  [ValidateSet('COMBINED5','COMBINED6')][string]$CombinedProfile='COMBINED5',
  [switch]$AllowFunctionalGate,
  [switch]$HeadlessAudio,
+ [switch]$HeadlessNetwork,
+ [switch]$AllowIdleAssist,
+ [ValidateRange(15,90)][int]$AssistSeconds=60,
+ [string]$ConnectedFloorReport='',
  [switch]$AllowGpu542,
  [ValidateSet('Baseline','IRQ','G2')][string]$Gpu542Mode='Baseline',
  [ValidateRange(0,180)][int]$WaitCoolSeconds=0,
@@ -52,7 +56,7 @@ $script:P1272HostEnabled=$true
 $script:P12752IdleAllowed=[bool]$P12752Idle
 $script:P12752IdleDirty=$false
 $script:P12754HostEnabled=[bool]$P12754
-$script:P12753HostEnabled=$Scenario -in @('Audit53','Audit53Recover','Guard53','Hardware54','Foreground542')
+$script:P12753HostEnabled=$Scenario -in @('Audit53','Audit53Recover','Guard53','Hardware54','Foreground542','IdleAssist543')
 $script:P12753ArmAllowed=($Scenario -eq 'Audit53' -and [bool]$AllowOfflineTrial) -or ($Scenario -eq 'Hardware54' -and $P12754)
 $script:P1273HostEnabled=([bool]$P1273Telemetry -or [bool]$P12752Idle -or $script:P12753HostEnabled -or $Scenario -in @('P1273Diagnostics','BusTrace','ThermalTrace','ThermalTraceDump','ThermalGpuDump','OffBurstCapABA','OfflineABA','FunctionalGate','CombinedConnected'))
 $script:P1273GateDirty=$false
@@ -389,6 +393,13 @@ function P125-Offline([int]$WaitSeconds=$TraceSeconds) {
         if(-not $kernelLinkProof){
             $ports=@(P125-PortNames)
             if($ports -contains $source -or $ports -contains $target){throw 'P125 reconnected early; offline phase invalid'}
+        }
+        if($audit53){
+            # User can stop early if the handset becomes uncomfortably hot;
+            # kernel link stop/frozen evidence still controls validity.
+            $abort=$false
+            try{if([Console]::KeyAvailable){$abort=[Console]::ReadKey($true).Key -eq [ConsoleKey]::N}}catch{}
+            if($abort){Life-Say 'P127543 operator requested early reconnect; audit may be incomplete';break}
         }
         Start-Sleep -Milliseconds 250
     }
@@ -1045,7 +1056,7 @@ function P1273-GpuDump([string]$Stem){
 function P1273-CapWindow([string]$Stem,[string]$Label,[int]$Mode){
     $script:P12Phase=$Label
     $before=P125-Fields (P12-Query 'p1273_cap_status')
-    if($before.state -in @('2','3')){throw 'P1273 prior cap active'}
+    if($before.state -in @('2','3','4')){throw 'P1273 prior cap active'}
     P125-PumpOff 5
     $script:P1273CapDirty=$true
     [void](P12-Query 'p1273_cap_mode' "$Mode")
@@ -1221,10 +1232,15 @@ function P127542-HeadlessReview([string]$Generation,[string]$Stem){
 }
 function P1273-FunctionalGate([string]$Stem){
     if(-not $AllowFunctionalGate){throw 'FunctionalGate requires -AllowFunctionalGate; real external workload and foreground confirmation'}
-    if($HeadlessAudio){if(-not $P12754 -or $GateModule -ne 'ABOX'){throw 'HeadlessAudio requires P12754 and ABOX only'}; P12754-Require; if($script:P12754Revision -ne '3'){throw 'HeadlessAudio requires revision 3'}}
+    if($HeadlessAudio){if(-not $P12754 -or $GateModule -ne 'ABOX'){throw 'HeadlessAudio requires P12754 and ABOX only'}; P12754-Require; if($script:P12754Revision -notin @('3','4')){throw 'HeadlessAudio requires revision 3 or 4'}}
+    if($P12754){P12754-Require}
+    $rev4=$P12754 -and $script:P12754Revision -eq '4'
+    if($HeadlessNetwork -and -not $rev4){throw 'HeadlessNetwork requires revision 4'}
     $defs=@{USB=3;ABOX=5;BT=257;WIFI=129;TICKER=513;LITTLE949=17;LITTLE832=33;LITTLE715=49;LITTLE598=65;COMBINED5=903;COMBINED6=919}
     if($GateModule -in @('LITTLE832','LITTLE715','LITTLE598')){P12754-PriorFloor $GateModule}
     $mask=$defs[$GateModule];$bit=P1273-GateBit $mask
+    $floor4=$rev4 -and $mask -in @(17,33,49,65)
+    if($floor4){$floorBoot=P12-Query 'p1273_boot_identity';$ufsPre=P125-Fields (P12-Query 'p1231_ufs_stats');if($ufsPre.floor_safe -ne '1' -or $ufsPre.dead -ne '0'){throw 'P127543 UFS unsafe'}}
     if($mask -in 903,919){P1273-CombinedPermission $mask -Qualifying}
     $script:P1273GateAllowed=$true
     $pre=P1273-GateCheckpoint $Stem 'GATE-PRE'
@@ -1243,9 +1259,14 @@ function P1273-FunctionalGate([string]$Stem){
         P125-PumpOff 8
         P125-Offline 5
         P125-PumpOff 12
-    }else{P125-PumpOff 45}
+    }elseif($floor4){P125-PumpOff 18}elseif($rev4 -and $HeadlessAudio){P125-PumpOff 25}else{P125-PumpOff 45}
     $active=P1273-GateCheckpoint $Stem 'GATE-ACTIVE'
     if($active.Gate.generation -ne $generation -or $active.Gate.phase -ne '2' -or $active.Policy.mode -ne "$mask" -or $active.Policy.reason -ne '0'){throw 'P1273 functional policy revoked'}
+    if($floor4){
+        $rail=P125-Fields (P12-Query 'p127543_rail')
+        $rail|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath "$Stem.floor543-rail.json"
+        if($rail.generation -ne $generation -or $rail.count -ne '2' -or [int]$rail.uv0 -lt 500000 -or [int]$rail.uv0 -gt 1100000 -or [int]$rail.uv1 -lt 500000 -or [int]$rail.uv1 -gt 1100000 -or [Math]::Abs([int]$rail.uv0-[int]$rail.uv1) -gt 12500){throw 'P127543 two measured floor VSEL samples missing'}
+    }
     if($mask -in @(17,33,49,65)){
         Life-Say "P1273 ${GateModule}: wake screen NOW to prove kernel revokes the floor lease; verify normal storage and UI during foreground review"
         $until=(Life-Now).AddSeconds(20)
@@ -1260,19 +1281,28 @@ function P1273-FunctionalGate([string]$Stem){
         $expectedReason='0'
     }
     $stopped=P1273-GateCheckpoint $Stem 'GATE-RESTORED'
-    if($stopped.Policy.mode -ne '0' -or $stopped.Policy.reason -ne $expectedReason){throw 'P1273 normal rollback not proven'}
+    if($stopped.Policy.mode -ne '0' -or ($stopped.Policy.reason -ne $expectedReason -and -not ($floor4 -and $stopped.Policy.reason -eq '7'))){throw 'P1273 normal rollback not proven'}
+    if($floor4 -and ($stopped.Gate.generation -ne $generation -or $stopped.Gate.lease -ne $active.Gate.lease -or $stopped.Policy.ufs_safe -ne '1')){throw 'P127543 restore identity or UFS missing'}
     $script:P127Dirty=$false
     [void](P12-Query 'p1273_gate_review' $generation)
     if((P1273-GateStatus).phase -ne '3'){throw 'P1273 review not armed'}
-    if($HeadlessAudio){P127542-HeadlessReview $generation $Stem}else{P1273-GateForeground $GateModule}
+    if($HeadlessAudio){P127542-HeadlessReview $generation $Stem}elseif($HeadlessNetwork){P127543-NetworkReview $GateModule}elseif($floor4){P127543-FloorReview $generation}else{P1273-GateForeground $GateModule}
     $post=P1273-GateCheckpoint $Stem 'GATE-FOREGROUND'
     if($post.Gate.phase -ne '3' -or $post.Gate.generation -ne $generation -or $post.Gate.missing -ne '0'){
         throw "P1273 no qualification: missing evidence bitmap=$($post.Gate.missing), report retained"
+    }
+    if($floor4){
+        $rate=P125-Fields (P12-Query 'p12754_rate')
+        $ufsPost=P125-Fields (P12-Query 'p1231_ufs_stats')
+        if($rate.fresh -ne '1' -or [int]$rate.cur -lt 1053000 -or [Math]::Abs(1000*[double]$rate.meas-[double]$rate.cur) -gt 0.03*[double]$rate.cur -or $ufsPost.floor_safe -ne '1' -or $ufsPost.dead -ne '0' -or $ufsPost.read_errors -ne $ufsPre.read_errors -or $ufsPost.write_errors -ne $ufsPre.write_errors){throw 'P127543 measured stock or UFS error-free restoration missing'}
     }
     [void](P12-Query 'p1273_gate_ack' $generation)
     $done=P1273-GateCheckpoint $Stem 'GATE-DONE'
     if($done.Gate.phase -ne '0' -or (([int]$done.Gate.qualified -band $bit) -ne $bit)){throw 'P1273 qualification ACK missing'}
     $script:P1273GateDirty=$false
+    if($floor4){
+        [pscustomobject]@{version=1;revision=4;boot=$floorBoot;module=$GateModule;generation=$generation;qualified=[int]$done.Gate.qualified;restored=$true;rail_verified=$true;buck3_configured_uv=@([int]$rail.uv0,[int]$rail.uv1);ufs_errors_unchanged=$true;ufs_before=$ufsPre;ufs_after=$ufsPost;stock_rate=$rate;power_verified=$false;reason=[int]$stopped.Policy.reason;note='Connected functional evidence only; kernel gate and fresh measured stock, not battery power.'}|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath "$Stem.floor543-qualified.json"
+    }
     $script:P125Report.Add("P1273 GATE $GateModule qualified for this boot; generation=$generation qualified=$($done.Gate.qualified); operator-confirmed foreground and driver activity, not energy proof")
 }
 function P1273-CombinedApplication($B,[int]$Mode,[switch]$Offline){
@@ -1374,9 +1404,48 @@ function P12754-FrozenRow($S,$CP,[int]$Index){
     }
     throw 'P12754 cursor retries exhausted'
 }
+function P127543-FloorReview([string]$Generation){
+    Life-Say 'LITTLE: verify one short swipe/touch and normal UI, press Y on PC if correct, N rejects. Keep screen ON only until completion.'
+    $until=(Life-Now).AddSeconds(12);$next=Life-Now;$confirmed=$false
+    while((Life-Now) -lt $until){
+        Life-Pump;Life-CheckSafety (Life-Now);P12-EarlyThermalGuard
+        if($script:LifeState -ne 'ON'){throw 'P127543 floor review screen changed'}
+        $key=P127542-ReadKey
+        if($key -eq [ConsoleKey]::N){throw 'P127543 floor operator rejected'}
+        if($key -eq [ConsoleKey]::Y){$confirmed=$true}
+        if((Life-Now) -ge $next){
+            $g=P1273-GateStatus
+            if($g.phase -ne '3' -or $g.generation -ne $Generation){throw 'P127543 floor review identity changed'}
+            if($confirmed -and $g.missing -eq '0'){return}
+            $next=(Life-Now).AddSeconds(1)
+        }
+    }
+    throw 'P127543 floor review incomplete: operator or measured stock evidence missing'
+}
+function P127543-NetworkReview([string]$Module){
+    if($script:LifeState -ne 'OFF'){throw 'P127543 headless network requires OFF'}
+    Life-Say "P127543 ${Module}: policy OFF. Keep screen OFF; from peer verify actual bidirectional data and reconnect (ticker: network timing/cancel). Press Y only if real function works; N rejects."
+    $until=(Life-Now).AddSeconds(35)
+    while((Life-Now) -lt $until){
+        Life-Pump;Life-CheckSafety (Life-Now);P12-EarlyThermalGuard
+        if($script:LifeState -ne 'OFF'){throw 'Headless network screen changed'}
+        $key=P127542-ReadKey
+        if($key -eq [ConsoleKey]::N){throw 'P127543 network operator rejected'}
+        if($key -eq [ConsoleKey]::Y){return}
+    }
+    throw 'P127543 network review timeout'
+}
 function P12754-PriorFloor([string]$Module){
     $prior=@{LITTLE832='LITTLE949';LITTLE715='LITTLE832';LITTLE598='LITTLE715'}
     if(-not $prior.ContainsKey($Module)){return}
+    if($ConnectedFloorReport){
+        if(-not $P12754 -or -not $AllowLowerFloor -or $script:P12754Revision -ne '4'){throw 'Connected floor report requires revision 4 and explicit AllowLowerFloor'}
+        $r=Get-Content -Raw -LiteralPath $ConnectedFloorReport|ConvertFrom-Json
+        $bits=@{LITTLE949=32;LITTLE832=1024;LITTLE715=2048}
+        $need=$bits[$prior[$Module]]
+        if($r.version -ne 1 -or $r.revision -ne 4 -or $r.module -ne $prior[$Module] -or $r.boot -ne (P12-Query 'p1273_boot_identity') -or -not $r.restored -or -not $r.rail_verified -or -not $r.ufs_errors_unchanged -or @($r.buck3_configured_uv).Count -ne 2 -or @($r.buck3_configured_uv|Where-Object {$_ -le 0}).Count -or (([int](P1273-GateStatus).qualified -band $need) -ne $need)){throw 'Connected floor prior qualification/rail/UFS/boot missing'}
+        return
+    }
     if(-not $P12754 -or -not $AllowLowerFloor -or $Audit53Reports.Count -ne 3){throw 'P12754 lower floor requires -P12754 -AllowLowerFloor and prior same-boot A0/B/A1 JSON paths in -Audit53Reports'}
     $r=@($Audit53Reports|ForEach-Object {Get-Content -Raw -LiteralPath $_|ConvertFrom-Json})
     [void](P12753-Compare $r[0] $r[1] $r[2])
@@ -1385,12 +1454,12 @@ function P12754-PriorFloor([string]$Module){
 }
 function P12754-Require {
     $script:P12754Revision=P12-Query 'p12754_revision'
-    if($script:P12754Revision -notin @('1','2','3')){throw 'P12754 ABI mismatch'}
+    if($script:P12754Revision -notin @('1','2','3','4')){throw 'P12754 ABI mismatch'}
     $w=P125-Fields (P12-Query 'p12754_wait')
     if($w.enabled -ne '1'){throw 'P12754 boot opt-in missing'}
 }
 function P127541-SaveStats([string]$Stem){
-    if($script:P12754Revision -notin @('2','3')){return}
+    if($script:P12754Revision -notin @('2','3','4')){return}
     try{
         $raw=P12-Query 'p127541_stats'
         $raw|Set-Content -Encoding UTF8 -LiteralPath "$Stem.wait541.txt"
@@ -1400,7 +1469,7 @@ function P127541-SaveStats([string]$Stem){
     }
 }
 function P127541-UfsBracket([string]$Stem,$CP){
-    if($script:P12754Revision -notin @('2','3')){return}
+    if($script:P12754Revision -notin @('2','3','4')){return}
     # Not an exact audit interval: host snapshots bracket WAIT and capture.
     # On recovery the after snapshot can be delayed. No claim of caller attribution.
     if(-not $CP.PSObject.Properties['UfsBefore']){return}
@@ -1456,7 +1525,13 @@ function P12753-ReadAudit([string]$Stem,$CP){
     $out="$Stem.audit53-power.json"
     $note=if([uint64]$s.start -eq 0){'Aborted before measurement; no samples to recover'}else{'Frozen readback incomplete'}
     [pscustomobject]@{version=1;power_verified=$false;module=$CP.Module;reason=$s.reason;stop_mask=$s.mask;note=$note}|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath $out
-    if($P12754){P12754-Require;P12-Query 'p12754_wait'|Set-Content -Encoding UTF8 -LiteralPath "$Stem.wait54.txt";P127541-SaveStats $Stem}
+    if($P12754){P12754-Require;P12-Query 'p12754_wait'|Set-Content -Encoding UTF8 -LiteralPath "$Stem.wait54.txt";P127541-SaveStats $Stem
+        if($script:P12754Revision -eq '4'){
+            $disposition=P125-Fields (P12-Query 'p127543_wait')
+            $disposition|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath "$Stem.wait543.json"
+            if($disposition.plateau -eq '1'){Life-Say 'P127543 offline WAIT stopped: thermal plateau, no measurement'}
+        }
+    }
     if($CP.Module -eq 'HARDWARE54' -and $P12754){P127541-UfsBracket $Stem $CP}
     if([uint64]$s.start -eq 0){throw "P12753 never entered measurement: reason=$($s.reason) mask=$($s.mask); no samples to recover"}
     $rows=@()
@@ -1539,11 +1614,14 @@ function P12753-ReadAudit([string]$Stem,$CP){
     if($bus.Count){$bus|Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath "$Stem.audit53-bus.csv"}
     $summary.power_verified=$summary.power_verified -and $restore -and $t.Status.reason -eq '10' -and ((P12-Query 'p1273_boot_identity') -eq $CP.Nonce)
     if(-not $summary.power_verified){$summary.mean_discharge_w=$null;$summary.discharge_wh=$null}
-    $extra=[ordered]@{boot=$CP.Nonce;module=$CP.Module;request=$s.request;arm=$s.arm;start=$s.start;end=$s.end;policy=$s.policy;reason=$s.reason;stop_mask=$s.mask;applied=[bool]$applied;restored=[bool]$restore;driver_hits=$hits;bus_attempted=$bus.Count;bus_valid=@($bus|Where-Object {$null -ne $_.rate_khz}).Count;diagnostic=$CP.Module -eq 'BUS';rail_verified=[bool]$railVerified;buck3_configured_uv=$railValues;abox_evidence=$aboxEvidence;note='Battery only, no extrapolation; driver deltas include setup/restore; sampled residency, not rail power'}
+    $extra=[ordered]@{boot=$CP.Nonce;module=$CP.Module;request=$s.request;arm=$s.arm;start=$s.start;end=$s.end;start_uptime_s=[double]$s.start/[double]$s.hz;policy=$s.policy;reason=$s.reason;stop_mask=$s.mask;applied=[bool]$applied;restored=[bool]$restore;driver_hits=$hits;bus_attempted=$bus.Count;bus_valid=@($bus|Where-Object {$null -ne $_.rate_khz}).Count;diagnostic=$CP.Module -eq 'BUS';rail_verified=[bool]$railVerified;buck3_configured_uv=$railValues;abox_evidence=$aboxEvidence;note='Battery only, no extrapolation; driver deltas include setup/restore; sampled residency, not rail power'}
     foreach($k in $extra.Keys){$summary|Add-Member -NotePropertyName $k -NotePropertyValue $extra[$k]}
     $summary|ConvertTo-Json -Depth 6|Set-Content -Encoding UTF8 -LiteralPath $out
     Life-Say "P12753 $($CP.Module) verified=$($summary.power_verified) applied=$applied restored=$restore mean_W=$($summary.mean_discharge_w)"
     if(-not $summary.power_verified){throw 'P12753 incomplete or unsafe interval; retained data, not a power result'}
+}
+function P127543-ThermalExcess($G){
+    return [Math]::Max([int]$G.big-60000,[Math]::Max([int]$G.lit-59000,[int]$G.gpu-60000))
 }
 function P12753-RunAudit([string]$Stem){
     if((P12-Query 'p12753_revision') -ne '1'){throw 'P12753 ABI mismatch'}
@@ -1557,11 +1635,18 @@ function P12753-RunAudit([string]$Stem){
         $w=P125-Fields (P12-Query 'p12754_wait')
         if($w.input_seen -ne '1'){throw 'P12754 requires a real touch event this boot before screen OFF'}
         $coolUntil=(Life-Now).AddSeconds($WaitCoolSeconds)
+        $flatAt=Life-Now;$flatExcess=P127543-ThermalExcess $g
+        $uptime=[Math]::Round([double]$s.now/[double]$s.hz,1)
+        Life-Say "P127543 mach uptime $uptime s (metadata, not admission); measured thermal conditions decide"
+        if($uptime -lt 420){Life-Say 'P127543 startup workload may confound this battery window; compare similar boot age'}
         while([int]$g.big -gt 60000 -or [int]$g.lit -gt 59000 -or [int]$g.gpu -gt 60000 -or [int]$g.bat -ge 45 -or [int]$g.bat -le 0 -or [int]$g.big -lt 0 -or [int]$g.lit -lt 0 -or [int]$g.gpu -lt 0 -or [int]$g.age -gt 2000){
             if((Life-Now) -ge $coolUntil){throw 'P12754 cool first: BIG<=60C LITTLE<=59C GPU<=60C battery<45C fresh'}
-            Life-Say 'P127542 waiting for cool screen OFF; no arm'
+            if($script:P12754Revision -eq '4' -and $flatExcess -gt 0 -and [int]$g.big -ge 0 -and [int]$g.lit -ge 0 -and [int]$g.gpu -ge 0 -and [int]$g.age -le 2000 -and [int]$g.bat -gt 0 -and [int]$g.bat -lt 45 -and (Life-Now) -ge $flatAt.AddSeconds(30)){throw 'P127543 thermal plateau before arm; stop rather than extend waiting'}
+            Life-Say 'P127543 waiting for cool screen OFF; no arm'
             P125-PumpOff 5
             $g=P125-Fields (P12-Query 'p12753_guard')
+            $excess=P127543-ThermalExcess $g
+            if($excess -le $flatExcess-500){$flatAt=Life-Now;$flatExcess=$excess}
             $g|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath "$Stem.preflight54.json"
         }
     }
@@ -1574,7 +1659,9 @@ function P12753-RunAudit([string]$Stem){
     if($s.state -ne '1' -or $s.request -ne [string]$code -or $s.arm -eq '0'){throw 'P12753 arm not confirmed; bounded expiry'}
     $cp.Arm=$s.arm
     $cp|Export-Clixml -Depth 12 -LiteralPath "$Stem.audit53-checkpoint.clixml"
-    P125-Offline (95+$seconds)
+    # Revision 4: at most 105s from arm to start if USB removed promptly.
+    $waitBudget=if($P12754 -and $script:P12754Revision -eq '4'){110}else{95}
+    P125-Offline ($waitBudget+$seconds)
     P12753-ReadAudit $Stem $cp
 }
 function P12754-RunHardware([string]$Stem){
@@ -1582,14 +1669,14 @@ function P12754-RunHardware([string]$Stem){
     $cp=[pscustomobject]@{Nonce=(P12-Query 'p1273_boot_identity');Module='HARDWARE54';Request=14;Seconds=60;Arm='0'}
     $prior=P125-Fields (P12-Query 'p12753_status')
     if($prior.state -notin @('0','3')){throw 'P12754 previous audit active'}
-    if($script:P12754Revision -in @('2','3')){
+    if($script:P12754Revision -in @('2','3','4')){
         $ufs=P125-Fields (P12-Query 'p1231_ufs_stats')
         if($ufs.floor_safe -ne '1'){throw 'P127541 UFS ownership not safe'}
         $cp|Add-Member -NotePropertyName UfsBefore -NotePropertyValue $ufs
     }
     try{[void](P12-Query 'p12753_arm' '14')}catch{P12-Query 'p12754_wait'|Set-Content -Encoding UTF8 -LiteralPath "$Stem.wait54.txt";P127541-SaveStats $Stem;throw}
     $s=P125-Fields (P12-Query 'p12753_status')
-    if($s.state -notin @('1','2','3') -or $s.request -ne '14' -or $s.arm -eq '0' -or [uint64]$s.arm -le [uint64]$prior.arm -or (P12-Query 'p1273_boot_identity') -ne $cp.Nonce){throw 'P12754 arm unconfirmed; bounded expiry'}
+    if($s.state -notin @('1','2','3','4') -or $s.request -ne '14' -or $s.arm -eq '0' -or [uint64]$s.arm -le [uint64]$prior.arm -or (P12-Query 'p1273_boot_identity') -ne $cp.Nonce){throw 'P12754 arm unconfirmed; bounded expiry'}
     $cp.Arm=$s.arm;$cp|Export-Clixml -Depth 5 -LiteralPath "$Stem.audit53-checkpoint.clixml"
     $until=(Life-Now).AddSeconds(155)
     while($s.state -ne '3' -and (Life-Now) -lt $until){
@@ -1620,15 +1707,24 @@ function P12753-Compare($A,$B,$C){
     }
     $baseW=($A.mean_discharge_w+$C.mean_discharge_w)/2
     if([Math]::Abs($A.mean_discharge_w-$C.mean_discharge_w) -gt 0.1*$baseW){throw 'P12753 baseline drift >10%; repeat'}
-    [pscustomobject]@{module=$B.module;baseline=$base;A0_W=$A.mean_discharge_w;B_W=$B.mean_discharge_w;A1_W=$C.mean_discharge_w;delta_mW=1000*($baseW-$B.mean_discharge_w);buck3=(P127541-CompareRail $A $B $C);note='Marginal measured difference, not additive or isolated rail power'}
+    $ages=@();$ageNote='Boot maturity metadata unavailable for old reports.'
+    if(@(@($A,$B,$C)|Where-Object {$_.PSObject.Properties['start_uptime_s']}).Count -eq 3){
+        $ages=@($A.start_uptime_s,$B.start_uptime_s,$C.start_uptime_s)
+        $ageNote=if(@($ages|Where-Object {$_ -lt 420}).Count){'Startup-age warning: at least one window before 420s; inspect background workload, no enforced minimum.'}else{'All windows after 420s; late bursts remain possible.'}
+    }
+    [pscustomobject]@{module=$B.module;baseline=$base;A0_W=$A.mean_discharge_w;B_W=$B.mean_discharge_w;A1_W=$C.mean_discharge_w;delta_mW=1000*($baseW-$B.mean_discharge_w);buck3=(P127541-CompareRail $A $B $C);start_uptime_s=$ages;boot_age_note=$ageNote;note='Marginal measured difference, not additive or isolated rail power'}
 }
 function P12753-Options {
+    if($GateModule -eq 'BASE15' -and $Scenario -ne 'IdleAssist543'){throw 'BASE15 only for IdleAssist543'}
+    if($HeadlessNetwork -and ($Scenario -ne 'FunctionalGate' -or $GateModule -notin @('BT','WIFI','TICKER') -or -not $P12754)){throw 'HeadlessNetwork requires P12754 FunctionalGate BT/WIFI/TICKER'}
+    if($Scenario -eq 'IdleAssist543' -and (-not $P12754 -or -not $AllowIdleAssist -or $GateModule -notin @('BASE15','ABOX','BT','WIFI','TICKER','LITTLE949','LITTLE832','LITTLE715','LITTLE598') -or $P12752Idle)){throw 'IdleAssist543 requires explicit qualified single module'}
+    if($AllowIdleAssist -and $Scenario -ne 'IdleAssist543'){throw 'AllowIdleAssist only for IdleAssist543'}
     if($HeadlessAudio -and ($Scenario -ne 'FunctionalGate' -or $GateModule -ne 'ABOX' -or -not $P12754)){throw 'HeadlessAudio requires P12754 FunctionalGate ABOX'}
     if($Scenario -eq 'Foreground542' -and (-not $P12754 -or -not $AllowGpu542 -or $P12752Idle)){throw 'Foreground542 requires P12754 and AllowGpu542'}
     if($WaitCoolSeconds -and ($Scenario -ne 'Audit53' -or -not $P12754)){throw 'WaitCoolSeconds requires P12754 Audit53'}
     if($Scenario -eq 'Hardware54' -and (-not $P12754 -or $P12752Idle)){throw 'Hardware54 requires -P12754, no -P12752Idle'}
     if(($Scenario -eq 'Audit53' -and $Audit53Module -in @('LITTLE832','LITTLE715','LITTLE598')) -or ($Scenario -eq 'FunctionalGate' -and $GateModule -in @('LITTLE832','LITTLE715','LITTLE598'))){
-        if(-not $P12754 -or -not $AllowLowerFloor -or $Audit53Reports.Count -ne 3){throw 'P12754 deeper floor requires prior A/B/A JSON paths and explicit opt-in'}
+        if(-not $P12754 -or -not $AllowLowerFloor -or ($Audit53Reports.Count -ne 3 -and -not $ConnectedFloorReport)){throw 'P12754 deeper floor requires prior A/B/A or connected floor JSON and explicit opt-in'}
     }
     if($Scenario -eq 'Audit53'){
         if($P12754 -and $Audit53Module -eq 'BUS'){throw 'P12754 use Hardware54 connected instead of legacy BUS'}
@@ -1641,9 +1737,47 @@ function P12753-Options {
     }
     if($Scenario -eq 'Audit53Recover' -and (-not $Audit53Checkpoint -or $P12752Idle)){throw 'Audit53Recover requires -Audit53Checkpoint, without -P12752Idle'}
 }
+function P127543-IdleAssist([string]$Stem){
+    P12754-Require
+    if($script:P12754Revision -ne '4'){throw 'IdleAssist543 requires revision 4'}
+    $modes=@{BASE15=1;ABOX=5;BT=257;WIFI=129;TICKER=513;LITTLE949=17;LITTLE832=33;LITTLE715=49;LITTLE598=65}
+    $mode=$modes[$GateModule];$bit=if($mode -eq 1){0}else{P1273-GateBit $mode}
+    $pre=P1273-GateStatus
+    if($pre.phase -ne '0' -or ($mode -ne 1 -and (([int]$pre.qualified -band $bit) -ne $bit))){throw 'IdleAssist543 requires live same-boot qualification (except existing BASE15)'}
+    if((P127-Status).mode -ne '0' -or (P12-Query 'p127543_assist') -ne '0'){throw 'IdleAssist543 prior lease active'}
+    $ufs0=P125-Fields (P12-Query 'p1231_ufs_stats')
+    if($ufs0.floor_safe -ne '1' -or $ufs0.dead -ne '0'){throw 'IdleAssist543 UFS unsafe'}
+    $before=P125-Fields (P12-Query 'p12753_guard')
+    $nonce=P12-Query 'p1273_boot_identity'
+    $status=P125-Fields (P12-Query 'p12753_status')
+    $script:P127543AssistAllowed=$true
+    try{
+        Life-Say "P127543 connected assist $GateModule for $AssistSeconds seconds; keep USB connected and screen OFF. No power measurement."
+        [void](P12-Query 'p127543_assist' "$mode")
+        if((P12-Query 'p127543_assist') -ne "$mode"){throw 'IdleAssist543 arm not verified'}
+        $until=(Life-Now).AddSeconds($AssistSeconds)
+        $rows=@()
+        while((Life-Now) -lt $until){
+            P125-PumpOff 5
+            if((P12-Query 'p127543_assist') -ne "$mode"){throw 'IdleAssist543 lease revoked; do not rearm'}
+            $g=P125-Fields (P12-Query 'p12753_guard')
+            $r=P125-Fields (P12-Query 'p12754_rate')
+            $rows+= [pscustomobject]@{at=$g.at;big_mc=$g.big;lit_mc=$g.lit;gpu_mc=$g.gpu;bat=$g.bat;rate=$r;policy=(P127-Status)}
+            $rows|ConvertTo-Json -Depth 5|Set-Content -Encoding UTF8 -LiteralPath "$Stem.assist543-samples.json"
+        }
+    }finally{
+        [void](P12-Query 'p127543_assist' '0' -Cleanup)
+    }
+    P125-PumpOff 2
+    $after=P125-Fields (P12-Query 'p12753_guard')
+    $ufs1=P125-Fields (P12-Query 'p1231_ufs_stats')
+    $restored=P127-Status
+    if($restored.mode -ne '0' -or (P12-Query 'p127543_assist') -ne '0' -or (P12-Query 'p1273_boot_identity') -ne $nonce -or $ufs1.floor_safe -ne '1' -or $ufs1.read_errors -ne $ufs0.read_errors -or $ufs1.write_errors -ne $ufs0.write_errors){throw 'IdleAssist543 restore/UFS/boot evidence missing'}
+    [pscustomobject]@{version=1;boot=$nonce;module=$GateModule;start_uptime_s=[double]$status.now/[double]$status.hz;before=$before;after=$after;restored=$true;power_verified=$false;note='Connected cooling assistance only. Temperature drift is not causal or net battery power.'}|ConvertTo-Json -Depth 5|Set-Content -Encoding UTF8 -LiteralPath "$Stem.assist543.json"
+}
 function P127542-Foreground([string]$Stem){
     P12754-Require
-    if($script:P12754Revision -ne '3'){throw 'Foreground542 requires revision 3'}
+    if($script:P12754Revision -notin @('3','4')){throw 'Foreground542 requires revision 3 or 4'}
     $guard=P125-Fields (P12-Query 'p12753_guard')
     if([int]$guard.big -gt 60000 -or [int]$guard.lit -gt 59000 -or [int]$guard.gpu -gt 60000 -or [int]$guard.bat -ge 45 -or [int]$guard.bat -le 0 -or [int]$guard.age -gt 2000){throw 'Foreground542 cool first'}
     $nonce=P12-Query 'p1273_boot_identity'
@@ -1686,7 +1820,7 @@ function P125-Run {
         return
     }
     if(-not $Execute){
-        Write-Host 'P12.5 preview: -Execute to measure OFF timer source. Trace=aggregate+detail; UsbCrossover=aggregate+A0/B/A1; OfflineOnly=B; AggregateOnly=aggregate; FrozenSummary=read-only counters; FrozenDump=read-only counters and pages on fixed firmware. Optional P12754 Audit53 -WaitCoolSeconds 0..180. DriverTrials=selective bounded A/B/A without page dumps; default COMBINED. ResumeSnapshot=FrozenDump checkpoint. EnergyTrials=guarded P12.7 A/B/A; EnergyOffline=connected/unplug/reconnect aggregate+WFI+FG. P1273Diagnostics=read-only floor/bus/WFIv2; BusTrace=90s baseline-only ACPM observation. Guard53=read-only boot thermal guard; Audit53=delayed battery window; Audit53Recover=frozen checkpoint; Audit53Compare=local A/B/A; FunctionalGate ABOX -HeadlessAudio=screen-OFF audio review; Foreground542=short connected Baseline/IRQ/G2 test.'
+        Write-Host 'P12.5 preview: -Execute to measure OFF timer source. Trace=aggregate+detail; UsbCrossover=aggregate+A0/B/A1; OfflineOnly=B; AggregateOnly=aggregate; FrozenSummary=read-only counters; FrozenDump=read-only counters and pages on fixed firmware. Optional P12754 Audit53 -WaitCoolSeconds 0..180. DriverTrials=selective bounded A/B/A without page dumps; default COMBINED. ResumeSnapshot=FrozenDump checkpoint. EnergyTrials=guarded P12.7 A/B/A; EnergyOffline=connected/unplug/reconnect aggregate+WFI+FG. P1273Diagnostics=read-only floor/bus/WFIv2; BusTrace=90s baseline-only ACPM observation. Guard53=read-only boot thermal guard; Audit53=delayed battery window; Audit53Recover=frozen checkpoint; Audit53Compare=local A/B/A; FunctionalGate ABOX -HeadlessAudio=screen-OFF audio review; Foreground542=short connected Baseline/IRQ/G2 test; IdleAssist543=qualified connected OFF lease; HeadlessNetwork=external peer verification; ConnectedFloorReport=prior same-boot rail/functional report, not watts.'
         return
     }
     if($env:OS -ne 'Windows_NT'){throw 'Windows serial runner only'}
@@ -1755,10 +1889,14 @@ function P125-Run {
             while($script:LifeState -ne 'OFF' -and (Life-Now) -lt $until){Life-Pump;Life-CheckSafety (Life-Now)}
             if($script:LifeState -ne 'OFF'){throw 'P125 physical screen OFF not observed'}
         }
-        P125-PumpOff 25
-        $g=P12-Query 'g3d_lab_stats'
+        if($P12754 -and $Scenario -in @('FunctionalGate','IdleAssist543')){
+            # Do not burn a fixed 25s if the existing GPU owner already proved OFF.
+            $settle=(Life-Now).AddSeconds(25)
+            do{P125-PumpOff 3;$g=P12-Query 'g3d_lab_stats'}while(($g -notmatch ' domain=0 pll=0 ' -or $g -notmatch ' fault=0 ') -and (Life-Now) -lt $settle)
+        }else{P125-PumpOff 25;$g=P12-Query 'g3d_lab_stats'}
         if($g -notmatch ' domain=0 pll=0 ' -or $g -notmatch ' fault=0 '){throw 'P125 independent GPU OFF evidence missing'}
         if($Scenario -eq 'Hardware54'){P12754-RunHardware $stem;return}
+        if($Scenario -eq 'IdleAssist543'){P127543-IdleAssist $stem;return}
         if($Scenario -eq 'Foreground542'){P127542-Foreground $stem;return}
         if($Scenario -eq 'Audit53'){
             P12753-RunAudit $stem

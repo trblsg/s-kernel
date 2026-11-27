@@ -572,6 +572,10 @@ static unsigned p1273_gate_phase,p1273_gate_mode,p1273_gate_generation,p1273_gat
 static unsigned p1273_gate_qualified,p1273_gate_last_missing;
 static uint64_t p1273_gate_expiry,p1273_gate_lease,p1273_gate_fault_mark;
 static uint64_t p1273_gate_valid_until[13];
+static uint64_t p127543_gate_armed,p127543_gate_wake;
+static unsigned p127543_rail_count,p127543_rail_attempts,p127543_rail_uv[2];
+static uint64_t p127543_rail_at;
+static uint64_t p127543_assist_lease;
 /* One bounded, explicitly requested headless review per gate generation. */
 static int p127542_audio_request,p127542_audio_result;
 static bool p127542_audio_claimed;
@@ -610,6 +614,7 @@ p1273_gate_clear_locked(void)
 {
     __atomic_store_n(&hakios_p1273_gate_watch,0,__ATOMIC_RELEASE);
     p1273_gate_phase=0;p1273_gate_mode=0;p1273_gate_lease=0;p1273_gate_expiry=0;
+    p127543_gate_armed=p127543_gate_wake=0;
     p127542_audio_request=p127542_audio_result=0;p127542_audio_claimed=false;
 }
 static void
@@ -675,7 +680,13 @@ p1273_gate_missing_locked(void)
 #undef D
 #undef A
 #undef R
-    return p1273_gate_missing(p1273_gate_mode,&e);
+    unsigned missing=p1273_gate_missing(p1273_gate_mode,&e);
+    if(p12754_optin() && (p1273_gate_mode==17 || p12754_floor_prereq(p1273_gate_mode)) &&
+       (p127543_rail_count!=2 || p127543_rail_uv[0]<500000u || p127543_rail_uv[0]>1100000u ||
+        p127543_rail_uv[1]<500000u || p127543_rail_uv[1]>1100000u ||
+        (p127543_rail_uv[0]>p127543_rail_uv[1]?p127543_rail_uv[0]-p127543_rail_uv[1]:p127543_rail_uv[1]-p127543_rail_uv[0])>12500u))
+        missing|=p1273_gate_bit(p1273_gate_mode);
+    return missing;
 }
 static int
 p1273_gate_begin_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unused int arg2,struct sysctl_req *req)
@@ -712,6 +723,7 @@ p1273_gate_begin_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__u
     }
     if(p1273_gate_generation>=99999999u){lck_spin_unlock(&p1273_gate_lock);return EOVERFLOW;}
     p1273_gate_generation++;
+    p127543_rail_count=p127543_rail_attempts=0;p127543_rail_uv[0]=p127543_rail_uv[1]=0;p127543_rail_at=0;
     p1273_gate_phase=1;p1273_gate_mode=v;p1273_gate_expiry=now+span;
     p1273_gate_last_missing=512;
     /* Requalification removes the old bit, including dependent combined bits. */
@@ -727,8 +739,45 @@ p1273_gate_stop_ok_locked(void)
     if(__atomic_load_n(&hakios_p1273_last_stop_lease,__ATOMIC_ACQUIRE)!=p1273_gate_lease)return false;
     unsigned reason=__atomic_load_n(&hakios_p1273_last_stop_reason,__ATOMIC_ACQUIRE);
     /* LITTLE qualification must prove wake revokes the live floor lease. */
-    return (p1273_gate_mode==17 || p12754_floor_prereq(p1273_gate_mode))?reason==4:reason==0;
+    if(p1273_gate_mode!=17 && !p12754_floor_prereq(p1273_gate_mode))return reason==0;
+    if(!p12754_optin())return reason==4;
+    uint64_t stop=__atomic_load_n(&hakios_p127543_stop_at,__ATOMIC_ACQUIRE);
+    uint64_t on=p1273_gate_phase==3?p127543_gate_wake:__atomic_load_n(&hakios_p12753_display_on,__ATOMIC_ACQUIRE);
+    uint64_t tolerance=0;nanoseconds_to_absolutetime(2ULL*NSEC_PER_SEC,&tolerance);
+    return stop && on && p127543_floor_wake(reason,p127543_gate_armed,stop,on,tolerance);
 }
+/* Two bounded read-only BUCK3 VSEL samples from the governor, only during
+ * the exact live floor gate. Never perform ACPM I/O under the gate lock. */
+static void p127543_floor_rail_tick(uint64_t now){
+    if(!p12754_optin() || !P127_FLOOR(hakios_p127_mode()))return;
+    lck_spin_lock(&p1273_gate_lock);
+    unsigned mode=p1273_gate_mode,generation=p1273_gate_generation;
+    uint64_t lease=p1273_gate_lease,interval=0;
+    nanoseconds_to_absolutetime(3ULL*NSEC_PER_SEC,&interval);
+    bool eligible=p1273_gate_phase==2 && P127_FLOOR(mode) && lease &&
+        lease==__atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE) && now>=p127543_gate_armed &&
+        now-p127543_gate_armed>=interval && (!p127543_rail_at || now-p127543_rail_at>=interval) &&
+        p127543_rail_count<2 && p127543_rail_attempts<4 &&
+        p12754_rate_at && now>=p12754_rate_at && now-p12754_rate_at<=interval &&
+        p12754_rate_cur==p127_floor_khz(mode) && clusters[0].cur==p12754_rate_cur && p1273_rate_matches(p12754_rate_meas,p12754_rate_cur);
+    if(eligible){p127543_rail_at=now;p127543_rail_attempts++;}
+    lck_spin_unlock(&p1273_gate_lock);
+    if(!eligible || !p127_floor_safe(mode) || hakios_display_requested_on()!=0 || p125_thermal_reason())return;
+    uint8_t v=0;int error=hakios_acpm_pmic_read(HAKIOS_ACPM_PMIC_PMIC,0x23,&v);
+    lck_spin_lock(&p1273_gate_lock);
+    if(!error && v>=32 && v<=128 && p1273_gate_phase==2 && p1273_gate_generation==generation &&
+       lease==__atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE) &&
+       clusters[0].cur==p127_floor_khz(mode) && p127543_rail_count<2)
+        p127543_rail_uv[p127543_rail_count++]=300000u+6250u*v;
+    lck_spin_unlock(&p1273_gate_lock);
+}
+static int p127543_rail_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unused int arg2,struct sysctl_req *req){
+    char buf[160];lck_spin_lock(&p1273_gate_lock);
+    snprintf(buf,sizeof(buf),"version=1 generation=%u count=%u attempts=%u uv0=%u uv1=%u",
+        p1273_gate_generation,p127543_rail_count,p127543_rail_attempts,p127543_rail_uv[0],p127543_rail_uv[1]);
+    lck_spin_unlock(&p1273_gate_lock);return SYSCTL_OUT(req,buf,strlen(buf)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p127543_rail,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p127543_rail_sysctl,"A","P127543 configured BUCK3 VSEL evidence");
 static int
 p1273_gate_review_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unused int arg2,struct sysctl_req *req)
 {
@@ -744,6 +793,7 @@ p1273_gate_review_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__
         !p1273_gate_idle() || !p1273_gate_stop_ok_locked()){
         lck_spin_unlock(&p1273_gate_lock);return EPERM;
     }
+    p127543_gate_wake=__atomic_load_n(&hakios_p12753_display_on,__ATOMIC_ACQUIRE);
     p1273_gate_snapshot(&p1273_gate_post);
     p1273_gate_phase=3;
     lck_spin_unlock(&p1273_gate_lock);
@@ -946,10 +996,20 @@ p127_guard(void)
     if(!reason && P127_FLOOR(mode) && (!gov_running || gov_policy!=2 ||
        clusters[0].online!=4 || clusters[1].online!=4 ||
        hakios_cpu_exit_mask || !hakios_p124_ufs_safe()))reason=6;
+    /* Assist is never an unqualified or silently renewed lease. */
+    if(!reason && __atomic_load_n(&p127543_assist_lease,__ATOMIC_ACQUIRE)==lease){
+        if(__atomic_load_n(&hakios_p12753_usb_down,__ATOMIC_ACQUIRE)>__atomic_load_n(&hakios_p12753_usb_up,__ATOMIC_ACQUIRE))reason=8;
+        lck_spin_lock(&p1273_gate_lock);
+        p1273_gate_refresh_locked(mach_absolute_time());
+        unsigned need=p1273_gate_bit(mode)|p12754_floor_prereq(mode);
+        bool allowed=mode==1 || (need && (p1273_gate_qualified&need)==need);
+        lck_spin_unlock(&p1273_gate_lock);
+        if(!allowed && !reason)reason=11;
+    }
     if(reason)hakios_p127_stop(reason);
 }
 static int
-p127_arm_mode(int v)
+p127_arm_mode_internal(int v,bool assist)
 {
     if(v<0 || v>(int)P127_MASK || P127_FLOOR(v)>5)return EINVAL;
     if(!v){hakios_p127_stop(0);return 0;}
@@ -972,7 +1032,7 @@ p127_arm_mode(int v)
         return EPERM;
     }
     uint64_t span=0,expected=0;
-    nanoseconds_to_absolutetime(((v&(P127_ABOX|P127_PSR|P127_WIFI|P127_BT|P127_TICKER)) || P127_FLOOR(v)?120ULL:420ULL)*NSEC_PER_SEC,&span);
+    nanoseconds_to_absolutetime(((assist || (v&(P127_ABOX|P127_PSR|P127_WIFI|P127_BT|P127_TICKER)) || P127_FLOOR(v))?120ULL:420ULL)*NSEC_PER_SEC,&span);
     const unsigned us[]={100,500,1000,2000,3500,10000,20000,50000};
     for(unsigned i=0;i<8;i++){
         uint64_t ticks=0;
@@ -989,6 +1049,14 @@ p127_arm_mode(int v)
         lck_spin_unlock(&p1273_gate_lock);return EPERM;
     }
     unsigned prior=p12754_floor_prereq((unsigned)v);
+    if(assist){
+        unsigned need=p1273_gate_bit(v)|prior;
+        if((v!=1 && (!need || (p1273_gate_qualified&need)!=need)) || p1273_gate_phase ||
+           __atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE) ||
+           __atomic_load_n(&hakios_p12753_usb_down,__ATOMIC_ACQUIRE)>__atomic_load_n(&hakios_p12753_usb_up,__ATOMIC_ACQUIRE)){
+            lck_spin_unlock(&p1273_gate_lock);return EPERM;
+        }
+    }
     if(p12754_optin() && P127_FLOOR(v)>=2 && (!prior || (p1273_gate_qualified&prior)!=prior ||
        (p1273_gate_phase!=1 && !(p1273_gate_qualified&p1273_gate_bit(v))))){lck_spin_unlock(&p1273_gate_lock);return EPERM;}
     if(p1273_gate_phase && (p1273_gate_phase!=1 || p1273_gate_mode!=(unsigned)v)){
@@ -1005,12 +1073,34 @@ p127_arm_mode(int v)
         if(p1273_gate_phase==1)__atomic_store_n(&hakios_p1273_gate_watch,0,__ATOMIC_RELEASE);
         lck_spin_unlock(&p1273_gate_lock);return EBUSY;
     }
-    if(p1273_gate_phase==1){p1273_gate_lease=next;p1273_gate_phase=2;}
+    if(assist)__atomic_store_n(&p127543_assist_lease,next,__ATOMIC_RELEASE);
+    if(p1273_gate_phase==1){p1273_gate_lease=next;p127543_gate_armed=now;p1273_gate_phase=2;}
     __atomic_store_n(&hakios_p127_reason,0,__ATOMIC_RELEASE);
     lck_spin_unlock(&p1273_gate_lock);
     if(hakios_display_requested_on()!=0){hakios_p127_stop(4);return EPERM;}
     return 0;
 }
+static int p127_arm_mode(int v){return p127_arm_mode_internal(v,false);}
+/* Explicit connected cooldown assistance. Reuse the original single-module
+ * lease, never extend it and never share it with a stock measurement. */
+static int p127543_assist_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unused int arg2,struct sysctl_req *req){
+    uint64_t lease=__atomic_load_n(&p127543_assist_lease,__ATOMIC_ACQUIRE);
+    int v=lease && lease==__atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE)?(int)hakios_p127_mode():0;
+    int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(e || !req->newptr)return e;
+    if(!v){
+        lck_spin_lock(&p1273_gate_lock);
+        if(lease && lease==__atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE))hakios_p127_stop(0);
+        (void)__atomic_compare_exchange_n(&p127543_assist_lease,&lease,0,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);
+        lck_spin_unlock(&p1273_gate_lock);return 0;
+    }
+    if(!p12754_optin() || (v!=1 && v!=5 && v!=17 && v!=33 && v!=49 && v!=65 && v!=129 && v!=257 && v!=513) ||
+       __atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE) ||
+       __atomic_load_n(&hakios_p12753_usb_down,__ATOMIC_ACQUIRE)>__atomic_load_n(&hakios_p12753_usb_up,__ATOMIC_ACQUIRE) ||
+       hakios_display_requested_on()!=0)return EPERM;
+    return p127_arm_mode_internal(v,true);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p127543_assist,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p127543_assist_sysctl,"I","P127543 qualified connected idle assist");
 static int
 p127_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     __unused int arg2,struct sysctl_req *req)
@@ -1100,7 +1190,7 @@ p127_status_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     p127_guard();
     char buf[320];unsigned mode=hakios_p127_mode();
     snprintf(buf,sizeof(buf),"version=1 mode=%u reason=%u lease_s=%u little_request=%u little_cur=%u ufs_safe=%u ufs_busy=%u floor_hits=%llu floor_bypass=%llu",
-        mode,__atomic_load_n(&hakios_p127_reason,__ATOMIC_ACQUIRE),((mode&(P127_ABOX|P127_PSR|P127_WIFI|P127_BT|P127_TICKER)) || P127_FLOOR(mode))?120u:420u,p127_floor_khz(mode),clusters[0].cur,
+        mode,__atomic_load_n(&hakios_p127_reason,__ATOMIC_ACQUIRE),((mode && __atomic_load_n(&p127543_assist_lease,__ATOMIC_ACQUIRE)==__atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE)) || (mode&(P127_ABOX|P127_PSR|P127_WIFI|P127_BT|P127_TICKER)) || P127_FLOOR(mode))?120u:420u,p127_floor_khz(mode),clusters[0].cur,
         hakios_p124_ufs_safe()?1u:0u,hakios_p124_ufs_busy()?1u:0u,
         (unsigned long long)__atomic_load_n(&hakios_p127_floor[0],__ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&hakios_p127_floor[1],__ATOMIC_RELAXED));
