@@ -128,7 +128,13 @@ function P12-ReplyShape([string]$Name,[string]$Reply,[bool]$Mixed){
         '^p12751_revision$' {return ($Reply -ceq '1')}
         '^p12752_revision$' {return ($Reply -ceq '1')}
         '^p12753_revision$' {return ($Reply -ceq '1')}
-        '^p12754_revision$' {return ($Reply -ceq '1')}
+        '^p12754_revision$' {return ($Reply -cmatch '^[12]$')}
+        '^p1231_ufs_stats$' {return ($Reply -cmatch "^version=1 nufs=[01] switched=[01] step=$dec selftest=-?$dec fences=-?$dec dead=[01] loader_core_taken=[01] loader_gone=[01] floor_safe=[01] native_reads=$dec loader_reads=$dec read_errors=$dec writes=$dec write_errors=$dec refused=$dec write_busy=[01] native_inflight=$dec native_read_calls=$dec native_read_wall_us=$dec native_write_calls=$dec native_write_wall_us=$dec write_refused=$dec$")}
+        '^p127541_stats$' {
+            $shape="^version=1 skips=$dec"
+            for($i=0;$i -lt 12;$i++){$bit=1 -shl $i;$shape+=" n$bit=$dec t$bit=$dec"}
+            return ($Reply -cmatch ($shape+'$'))
+        }
         '^p12754_rate$' {return ($Reply -cmatch "^version=1 fresh=[01] cur=$dec meas=$dec$")}
         '^p12754_wait$' {return ($Reply -cmatch "^version=1 enabled=[01] preflight=$dec wait=$dec seen=$dec quiet_ticks=$dec input_seen=[01] fingers=$dec$")}
         '^p12753_guard$' {return ($Reply -cmatch "^version=1 enabled=[01] at=$dec mask=$dec big=-?$dec lit=-?$dec gpu=-?$dec bat=-?$dec age=$dec slope=-?$dec bcap=$dec lcap=$dec peak_big=-?$dec peak_lit=-?$dec changes=$dec$")}
@@ -275,7 +281,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup){
     }
     if($script:P12752IdleAllowed -or $script:P1274HostEnabled){$allowed+=@('p12751_boot_latch','p12752_revision','p12752_eligibility','p12752_idle_mode','p12752_idle_info','p12752_idle_select','p12752_idle_page','p12752_profile')}
     if($script:P12753HostEnabled){$allowed+=@('p12753_revision','p12753_guard','p12753_status','p12753_arm','p12753_select','p12753_page')}
-    if($script:P12754HostEnabled){$allowed+=@('p12754_revision','p12754_wait','p12754_rate')}
+    if($script:P12754HostEnabled){$allowed+=@('p12754_revision','p12754_wait','p12754_rate','p127541_stats','p1231_ufs_stats')}
     if($Name -notin $allowed){throw "P12 sysctl disallowed $Name"}
     if($script:P124HostEnabled -and $Name -eq 'p1231_hash_mode' -and $Value -eq '1'){throw 'P12.4 rejects scalar thermal trial'}
     if($Value -ne '' -and -not (

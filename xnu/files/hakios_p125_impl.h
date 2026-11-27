@@ -13,7 +13,7 @@ uint64_t hakios_p125_lease, hakios_p125_start, hakios_p125_end;
 uint32_t hakios_p125_stop_reason;
 uint32_t hakios_p12753_busy,hakios_p12753_observe;
 uint32_t hakios_p12754_hw_observe,hakios_p12754_mfc_first=UINT32_MAX,hakios_p12754_mfc_state,hakios_p12754_cam_first=UINT32_MAX,hakios_p12754_cam_state;
-uint32_t hakios_p12754_audio[10];
+uint32_t hakios_p12754_audio[11];
 uint64_t hakios_p12754_audio_at;
 uint64_t hakios_p12753_fg_link,hakios_p12753_usb_down,hakios_p12753_usb_up,hakios_p12753_display_on;
 uint64_t hakios_p125_usb_down_at,hakios_p125_usb_up_at;

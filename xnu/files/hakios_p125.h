@@ -47,7 +47,7 @@ extern uint32_t hakios_p125_stop_reason;
 extern uint32_t hakios_p12753_busy,hakios_p12753_observe;
 /* P12754 driver-owned cached evidence, never a power-control interface. */
 extern uint32_t hakios_p12754_hw_observe,hakios_p12754_mfc_first,hakios_p12754_mfc_state,hakios_p12754_cam_first,hakios_p12754_cam_state;
-extern uint32_t hakios_p12754_audio[10];
+extern uint32_t hakios_p12754_audio[11];
 extern uint64_t hakios_p12754_audio_at;
 extern uint64_t hakios_p12753_fg_link,hakios_p12753_usb_down,hakios_p12753_usb_up,hakios_p12753_display_on;
 extern uint64_t hakios_p125_usb_down_at,hakios_p125_usb_up_at;

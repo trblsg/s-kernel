@@ -1343,9 +1343,52 @@ function P12754-PriorFloor([string]$Module){
     if(-not $r[1].PSObject.Properties['rail_verified'] -or -not $r[1].rail_verified){throw 'P12754 prior floor lacks BUCK3 evidence'}
 }
 function P12754-Require {
-    if((P12-Query 'p12754_revision') -ne '1'){throw 'P12754 ABI mismatch'}
+    $script:P12754Revision=P12-Query 'p12754_revision'
+    if($script:P12754Revision -notin @('1','2')){throw 'P12754 ABI mismatch'}
     $w=P125-Fields (P12-Query 'p12754_wait')
     if($w.enabled -ne '1'){throw 'P12754 boot opt-in missing'}
+}
+function P127541-SaveStats([string]$Stem){
+    if($script:P12754Revision -ne '2'){return}
+    try{
+        $raw=P12-Query 'p127541_stats'
+        $raw|Set-Content -Encoding UTF8 -LiteralPath "$Stem.wait541.txt"
+    }catch{
+        Life-Say "P127541 blocker stats unavailable: $($_.Exception.Message); continue frozen evidence"
+        $_.Exception.Message|Set-Content -Encoding UTF8 -LiteralPath "$Stem.wait541-error.txt"
+    }
+}
+function P127541-UfsBracket([string]$Stem,$CP){
+    if($script:P12754Revision -ne '2'){return}
+    # Not an exact audit interval: host snapshots bracket WAIT and capture.
+    # On recovery the after snapshot can be delayed. No claim of caller attribution.
+    if(-not $CP.PSObject.Properties['UfsBefore']){return}
+    try{
+        $after=P125-Fields (P12-Query 'p1231_ufs_stats')
+        $delta=[ordered]@{}
+        foreach($k in @('native_reads','writes','native_read_calls','native_write_calls','native_read_wall_us','native_write_wall_us','read_errors','write_errors','refused','write_refused')){
+            if([uint64]$after[$k] -lt [uint64]$CP.UfsBefore[$k]){throw 'P127541 UFS counter reset; bracket invalid'}
+            $delta[$k]=[uint64]$after[$k]-[uint64]$CP.UfsBefore[$k]
+        }
+        [pscustomobject]@{version=1;valid=$true;boot=$CP.Nonce;arm=$CP.Arm;before=$CP.UfsBefore;after=$after;delta=$delta;note='Host bracket includes WAIT/setup/recovery delay; UFS wall times are not CPU time or originating process.'}|ConvertTo-Json -Depth 6|Set-Content -Encoding UTF8 -LiteralPath "$Stem.ufs541.json"
+    }catch{
+        [pscustomobject]@{version=1;valid=$false;boot=$CP.Nonce;arm=$CP.Arm;note=$_.Exception.Message}|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath "$Stem.ufs541.json"
+        Life-Say 'P127541 UFS bracket unavailable; continue frozen evidence'
+    }
+}
+function P127541-HardwareCoverage($Rows){
+    $samples=@($Rows|Where-Object kind -eq '1')
+    $hw=@($Rows|Where-Object kind -eq '2')
+    $get=@($hw|Where-Object {[int]$_.index -lt 13})
+    $direct=@($hw|Where-Object {[int]$_.index -ge 100 -and [int]$_.index -le 109})
+    $indices=@($hw|ForEach-Object {[int]$_.index})
+    $required=@(100..109)+@(0..12)
+    $missing=@($required|Where-Object {$_ -notin $indices})
+    $unknown=@($indices|Where-Object {$_ -notin $required})
+    $paired=$samples.Count -eq $hw.Count
+    if($paired){for($i=0;$i -lt $samples.Count;$i++){if($samples[$i].at -ne $hw[$i].at){$paired=$false;break}}}
+    $bad=@($samples|Where-Object {$_.policy -ne '0' -or $_.driver -ne '0' -or $_.mask -ne '0' -or $_.valid -ne '1'})
+    return [pscustomobject]@{complete=($missing.Count -eq 0 -and $unknown.Count -eq 0 -and $get.Count -eq 13 -and $paired -and $bad.Count -eq 0);missing=$missing;unknown=$unknown;paired=[bool]$paired;thermal_rows=$samples.Count;direct_attempted=@($direct|ForEach-Object {$_.index}|Select-Object -Unique).Count;get_attempted=$get.Count;get_valid=@($get|Where-Object valid -eq '1').Count}
 }
 function P12754-ExportHardware([string]$Stem,$Rows){
     $names=@('MIF','INT','CPUCL0','CPUCL1','G3D','INTCAM','FSYS0','CAM','DISP','AUD','IVA','SCORE','CP')
@@ -1358,7 +1401,7 @@ function P12754-ExportHardware([string]$Stem,$Rows){
             $isRail=$i -ge 103;$isMif=$i -eq 100
             [pscustomobject][ordered]@{at=$r.at;source=if($isRail){'S2MPS18_CONFIG'}else{'CMU_REGISTER'};name=@('MIF_PLL','MFC_BUS','ISPPRE_BUS','BUCK2_BIG','BUCK3_LITTLE','BUCK6_G3D')[$i-100];valid=$r.valid;errno=$r.errno;word0=if(-not $isRail){$r.raw}else{$null};word1=$null;word2=$null;word3=$null;rate_khz=$null;pll_khz=if($isMif -and $r.valid -eq '1'){$r.refresh}else{$null};mux=if($isMif){$r.bkhz}elseif(-not $isRail){$r.raw}else{$null};divider=if($isMif){$r.lkhz}elseif(-not $isRail){$r.bkhz}else{$null};busd=if($isMif){$r.bmeas}else{$null};switch_mux=if($isMif){$r.lmeas}else{$null};gate=if(-not $isRail -and -not $isMif){$r.lkhz}else{$null};ctrl=if($isRail){$r.raw}else{$null};vsel=if($isRail){$r.bkhz}else{$null};ctrl_errno=if($isRail){$r.lkhz}else{$null};vsel_errno=if($isRail){$r.bmeas}else{$null};configured_uv=if($isRail -and $r.opp_valid -eq '1'){$r.opp_uv}else{$null};cache_age_ms=$null;aux0=$null;aux1=$null;aux2=$null;aux3=$null;aux4=$null}
         }elseif($i -ge 106 -and $i -le 109){
-            [pscustomobject][ordered]@{at=$r.at;source='DRIVER_CACHE';name=@('AUD_CLOCK','ABOX_DMA','MFC_OWNER','ISPPRE_OWNER')[$i-106];valid=$r.valid;errno=$r.errno;word0=$null;word1=$null;word2=$null;word3=$null;rate_khz=$null;pll_khz=$null;mux=$null;divider=$null;busd=$null;switch_mux=$null;gate=$null;ctrl=$null;vsel=$null;ctrl_errno=$null;vsel_errno=$null;configured_uv=$null;cache_age_ms=if($i -lt 108){$r.age}else{$null};aux0=$r.raw;aux1=$r.bkhz;aux2=$r.lkhz;aux3=$r.bmeas;aux4=$r.lmeas}
+            [pscustomobject][ordered]@{at=$r.at;source='DRIVER_CACHE';name=@('AUD_CLOCK','ABOX_DMA','MFC_OWNER','ISPPRE_OWNER')[$i-106];valid=$r.valid;errno=$r.errno;word0=$null;word1=$null;word2=$null;word3=$null;rate_khz=if($i -eq 106 -and $r.valid -eq '1' -and [uint64]$r.refresh -gt 0){$r.refresh}else{$null};pll_khz=$null;mux=$null;divider=$null;busd=$null;switch_mux=$null;gate=$null;ctrl=$null;vsel=$null;ctrl_errno=$null;vsel_errno=$null;configured_uv=$null;cache_age_ms=if($i -lt 108){$r.age}else{$null};aux0=$r.raw;aux1=$r.bkhz;aux2=$r.lkhz;aux3=$r.bmeas;aux4=$r.lmeas}
         }
     })
     if($out.Count){$out|Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath "$Stem.hardware54.csv"}
@@ -1372,7 +1415,8 @@ function P12753-ReadAudit([string]$Stem,$CP){
     $out="$Stem.audit53-power.json"
     $note=if([uint64]$s.start -eq 0){'Aborted before measurement; no samples to recover'}else{'Frozen readback incomplete'}
     [pscustomobject]@{version=1;power_verified=$false;module=$CP.Module;reason=$s.reason;stop_mask=$s.mask;note=$note}|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath $out
-    if($P12754){P12754-Require;P12-Query 'p12754_wait'|Set-Content -Encoding UTF8 -LiteralPath "$Stem.wait54.txt"}
+    if($P12754){P12754-Require;P12-Query 'p12754_wait'|Set-Content -Encoding UTF8 -LiteralPath "$Stem.wait54.txt";P127541-SaveStats $Stem}
+    if($CP.Module -eq 'HARDWARE54' -and $P12754){P127541-UfsBracket $Stem $CP}
     if([uint64]$s.start -eq 0){throw "P12753 never entered measurement: reason=$($s.reason) mask=$($s.mask); no samples to recover"}
     $rows=@()
     for($i=0;$i -lt [int]$s.count;$i++){
@@ -1390,11 +1434,11 @@ function P12753-ReadAudit([string]$Stem,$CP){
     if($P12754){P12754-ExportHardware $Stem $rows}
     if($CP.Module -eq 'HARDWARE54'){
         P12754-FrozenIdentity $s $CP
-        if($s.reason -ne '10' -or $s.mask -ne '0' -or $s.drops -ne '0'){throw 'P12754 hardware audit interrupted; partial evidence retained'}
-        $samples=@($rows|Where-Object {$_.kind -eq '1'})
-        $get=@($rows|Where-Object {$_.kind -eq '2' -and [int]$_.index -lt 13})
-        if($samples.Count -lt 24 -or $get.Count -ne 13 -or @($get.index|Select-Object -Unique).Count -ne 13 -or @($samples|Where-Object {$_.policy -ne '0' -or $_.driver -ne '0' -or $_.mask -ne '0' -or $_.valid -ne '1'}).Count){throw 'P12754 hardware audit incomplete or policy changed'}
-        [pscustomobject]@{version=1;power_verified=$false;diagnostic=$true;module=$CP.Module;boot=$CP.Nonce;start=$s.start;end=$s.end;reason=$s.reason;get_attempted=$get.Count;get_valid=@($get|Where-Object valid -eq '1').Count;thermal_rows=$samples.Count;note='Connected hardware audit complete, not battery power. INT/DISP downstream rate not decoded; unavailable is not zero.'}|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath $out
+        $coverage=P127541-HardwareCoverage $rows
+        $complete=$s.reason -eq '10' -and $s.mask -eq '0' -and $s.drops -eq '0' -and $coverage.complete
+        if($script:P12754Revision -eq '1' -and $coverage.thermal_rows -lt 24){$complete=$false}
+        [pscustomobject]@{version=1;power_verified=$false;diagnostic=$true;diagnostic_complete=[bool]$complete;module=$CP.Module;boot=$CP.Nonce;start=$s.start;end=$s.end;reason=$s.reason;stop_mask=$s.mask;coverage=$coverage;get_attempted=$coverage.get_attempted;get_valid=$coverage.get_valid;thermal_rows=$coverage.thermal_rows;note='Connected hardware audit, not battery power. INT/DISP downstream rate not decoded; unavailable is not zero.'}|ConvertTo-Json -Depth 5|Set-Content -Encoding UTF8 -LiteralPath $out
+        if(-not $complete){throw 'P12754 hardware audit incomplete; partial evidence and coverage retained'}
         $script:P125Report.Add('P12754 connected hardware audit complete; raw registers and VSEL, not battery power; unsupported clock paths remain unavailable')
         Life-Say 'P12754 hardware audit complete (diagnostic only)';return
     }
@@ -1437,6 +1481,8 @@ function P12753-ReadAudit([string]$Stem,$CP){
     }
     $rail=@($rows|Where-Object {$_.kind -eq '2' -and [int]$_.index -eq 104})
     $railVerified=$rail.Count -eq 2 -and @($rail|Where-Object {$_.valid -eq '1' -and $_.opp_valid -eq '1'}).Count -eq 2
+    $railValues=@($rail|Where-Object {$_.valid -eq '1' -and $_.opp_valid -eq '1'}|ForEach-Object {[uint64]$_.opp_uv})
+    $aboxEvidence=[ordered]@{stop=(P12753-Diff $a.Metrics $m 'abox_stop');resume=(P12753-Diff $a.Metrics $m 'abox_resume');idle_wait=(P12753-Diff $a.Metrics $m 'abox_idle_wait');fault=(P12753-Diff $a.Metrics $m 'abox_fault')}
     if($P12754 -and $CP.Module -match '^LITTLE(949|832|715|598)$'){
         $target=[int]$Matches[1];$thermal=@($rows|Where-Object {$_.kind -eq '1'})
         $matched=@($thermal|Where-Object {[int]$_.lkhz -eq 1000*$target -and [Math]::Abs([double]$_.lmeas-$target) -le .03*$target})
@@ -1452,7 +1498,7 @@ function P12753-ReadAudit([string]$Stem,$CP){
     if($bus.Count){$bus|Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath "$Stem.audit53-bus.csv"}
     $summary.power_verified=$summary.power_verified -and $restore -and $t.Status.reason -eq '10' -and ((P12-Query 'p1273_boot_identity') -eq $CP.Nonce)
     if(-not $summary.power_verified){$summary.mean_discharge_w=$null;$summary.discharge_wh=$null}
-    $extra=[ordered]@{boot=$CP.Nonce;module=$CP.Module;request=$s.request;arm=$s.arm;start=$s.start;end=$s.end;policy=$s.policy;reason=$s.reason;stop_mask=$s.mask;applied=[bool]$applied;restored=[bool]$restore;driver_hits=$hits;bus_attempted=$bus.Count;bus_valid=@($bus|Where-Object {$null -ne $_.rate_khz}).Count;diagnostic=$CP.Module -eq 'BUS';rail_verified=[bool]$railVerified;note='Battery only, no extrapolation; driver deltas include setup/restore; sampled residency, not rail power'}
+    $extra=[ordered]@{boot=$CP.Nonce;module=$CP.Module;request=$s.request;arm=$s.arm;start=$s.start;end=$s.end;policy=$s.policy;reason=$s.reason;stop_mask=$s.mask;applied=[bool]$applied;restored=[bool]$restore;driver_hits=$hits;bus_attempted=$bus.Count;bus_valid=@($bus|Where-Object {$null -ne $_.rate_khz}).Count;diagnostic=$CP.Module -eq 'BUS';rail_verified=[bool]$railVerified;buck3_configured_uv=$railValues;abox_evidence=$aboxEvidence;note='Battery only, no extrapolation; driver deltas include setup/restore; sampled residency, not rail power'}
     foreach($k in $extra.Keys){$summary|Add-Member -NotePropertyName $k -NotePropertyValue $extra[$k]}
     $summary|ConvertTo-Json -Depth 6|Set-Content -Encoding UTF8 -LiteralPath $out
     Life-Say "P12753 $($CP.Module) verified=$($summary.power_verified) applied=$applied restored=$restore mean_W=$($summary.mean_discharge_w)"
@@ -1486,9 +1532,16 @@ function P12753-RunAudit([string]$Stem){
 function P12754-RunHardware([string]$Stem){
     P12754-Require
     $cp=[pscustomobject]@{Nonce=(P12-Query 'p1273_boot_identity');Module='HARDWARE54';Request=14;Seconds=60;Arm='0'}
-    try{[void](P12-Query 'p12753_arm' '14')}catch{P12-Query 'p12754_wait'|Set-Content -Encoding UTF8 -LiteralPath "$Stem.wait54.txt";throw}
+    $prior=P125-Fields (P12-Query 'p12753_status')
+    if($prior.state -notin @('0','3')){throw 'P12754 previous audit active'}
+    if($script:P12754Revision -eq '2'){
+        $ufs=P125-Fields (P12-Query 'p1231_ufs_stats')
+        if($ufs.floor_safe -ne '1'){throw 'P127541 UFS ownership not safe'}
+        $cp|Add-Member -NotePropertyName UfsBefore -NotePropertyValue $ufs
+    }
+    try{[void](P12-Query 'p12753_arm' '14')}catch{P12-Query 'p12754_wait'|Set-Content -Encoding UTF8 -LiteralPath "$Stem.wait54.txt";P127541-SaveStats $Stem;throw}
     $s=P125-Fields (P12-Query 'p12753_status')
-    if($s.state -ne '1' -or $s.request -ne '14' -or $s.arm -eq '0'){throw 'P12754 arm unconfirmed; bounded expiry'}
+    if($s.state -notin @('1','2','3') -or $s.request -ne '14' -or $s.arm -eq '0' -or [uint64]$s.arm -le [uint64]$prior.arm -or (P12-Query 'p1273_boot_identity') -ne $cp.Nonce){throw 'P12754 arm unconfirmed; bounded expiry'}
     $cp.Arm=$s.arm;$cp|Export-Clixml -Depth 5 -LiteralPath "$Stem.audit53-checkpoint.clixml"
     $until=(Life-Now).AddSeconds(155)
     while($s.state -ne '3' -and (Life-Now) -lt $until){
@@ -1497,6 +1550,16 @@ function P12754-RunHardware([string]$Stem){
         if($s.arm -ne $cp.Arm -or $s.request -ne '14'){throw 'P12754 phase identity changed'}
     }
     P12753-ReadAudit $Stem $cp
+}
+function P127541-CompareRail($A,$B,$C){
+    foreach($r in @($A,$B,$C)){
+        if(-not $r.PSObject.Properties['buck3_configured_uv'] -or -not $r.PSObject.Properties['rail_verified'] -or -not $r.rail_verified -or @($r.buck3_configured_uv).Count -ne 2){return $null}
+        if(@($r.buck3_configured_uv|Where-Object {$_ -le 0}).Count){return $null}
+    }
+    $base=@($A.buck3_configured_uv)+@($C.buck3_configured_uv)
+    $minBase=($base|Measure-Object -Minimum).Minimum
+    $maxB=($B.buck3_configured_uv|Measure-Object -Maximum).Maximum
+    return [pscustomobject]@{A0_uv=@($A.buck3_configured_uv);B_uv=@($B.buck3_configured_uv);A1_uv=@($C.buck3_configured_uv);all_B_below_baseline=[bool]($maxB -lt $minBase);delta_configured_uv=($base|Measure-Object -Average).Average-($B.buck3_configured_uv|Measure-Object -Average).Average;note='Two configured VSEL samples per window; not rail power or voltage at pins.'}
 }
 function P12753-Compare($A,$B,$C){
     foreach($r in @($A,$B,$C)){
@@ -1509,7 +1572,7 @@ function P12753-Compare($A,$B,$C){
     }
     $baseW=($A.mean_discharge_w+$C.mean_discharge_w)/2
     if([Math]::Abs($A.mean_discharge_w-$C.mean_discharge_w) -gt 0.1*$baseW){throw 'P12753 baseline drift >10%; repeat'}
-    [pscustomobject]@{module=$B.module;baseline=$base;A0_W=$A.mean_discharge_w;B_W=$B.mean_discharge_w;A1_W=$C.mean_discharge_w;delta_mW=1000*($baseW-$B.mean_discharge_w);note='Marginal measured difference, not additive or isolated rail power'}
+    [pscustomobject]@{module=$B.module;baseline=$base;A0_W=$A.mean_discharge_w;B_W=$B.mean_discharge_w;A1_W=$C.mean_discharge_w;delta_mW=1000*($baseW-$B.mean_discharge_w);buck3=(P127541-CompareRail $A $B $C);note='Marginal measured difference, not additive or isolated rail power'}
 }
 function P12753-Options {
     if($Scenario -eq 'Hardware54' -and (-not $P12754 -or $P12752Idle)){throw 'Hardware54 requires -P12754, no -P12752Idle'}

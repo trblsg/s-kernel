@@ -22,6 +22,8 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 #define P53_CONFLICT 512u
 #define P53_TIMEOUT 1024u
 #define P53_CANCEL 2048u
+/* Connected diagnostic only: distinguish transient storage from ownership. */
+#define P53_HW_UFS 4096u
 static LCK_GRP_DECLARE(p12753_group,"p12753");
 static LCK_SPIN_DECLARE(p12753_lock,&p12753_group);
 static unsigned p12753_state,p12753_request,p12753_select,p12753_reason,p12753_mask,p12753_count,p12753_drops,p12753_bus;
@@ -38,7 +40,9 @@ static unsigned p12754_wait_mask,p12754_wait_seen,p12754_preflight,p12754_hw_ste
 static uint64_t p12754_quiet_max;
 static vm_offset_t p12754_mif,p12754_top;
 static bool p12754_cmu_mapped;
-static int p12754_revision=1;
+static unsigned p127541_events[12],p127541_skips;
+static uint64_t p127541_ticks[12],p127541_note_at,p127541_busy_at;
+static int p12754_revision=2;
 SYSCTL_INT(_kern_hakios,OID_AUTO,p12754_revision,CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,&p12754_revision,0,"P12754 extension ABI");
 static int p12753_revision=1;
 SYSCTL_INT(_kern_hakios,OID_AUTO,p12753_revision,CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,&p12753_revision,0,"P12753 ABI");
@@ -182,6 +186,13 @@ static void p12753_sample(struct p12753_row *r,uint64_t now){
  * Record the last blocker, union of blockers and longest quiet interval. */
 static void p12754_wait_note(unsigned mask,uint64_t now){
     lck_spin_lock(&p12753_lock);
+    uint64_t elapsed=p127541_note_at && now>=p127541_note_at?now-p127541_note_at:0;
+    for(unsigned i=0;i<12;i++){
+        unsigned bit=1u<<i;
+        if(p12754_wait_mask&bit)p127541_ticks[i]+=elapsed;
+        if((mask&bit) && !(p12754_wait_mask&bit))p127541_events[i]++;
+    }
+    p127541_note_at=now;
     p12754_wait_mask=mask;p12754_wait_seen|=mask;
     if(p12753_quiet && now>=p12753_quiet && now-p12753_quiet>p12754_quiet_max)
         p12754_quiet_max=now-p12753_quiet;
@@ -197,6 +208,21 @@ static int p12754_wait_sysctl(__unused struct sysctl_oid *o,__unused void *a,__u
     lck_spin_unlock(&p12753_lock);return SYSCTL_OUT(req,buf,strlen(buf)+1);
 }
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p12754_wait,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p12754_wait_sysctl,"A","P12754 WAIT blockers and arm preflight");
+
+/* Counts are rising edges; ticks are time in the previous sampled blocker.
+ * Frozen on finish, separate from original WAIT and stop ABI. */
+static int p127541_stats_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
+    char buf[768];size_t n;
+    lck_spin_lock(&p12753_lock);
+    n=(size_t)snprintf(buf,sizeof(buf),"version=1 skips=%u",p127541_skips);
+    for(unsigned i=0;i<12 && n<sizeof(buf);i++){
+        int k=snprintf(buf+n,sizeof(buf)-n," n%u=%u t%u=%llu",1u<<i,p127541_events[i],1u<<i,(unsigned long long)p127541_ticks[i]);
+        if(k<0 || (size_t)k>=sizeof(buf)-n){lck_spin_unlock(&p12753_lock);return EOVERFLOW;}
+        n+=(size_t)k;
+    }
+    lck_spin_unlock(&p12753_lock);return SYSCTL_OUT(req,buf,n+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p127541_stats,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p127541_stats_sysctl,"A","P127541 sampled blocker counts and ticks");
 
 static int p12754_rate_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
     char buf[160];uint64_t now=mach_absolute_time();
@@ -236,11 +262,13 @@ static void p12754_hw_row(unsigned index,uint64_t now){
         uint64_t at=__atomic_load_n(&hakios_p12754_audio_at,__ATOMIC_ACQUIRE);
         uint32_t v[5];unsigned off=(index-106)*5;
         for(unsigned i=0;i<5;i++)v[i]=__atomic_load_n(&hakios_p12754_audio[off+i],__ATOMIC_RELAXED);
+        uint32_t aud_khz=__atomic_load_n(&hakios_p12754_audio[10],__ATOMIC_RELAXED);
         uint64_t again=__atomic_load_n(&hakios_p12754_audio_at,__ATOMIC_ACQUIRE);
         br.raw=v[0];br.bkhz=v[1];br.lkhz=v[2];br.bmeas=v[3];br.lmeas=v[4];
         br.valid=at && at==again && now>=at && now-at<=p1274_ticks_ms(5000);
         uint64_t ms=p1274_ticks_ms(1);
         br.age=br.valid && ms?(uint32_t)((now-at)/ms):UINT32_MAX;
+        if(br.valid && index==106)br.refresh=aud_khz;
         if(!br.valid)br.error=EAGAIN;
     }else if(index==108 || index==109){
         br.raw=__atomic_load_n(index==108?&hakios_p12754_mfc_first:&hakios_p12754_cam_first,__ATOMIC_ACQUIRE);
@@ -269,6 +297,8 @@ static void p12754_hw_row(unsigned index,uint64_t now){
     br.latency=mach_absolute_time()-t;p12753_append(&br);
 }
 static void p12753_finish(unsigned reason,unsigned mask,uint64_t now,const struct p12753_row *r){
+    /* Account for the final sampled interval without changing last WAIT mask. */
+    p12754_wait_note(p12754_wait_mask,now);
     uint64_t end=reason==10?p12753_until:now;
     uint64_t lease=p12753_lease;
     /* Only release the lease we actually acquired. No reset of counters. */
@@ -305,6 +335,8 @@ static int p12753_arm_sysctl(__unused struct sysctl_oid *o,__unused void *a,__un
         if(p12754_preflight){lck_spin_unlock(&p12753_lock);return EPERM;}
     }
     p12754_wait_mask=p12754_wait_seen=p12754_hw_step=0;p12754_quiet_max=0;
+    p127541_skips=0;p127541_note_at=p127541_busy_at=0;
+    bzero(p127541_events,sizeof(p127541_events));bzero(p127541_ticks,sizeof(p127541_ticks));
     p12753_request=(unsigned)v;p12753_arm_at=now;p12753_wait_until=now+p1274_ticks_ms(90000);
     p12753_quiet=p12753_start=p12753_end=p12753_until=p12753_down=p12753_on=p12753_last=p12753_bus_last=p12753_lease=p12753_policy_lease=0;
     p12753_reason=p12753_mask=p12753_count=p12753_drops=p12753_bus=p12753_select=0;
@@ -355,12 +387,13 @@ static void p12753_audit_tick(uint64_t now){
             !r.mask && !headroom && r.bs+r.ls<150u && !hakios_p124_ufs_busy() && hakios_p123_input_quiet(now));
         if(!quiet || (p12753_quiet && on>=p12753_quiet)){p12753_quiet=0;return;}
         if(!p12753_quiet){p12753_quiet=now;return;}
-        if(now-p12753_quiet<p1274_ticks_ms(20000))return;
+        /* Read-only connected audit qualifies quickly; battery WAIT unchanged. */
+        if(now-p12753_quiet<p1274_ticks_ms(connected?1000:20000))return;
         if(connected){
             /* Connected observation owns only the recorder, no policy or P125 lease. */
             lck_spin_lock(&p12753_lock);
             p12753_start=now;p12753_until=now+p1274_ticks_ms(60000);
-            p12753_down=down;p12753_on=on;p12753_state=2;
+            p12753_down=down;p12753_on=on;p12753_state=2;p12753_quiet=0;
             __atomic_store_n(&hakios_p12754_audio_at,0,__ATOMIC_RELEASE);
             __atomic_store_n(&hakios_p12754_hw_observe,1,__ATOMIC_RELEASE);
             lck_spin_unlock(&p12753_lock);return;
@@ -405,7 +438,7 @@ static void p12753_audit_tick(uint64_t now){
             p12753_finish(6,P53_CONFLICT,start,&r);return;
         }
         lck_spin_lock(&p12753_lock);
-        p12753_lease=lease;p12753_start=start;p12753_until=until;p12753_down=down;p12753_on=on;p12753_state=2;
+        p12753_lease=lease;p12753_start=start;p12753_until=until;p12753_down=down;p12753_on=on;p12753_state=2;p12753_quiet=0;
         lck_spin_unlock(&p12753_lock);
         say("p12753-audit: measure request=%u down=%llu start=%llu until=%llu\n",p12753_request,(unsigned long long)down,(unsigned long long)start,(unsigned long long)until);
         return;
@@ -416,9 +449,25 @@ static void p12753_audit_tick(uint64_t now){
         if(!off || on!=p12753_on)mask|=P53_DISPLAY;
         if(!fresh || !(fg&1u) || down!=p12753_down || down>up)mask|=P53_LINK;
         if(!gpuoff)mask|=P53_DOMAIN;
-        if(!p12753_other_idle() || hakios_p124_ufs_busy() || r.bs+r.ls>=200u)mask|=P53_CONFLICT;
+        if(!p12753_other_idle())mask|=P53_CONFLICT;
+        /* Thermal, link, display, GPU and ownership are never skipped. */
         if(mask){r.mask=mask;p12753_append(&r);p12753_finish(8,mask,now,&r);return;}
-        if(now>=p12753_until){p12753_finish(10,0,now,&r);return;}
+        unsigned busy=0;
+        if(r.bs+r.ls>=150u)busy|=P53_BUSY;
+        if(hakios_p124_ufs_busy())busy|=P53_HW_UFS;
+        p12754_wait_note((busy&P53_BUSY?64u:0)|(busy&P53_HW_UFS?128u:0),now);
+        if(busy){
+            if(!p127541_busy_at)p127541_busy_at=now;
+            if(now-p127541_busy_at>=p1274_ticks_ms(5000)){
+                r.mask=busy;p12753_append(&r);p12753_finish(8,busy,now,&r);return;
+            }
+            lck_spin_lock(&p12753_lock);p127541_skips++;lck_spin_unlock(&p12753_lock);
+        }else p127541_busy_at=0;
+        if(now>=p12753_until){
+            /* All ten direct rows + thirteen GET attempts required, not watts. */
+            p12753_finish(p12754_hw_step>=23?10:8,p12754_hw_step>=23?0:P53_TIMEOUT,now,&r);return;
+        }
+        if(busy)return;
         if(!p12753_bus_last || now-p12753_bus_last>=p1274_ticks_ms(2000)){
             unsigned i=p12754_hw_step++;
             unsigned index=i<10?100+i:i<23?i-10:100+(i-23)%10;

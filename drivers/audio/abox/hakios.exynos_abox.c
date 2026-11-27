@@ -1254,7 +1254,7 @@ p127_abox_resume(void)
     uaif1_enable(true);
     if(!(rd(&abox,ABOX_UAIF_CTRL0(1))&UAIF_SPK_ENABLE))return false;
     if(!dma->start() || !(rd(&abox,R0(RDMA_CTRL0))&RDMA_ENABLE))return false;
-    hakios_p127_metric(1,1,1);
+    /* The live owner must see real progress before reporting resume. */
     return true;
 }
 
@@ -1266,6 +1266,8 @@ stream_run(uint64_t tone_until_us, uint64_t until_us)
 	uint32_t next_fill = 0, last_pos = 0, reports = 0;
 	bool moved = false, by_clock = false, muted = false, said_outside = false;
 	bool p127_failed=false;
+    bool p127_resume_pending=false,p127_resume_seen=false;
+    uint32_t p127_resume_pos=0;
 #if __has_include(<kern/hakios_p125.h>)
     uint64_t p54_last=0;
 #endif
@@ -1286,17 +1288,34 @@ stream_run(uint64_t tone_until_us, uint64_t until_us)
 			return false;
 		}
 		(void)dma->position(&pos, &status);
+        /* Do not count ENABLE alone as an audio restoration. Use normal
+         * refill iterations, no additional spin, read or wake. */
+        if(p127_resume_pending){
+            if(pos<RING_BYTES && (status&RDMA_PROGRESS)){
+                if(p127_resume_seen && pos!=p127_resume_pos){
+                    hakios_p127_metric(1,1,1);p127_resume_pending=false;
+                }
+                p127_resume_seen=true;p127_resume_pos=pos;
+            }
+            if(p127_resume_pending && now-start>=200000u){
+                hakios_p127_metric(1,3,1);p127_resume_pending=false;p127_failed=true;
+                /* Preserve the existing stock refill/fallback, never idle again
+                 * in this stream after an unverified resume. */
+            }
+        }
 #if __has_include(<kern/hakios_p125.h>)
         /* Sample only on the live stream owner, at most once per second
          * during explicit connected hardware audit. No wakeup or power write. */
         if(__atomic_load_n(&hakios_p12754_hw_observe,__ATOMIC_ACQUIRE) &&
            (!p54_last || now-p54_last>=1000000u)){
-            uint32_t v[10]={rd(&cmu,CMU_PLL_CON0),rd(&cmu,CMU_DIV_AUDIF),rd(&cmu,CMU_DIV_UAIF1),
+            uint32_t v[11]={rd(&cmu,CMU_PLL_CON0),rd(&cmu,CMU_DIV_AUDIF),rd(&cmu,CMU_DIV_UAIF1),
                 rd(&abox,ABOX_SYSPOWER_CTRL),rd(&abox,ABOX_QCHANNEL_DISABLE),
                 rd(&abox,R0(RDMA_CTRL0)),status,rd(&cmu,CMU_QCH_ACLK),rd(&cmu,CMU_QCH_BCLK1),
                 (sink_head!=sink_tail?1u:0u)|(amp_running?2u:0u)|(hp_on?4u:0u)|(hakios_audio_input_wanted()?8u:0u)};
             __atomic_store_n(&hakios_p12754_audio_at,0,__ATOMIC_RELEASE);
-            for(unsigned i=0;i<10;i++)__atomic_store_n(&hakios_p12754_audio[i],v[i],__ATOMIC_RELAXED);
+            /* Reuse the owner's fractional PLL decoder, not guessed M/P/S. */
+            v[10]=(!(v[0]&PLL_MUX_SEL) || (v[0]&(PLL_ENABLE|PLL_STABLE))==(PLL_ENABLE|PLL_STABLE))?(uint32_t)(pll_hz()/1000u):0;
+            for(unsigned i=0;i<11;i++)__atomic_store_n(&hakios_p12754_audio[i],v[i],__ATOMIC_RELAXED);
             __atomic_store_n(&hakios_p12754_audio_at,mach_absolute_time(),__ATOMIC_RELEASE);
             p54_last=now;
         }
@@ -1384,7 +1403,7 @@ stream_run(uint64_t tone_until_us, uint64_t until_us)
 
         /* At least 3s of silence and no live route. Keep 2ms stock
          * cadence when active. Stop/resume is serialized on this worker. */
-        if(steps>=8 && !p127_failed && !by_clock && moved && dma==&bypass_dma &&
+        if(steps>=8 && !p127_failed && !p127_resume_pending && !by_clock && moved && dma==&bypass_dma &&
            p127_abox_quiet()){
             if(!dma->stop()){
                 hakios_p127_metric(1,3,1);p127_failed=true;
@@ -1418,6 +1437,7 @@ stream_run(uint64_t tone_until_us, uint64_t until_us)
                 /* Reset position baseline after hardware restart. */
                 next_fill=last_pos=0;outside=0;said_outside=false;
                 moved=false;by_clock=false;start=last_report=now_us();
+                p127_resume_pending=true;p127_resume_seen=false;
                 read_at_report=read_bytes;
                 continue;
             }
