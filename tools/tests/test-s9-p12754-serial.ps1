@@ -34,6 +34,13 @@ for($i=0;$i -lt 12;$i++){$bit=1 -shl $i;$stat+=" n$bit=1 t$bit=260000"}
 Check (P12-ReplyShape 'p127541_stats' $stat $true) 'revision 2 stats shape'
 Check (-not (P12-ReplyShape 'p127541_stats' ($stat -replace ' t2048=260000$','') $true)) 'truncated stats refused'
 Check (P12-ReplyShape 'p12754_revision' '2' $true) 'revision 2 shape'
+Check (P12-ReplyShape 'p12754_revision' '3' $true) 'revision 3 shape'
+Check (P12-ReplyShape 'p127542_audio' '17' $true) 'headless request generation'
+Check (P12-ReplyShape 'p127542_audio_result' '-17' $true) 'headless failure generation'
+Check (-not (P12-ReplyShape 'p127542_audio_result' '17 extra' $true)) 'reject mixed result'
+Check (P12-ReplyShape 'p127542_g2' '1' $true) 'bounded g2 readback'
+Check (P12-ReplyShape 'mali_irq' '0' $true) 'IRQ readback'
+Check (-not (P12-ReplyShape 'p127542_g2' '2' $true)) 'reject invalid g2 control'
 Check (P12-ReplyShape 'p12754_revision' '1' $true) 'legacy revision shape'
 $rows=@();$at=100
 foreach($i in (@(100..109)+@(0..12))){
@@ -62,3 +69,30 @@ Check (-not (P127541-CompareRail $a $b $c).all_B_below_baseline) 'mixed VSEL can
 $b.rail_verified=$false
 Check ($null -eq (P127541-CompareRail $a $b $c)) 'unverified rail no comparison'
 Write-Host 'P12754 revision 2 typed stats, coverage, UFS and VSEL comparison PASS (mock only)'
+# No serial, no file creation. Exercise headless fail-closed state transitions.
+$script:fakeNow=[datetime]'2026-11-27T00:00:00Z'
+$script:LifeState='ON'
+$script:mockAudioWrites=0;$script:mockResult='-17';$script:mockKey=$null
+function Life-Now {return $script:fakeNow}
+function Life-Say([string]$Message){}
+function Life-Pump {$script:fakeNow=$script:fakeNow.AddSeconds(1)}
+function Life-CheckSafety([datetime]$At){}
+function P12-EarlyThermalGuard {}
+function P127542-ReadKey {return $script:mockKey}
+function P12-Query([string]$Name,[string]$Value=''){
+    if($Name -eq 'p127542_audio' -and $Value -eq '17'){$script:mockAudioWrites++;return $Value}
+    if($Name -eq 'p127542_audio_result'){return $script:mockResult}
+    throw "unexpected headless query $Name"
+}
+Refuse {P127542-HeadlessReview '17' 'unused'} 'requires screen OFF'
+Check ($script:mockAudioWrites -eq 0) 'no request on screen ON'
+$script:LifeState='OFF'
+Refuse {P127542-HeadlessReview '17' 'unused'} 'worker failed'
+Check ($script:mockAudioWrites -eq 1) 'one request, no rearm'
+$script:mockResult='18'
+Refuse {P127542-HeadlessReview '17' 'unused'} 'generation mismatch'
+$script:mockResult='0';$script:mockKey=[ConsoleKey]::Y
+Refuse {P127542-HeadlessReview '17' 'unused'} 'timed out'
+$script:mockResult='17';$script:mockKey=[ConsoleKey]::N
+Refuse {P127542-HeadlessReview '17' 'unused'} 'operator rejected'
+Write-Host 'P127542 headless generation, failed worker, early Y, operator rejection and no-screen gate PASS (mock only)'

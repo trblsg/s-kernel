@@ -572,6 +572,10 @@ static unsigned p1273_gate_phase,p1273_gate_mode,p1273_gate_generation,p1273_gat
 static unsigned p1273_gate_qualified,p1273_gate_last_missing;
 static uint64_t p1273_gate_expiry,p1273_gate_lease,p1273_gate_fault_mark;
 static uint64_t p1273_gate_valid_until[13];
+/* One bounded, explicitly requested headless review per gate generation. */
+static int p127542_audio_request,p127542_audio_result;
+static bool p127542_audio_claimed;
+static uint64_t p127542_g2_until;
 static bool p12754_optin(void){
     static int cached=-1;int enabled=__atomic_load_n(&cached,__ATOMIC_ACQUIRE);
     if(enabled<0){int v=0,p=0;enabled=PE_parse_boot_argn("p12754",&v,sizeof(v)) && v==1 && PE_parse_boot_argn("p12753",&p,sizeof(p)) && p==1;__atomic_store_n(&cached,enabled,__ATOMIC_RELEASE);}
@@ -606,6 +610,7 @@ p1273_gate_clear_locked(void)
 {
     __atomic_store_n(&hakios_p1273_gate_watch,0,__ATOMIC_RELEASE);
     p1273_gate_phase=0;p1273_gate_mode=0;p1273_gate_lease=0;p1273_gate_expiry=0;
+    p127542_audio_request=p127542_audio_result=0;p127542_audio_claimed=false;
 }
 static void
 p1273_gate_refresh_locked(uint64_t now)
@@ -745,6 +750,97 @@ p1273_gate_review_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__
     return 0;
 }
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p1273_gate_review,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1273_gate_review_sysctl,"I","P12.7.3 verify stopped lease and start foreground evidence");
+/* Only the existing exact ABOX gate, after verified policy restore.
+ * Read returns zero on cancellation/thermal/display change; worker must stop.
+ * Positive request and signed result are generation-bound, never an ACK. */
+static bool p127542_g2_safe(void){
+    int32_t b=hakios_exynos_tmu_zone_mc(0),l=hakios_exynos_tmu_zone_mc(1),g=hakios_exynos_tmu_zone_mc(2),bat=hakios_battery_temperature();
+    return p12754_optin() && hakios_display_requested_on()!=0 && hakios_exynos_tmu_age_ms()<=2000 &&
+        b>=0 && b<67000 && l>=0 && l<66000 && g>=0 && g<68000 && bat>0 && bat<45 &&
+        !__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE);
+}
+/* Explicit short foreground-only trial. Zero is always available for cleanup. */
+static int p127542_g2_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unused int arg2,struct sysctl_req *req){
+    uint64_t now=mach_absolute_time(),until=__atomic_load_n(&p127542_g2_until,__ATOMIC_ACQUIRE);
+    bool safe=until && now<until && p127542_g2_safe();
+    int v=safe?1:0;
+    if(!v && until)(void)__atomic_compare_exchange_n(&p127542_g2_until,&until,0,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);
+    int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(e || !req->newptr)return e;
+    if(v==0){__atomic_store_n(&p127542_g2_until,0,__ATOMIC_RELEASE);return 0;}
+    if(v!=1 || !p127542_g2_safe())return EPERM;
+    lck_spin_lock(&p1273_gate_lock);
+    p1273_gate_refresh_locked(now);
+    if(p1273_gate_phase || !p1273_gate_idle() || __atomic_load_n(&p127542_g2_until,__ATOMIC_ACQUIRE)){
+        lck_spin_unlock(&p1273_gate_lock);return EBUSY;
+    }
+    uint64_t span=0;nanoseconds_to_absolutetime(15ULL*NSEC_PER_SEC,&span);
+    __atomic_store_n(&p127542_g2_until,now+span,__ATOMIC_RELEASE);
+    lck_spin_unlock(&p1273_gate_lock);return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p127542_g2,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p127542_g2_sysctl,"I","P127542 short verified native bind trial");
+static int
+p127542_audio_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unused int arg2,struct sysctl_req *req)
+{
+    lck_spin_lock(&p1273_gate_lock);
+    p1273_gate_refresh_locked(mach_absolute_time());
+    bool live=p127542_audio_request && !p127542_audio_result && p1273_gate_phase==3 && p1273_gate_mode==5 && p1273_gate_idle() && p1273_gate_stop_ok_locked();
+    int v=live?p127542_audio_request:0;
+    lck_spin_unlock(&p1273_gate_lock);
+    if(v && (p125_thermal_reason() || hakios_battery_temperature()<=0))v=0;
+    int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(e || !req->newptr)return e;
+    if(!p12754_optin() || p125_thermal_reason() || hakios_battery_temperature()<=0)return EPERM;
+    lck_spin_lock(&p1273_gate_lock);
+    p1273_gate_refresh_locked(mach_absolute_time());
+    if(v<=0 || (unsigned)v!=p1273_gate_generation || p1273_gate_phase!=3 ||
+       p1273_gate_mode!=5 || !p1273_gate_idle() || !p1273_gate_stop_ok_locked() || p127542_audio_request){
+        lck_spin_unlock(&p1273_gate_lock);return EPERM;
+    }
+    p127542_audio_request=v;
+    lck_spin_unlock(&p1273_gate_lock);return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p127542_audio,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p127542_audio_sysctl,"I","P127542 bounded ABOX review request");
+/* Only one userland sampler may claim a request, even if several cputop
+ * processes exist. The serial allowlist never permits a claim/result write. */
+static int p127542_audio_claim_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unused int arg2,struct sysctl_req *req){
+    lck_spin_lock(&p1273_gate_lock);
+    p1273_gate_refresh_locked(mach_absolute_time());
+    int v=p127542_audio_claimed?p127542_audio_request:0;
+    lck_spin_unlock(&p1273_gate_lock);
+    int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(e || !req->newptr)return e;
+    if(!p12754_optin() || p125_thermal_reason() || hakios_battery_temperature()<=0)return EPERM;
+    lck_spin_lock(&p1273_gate_lock);
+    p1273_gate_refresh_locked(mach_absolute_time());
+    if(v<=0 || v!=p127542_audio_request || p1273_gate_phase!=3 || p1273_gate_mode!=5 ||
+       !p1273_gate_idle() || !p1273_gate_stop_ok_locked() || p127542_audio_claimed || p127542_audio_result){
+        lck_spin_unlock(&p1273_gate_lock);return EPERM;
+    }
+    p127542_audio_claimed=true;
+    lck_spin_unlock(&p1273_gate_lock);return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p127542_audio_claim,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p127542_audio_claim_sysctl,"I","P127542 single userland worker claim");
+static int
+p127542_audio_result_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unused int arg2,struct sysctl_req *req)
+{
+    lck_spin_lock(&p1273_gate_lock);
+    p1273_gate_refresh_locked(mach_absolute_time());
+    int v=p127542_audio_result;
+    lck_spin_unlock(&p1273_gate_lock);
+    int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(e || !req->newptr)return e;
+    bool safe=p12754_optin() && !p125_thermal_reason();
+    lck_spin_lock(&p1273_gate_lock);
+    p1273_gate_refresh_locked(mach_absolute_time());
+    if(!safe || p1273_gate_phase!=3 || p1273_gate_mode!=5 || !p1273_gate_idle() || !p1273_gate_stop_ok_locked() || !p127542_audio_request || !p127542_audio_claimed ||
+       p127542_audio_result || (v!=p127542_audio_request && v!=-p127542_audio_request)){
+        lck_spin_unlock(&p1273_gate_lock);return EPERM;
+    }
+    p127542_audio_result=v;
+    lck_spin_unlock(&p1273_gate_lock);return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p127542_audio_result,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p127542_audio_result_sysctl,"I","P127542 headless audio result, not qualification");
 static int
 p1273_gate_ack_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unused int arg2,struct sysctl_req *req)
 {
@@ -764,6 +860,7 @@ p1273_gate_ack_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__unu
         lck_spin_unlock(&p1273_gate_lock);return EPERM;
     }
     p1273_gate_last_missing=p1273_gate_missing_locked();
+    if(p127542_audio_request && p127542_audio_result!=(int)p1273_gate_generation){lck_spin_unlock(&p1273_gate_lock);return EPERM;}
     if(p1273_gate_last_missing){lck_spin_unlock(&p1273_gate_lock);return EPERM;}
     unsigned bit=p1273_gate_bit(p1273_gate_mode);
     for(unsigned i=0;i<13;i++)if(bit==(1u<<i))p1273_gate_valid_until[i]=now+span;

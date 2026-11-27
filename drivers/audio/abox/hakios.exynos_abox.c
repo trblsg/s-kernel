@@ -1423,7 +1423,15 @@ stream_run(uint64_t tone_until_us, uint64_t until_us)
                 while(!p127_failed && p127_abox_quiet()){
                     uint32_t seq=__atomic_load_n(&hakios_p127_audio_event,__ATOMIC_ACQUIRE);
                     uint64_t deadline=0;
-                    clock_interval_to_deadline(10,NSEC_PER_MSEC,&deadline);
+                    /* Wake on real feed/capture/route or policy removal. Keep a bounded
+                     * fallback for expiry, unplug/reconnect and missed notifications. */
+                    clock_interval_to_deadline(100,NSEC_PER_MSEC,&deadline);
+#if __has_include(<kern/hakios_p125.h>)
+                    uint64_t lease=__atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE)&~(uint64_t)P127_MASK;
+                    if(lease && lease<deadline)deadline=lease;
+                    uint64_t offline=__atomic_load_n(&hakios_p1273_offline_deadline,__ATOMIC_ACQUIRE);
+                    if(offline && offline<deadline && offline>mach_absolute_time())deadline=offline;
+#endif
                     if(assert_wait_deadline((event_t)&hakios_p127_audio_event,THREAD_UNINT,deadline)==THREAD_WAITING){
                         if(!p127_abox_quiet() || seq!=__atomic_load_n(&hakios_p127_audio_event,__ATOMIC_ACQUIRE))
                             (void)clear_wait(current_thread(),THREAD_AWAKENED);

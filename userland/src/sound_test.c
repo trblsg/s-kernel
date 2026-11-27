@@ -39,6 +39,7 @@
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -247,6 +248,44 @@ route(void)
 	}
 }
 
+/* Playback category continues when the display is locked, unlike ambient
+ * system sounds. No forced volume or route changes; operator hears the result. */
+static int
+headless_session(void)
+{
+    void *f=dlopen("/System/Library/Frameworks/AVFAudio.framework/AVFAudio",RTLD_NOW);
+    id *category=f?dlsym(f,"AVAudioSessionCategoryPlayback"):NULL;
+    id session=send((id)objc_getClass("AVAudioSession"),"sharedInstance"),error=NULL;
+    if(!session || !category || !*category)return 1;
+    if(!((BOOL (*)(id,SEL,id,id *))objc_msgSend)(session,sel_registerName("setCategory:error:"),*category,&error))return 1;
+    if(!((BOOL (*)(id,SEL,BOOL,id *))objc_msgSend)(session,sel_registerName("setActive:error:"),YES,&error))return 1;
+    return 0;
+}
+static int
+replay_gate(void)
+{
+    if(headless_session())return 1;
+    const char *path="/tmp/p127542-record.wav";
+    CFURLRef url=CFURLCreateFromFileSystemRepresentation(NULL,(const UInt8 *)path,strlen(path),false);
+    id error=NULL;
+    id player=((id (*)(id,SEL,id,id *))objc_msgSend)(send((id)objc_getClass("AVAudioPlayer"),"alloc"),
+        sel_registerName("initWithContentsOfURL:error:"),(id)url,&error);
+    if(url)CFRelease(url);
+    if(!player)return 1;
+    double duration=((double (*)(id,SEL))objc_msgSend)(player,sel_registerName("duration"));
+    if(!(duration>=2.7 && duration<=3.5))return 1;
+    ((void (*)(id,SEL,float))objc_msgSend)(player,sel_registerName("setVolume:"),0.5f);
+    if(!((BOOL (*)(id,SEL))objc_msgSend)(player,sel_registerName("play")))return 1;
+    unsigned tenths=0;
+    while(tenths<60 && ((BOOL (*)(id,SEL))objc_msgSend)(player,sel_registerName("isPlaying"))){
+        usleep(100000);tenths++;
+    }
+    bool valid=tenths>=duration*8 && tenths<60;
+    send(player,"stop");
+    printf("sound_test: gate replay duration=%.2f elapsed_ticks=%u valid=%d\n",duration,tenths,valid);
+    return valid?0:1;
+}
+
 /* CoreHaptics' constants (NSString *) by name, the framework opened when first asked for */
 static id
 haptics_constant(const char *name)
@@ -384,6 +423,10 @@ main(int argc, char **argv)
 			wait_for_ringer();
 		} else if (strcmp(argv[i], "route") == 0) {
 			route();
+		} else if (strcmp(argv[i], "headless") == 0) {
+			if(headless_session())return 1;
+		} else if (strcmp(argv[i], "replay_gate") == 0) {
+			failed |= replay_gate();
 		} else if (strcmp(argv[i], "restart") == 0) {
 			restart();
 		} else if (strcmp(argv[i], "haptic") == 0) {

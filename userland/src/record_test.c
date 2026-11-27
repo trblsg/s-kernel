@@ -24,8 +24,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
-#define PATH            "/tmp/record_test.wav"
+static const char *record_path="/tmp/record_test.wav";
+#define PATH record_path
 #define RATE            48000
 #define MOTOR_HZ        175.5
 
@@ -204,7 +206,7 @@ rms_db(const int16_t *samples, long from, long to)
 
 /* The file read back: the samples of its data chunk. */
 static int
-analyse(double seconds, double vibrate_at)
+analyse(double seconds, double vibrate_at, bool gate)
 {
 	FILE *file = fopen(PATH, "rb");
 	unsigned char header[12], chunk[8];
@@ -251,8 +253,11 @@ analyse(double seconds, double vibrate_at)
 		    "Hz\n", rms_db(samples, quiet_from, quiet_to), tone_db(samples, quiet_from, quiet_to, MOTOR_HZ), MOTOR_HZ,
 		    rms_db(samples, loud_from, loud_to), tone_db(samples, loud_from, loud_to, MOTOR_HZ), MOTOR_HZ);
 	}
+	/* The bounded functional test requires a real, nonempty capture, not merely
+	 * a successful AVAudioRecorder call. Operator confirms audible replay. */
+	bool valid=!gate || (count>=seconds*RATE*0.90 && peak>=32 && rms_db(samples,0,count)>-75);
 	free(samples);
-	return 0;
+	return valid?0:1;
 }
 
 int
@@ -267,6 +272,7 @@ main(int argc, char **argv)
 	int tenths;
 
 	setvbuf(stdout, NULL, _IONBF, 0);
+	if(argc>2 && strcmp(argv[2],"--gate")==0){record_path="/tmp/p127542-record.wav";umask(077);}
 	if (argc > 3 && strcmp(argv[2], "vibrate") == 0) {
 		vibrate_at = atof(argv[3]);
 	}
@@ -321,5 +327,5 @@ main(int argc, char **argv)
 	printf("\n");
 	send(recorder, "stop");
 	usleep(300000);
-	return analyse(seconds, vibrate_at);
+	return analyse(seconds, vibrate_at, argc>2 && strcmp(argv[2],"--gate")==0);
 }

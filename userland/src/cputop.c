@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include "p1274_user.h"
+#include "p127542_audio.h"
 
 /* libproc's, which the iPhoneOS SDK does not declare (XNU's bsd/sys/proc_info.h, libsyscall/wrappers/libproc) */
 #define PROC_ALL_PIDS           1
@@ -137,7 +138,11 @@ main(int argc, char **argv)
 	}
 	mach_timebase_info(&timebase);
 	setvbuf(stdout, NULL, _IOLBF, 0);
+	/* The actual S9 image already runs this 5s sampler; thermald may exit
+	 * when thermal_pressure is absent. No additional periodic idle wake. */
+	bool audio_enabled=looks==0 && seconds<=5 && geteuid()==0 && audio_read("kern.hakios.p12754_revision")==3;
 	for (unsigned look = 0; looks == 0 || look <= looks; look++) {
+		if(audio_enabled)audio_tick();
 		p12751_persist_next();
 		uint64_t sample_begin=mach_absolute_time();
 		int bytes = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids)), count = 0, shown = 0;
@@ -228,7 +233,11 @@ main(int argc, char **argv)
 		if (looks != 0 && look == looks) {
 			break;
 		}
-		sleep(seconds);
+		/* Only a live, explicitly requested child adds 1s watchdog ticks.
+		 * Keep the ordinary cputop sampling cadence unchanged. */
+		unsigned left=seconds;
+		while(audio_enabled && audio_child && left){sleep(1);left--;audio_tick();}
+		if(left)sleep(left);
 	}
 	return 0;
 }

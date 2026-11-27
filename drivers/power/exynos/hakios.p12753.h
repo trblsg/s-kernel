@@ -42,7 +42,7 @@ static vm_offset_t p12754_mif,p12754_top;
 static bool p12754_cmu_mapped;
 static unsigned p127541_events[12],p127541_skips;
 static uint64_t p127541_ticks[12],p127541_note_at,p127541_busy_at;
-static int p12754_revision=2;
+static int p12754_revision=3;
 SYSCTL_INT(_kern_hakios,OID_AUTO,p12754_revision,CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,&p12754_revision,0,"P12754 extension ABI");
 static int p12753_revision=1;
 SYSCTL_INT(_kern_hakios,OID_AUTO,p12753_revision,CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,&p12753_revision,0,"P12753 ABI");
@@ -76,6 +76,8 @@ static void p12753_guard_tick(uint64_t now){
     int32_t g=hakios_exynos_tmu_zone_mc(2),bat=hakios_battery_temperature();
     unsigned age=(unsigned)MIN(hakios_exynos_tmu_age_ms(),(uint64_t)UINT32_MAX);
     bool off=hakios_display_requested_on()==0;
+    if(__atomic_load_n(&p127542_g2_until,__ATOMIC_ACQUIRE) && !p127542_g2_safe())
+        __atomic_store_n(&p127542_g2_until,0,__ATOMIC_RELEASE);
     uint32_t oldb=__atomic_load_n(&p12753_bcap,__ATOMIC_ACQUIRE),oldl=__atomic_load_n(&p12753_lcap,__ATOMIC_ACQUIRE);
     uint32_t bc=0,lc=0;
     unsigned m=p12753_temp_mask(b,l,g,bat,age,70000,68000,70000,45);
@@ -83,7 +85,8 @@ static void p12753_guard_tick(uint64_t now){
     bool burst=(off && (clusters[0].sum_now+clusters[1].sum_now>=150u || b>=65000 || l>=64000 || slope>=2000)) || (b>=65000 && slope>=2000);
     uint64_t wake=__atomic_load_n(&hakios_p12753_display_on,__ATOMIC_ACQUIRE);
     uint64_t link=__atomic_load_n(&hakios_p12753_usb_down,__ATOMIC_ACQUIRE);
-    bool tail=(wake && now>=wake && now-wake<p1274_ticks_ms(5000));
+    /* Modest preventive cap through the first ten seconds of wake; no deep BIG clamp. */
+    bool tail=(wake && now>=wake && now-wake<p1274_ticks_ms(p12754_optin()?10000:5000));
     bool linktail=(link && now>=link && now-link<p1274_ticks_ms(10000));
     if(p12754_optin() && (tail || linktail) && (b>=63000 || l>=62000))burst=true;
     if(burst)m|=P53_BUSY;

@@ -223,7 +223,8 @@ void hakios_p127_fg_record(int32_t ua,int32_t avg_ua,uint32_t uv,unsigned extern
     __atomic_store_n(&hakios_p127_fg_seq,seq,__ATOMIC_RELEASE);
 }
 void hakios_p127_audio_wake(void){
-    if(hakios_p127_mode()&P127_ABOX){
+    /* Raw ownership also covers a lease that has just expired or lost USB. */
+    if(__atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE)&P127_ABOX){
         __atomic_fetch_add(&hakios_p127_audio_event,1,__ATOMIC_RELEASE);
         thread_wakeup((event_t)&hakios_p127_audio_event);
     }
@@ -257,6 +258,11 @@ void hakios_p127_stop(unsigned reason)
         __atomic_store_n(&hakios_p127_reason,reason,__ATOMIC_RELEASE);
         __atomic_store_n(&hakios_p1273_last_stop_reason,reason,__ATOMIC_RELAXED);
         __atomic_store_n(&hakios_p1273_last_stop_lease,v,__ATOMIC_RELEASE);
+        /* Policy removal must wake even after mode becomes zero. */
+        if(v&P127_ABOX){
+            __atomic_fetch_add(&hakios_p127_audio_event,1,__ATOMIC_RELEASE);
+            thread_wakeup((event_t)&hakios_p127_audio_event);
+        }
     }
 }
 void hakios_p127_wfi(unsigned cpu,uint64_t ticks)

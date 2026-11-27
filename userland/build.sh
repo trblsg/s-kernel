@@ -374,7 +374,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		# (the microphone as an application records: allowed to, by an entitlement, if ldid is there)
 		$DYN -framework CoreFoundation -framework AVFoundation -lobjc -o obj/record_test src/record_test.c &&
 			{ ${LDID:-ldid} -Ssrc/record_test.entitlements obj/record_test 2>/dev/null ||
-			  echo "build.sh: no ldid: record_test is unsigned, and the system may not let it record"; }
+			  python3 ../tools/machosign.py obj/record_test src/record_test.entitlements com.hakios.recordtest ||
+			  echo "build.sh: record_test signing failed; P127542 installer will reject missing microphone entitlement"; }
 		$DYN -o obj/cpu_test src/cpu_test.c
 		# the Galaxy S9's GPU through HakiosMali, without Mesa (src/mali_test.c)
 		$DYN -framework IOKit -o obj/mali_test src/mali_test.c

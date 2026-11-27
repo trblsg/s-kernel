@@ -356,6 +356,7 @@ struct eagl {
 	bool p122_cpu_sample_valid;
 	unsigned p122_mode_seen;
 	unsigned p1231_hash_mode;
+	bool p127542_g2;
 	uint64_t p1231_poll_us;
 	uint64_t p124_verify_at;
 	unsigned p124_verify_skipped,p124_migrations;
@@ -386,6 +387,7 @@ static uint32_t p66_mode_cached,p67_mode_cached,p611_mode_cached,p612_mode_cache
 static int glstage_on;                       /* boot-arg glstage=1: 60-frame timing aggregates */
 static int glcost_on;                        /* boot-arg glcost=1: per-slot CPU wall timing */
 static int p122_enabled;                      /* boot-arg p122=1; runtime mode controls ONLY diagnostics */
+static bool p127542_g2_available;
 static int g2_bind_on;                        /* boot-arg g2_bind=1, otherwise legacy code path */
 static int g2_verify_on;                      /* boot-arg g2_verify=1: sample actual GL binding */
 static int g21_diag_on;                       /* boot-arg g21_diag=1: G2 reasons, even with skipping OFF */
@@ -1724,6 +1726,13 @@ frame_begin(struct eagl *e)
 		bool mode_ok=sysctlbyname("kern.hakios.p122_diag_mode",&value,&size,NULL,0)==0 &&
 		    size==sizeof(value) && value>=0 && value<=2;
 		if(!mode_ok)value=0; /* fail minimal; never claim an ACK on a read error */
+		int trial=0;size_t trial_size=sizeof(trial);
+		bool trial_on=p127542_g2_available && mode_ok && value==0 && hashmode==0 && !e->g2_fault &&
+		    sysctlbyname("kern.hakios.p127542_g2",&trial,&trial_size,NULL,0)==0 && trial_size==sizeof(trial) && trial==1;
+		if(trial_on!=e->p127542_g2){
+		    say("p127542-g2: enabled=%u context=%p skipped=%u fault=%u\n",trial_on,(void*)e,e->g2.skipped,e->g2_fault);
+		    e->p127542_g2=trial_on;s9_g2_invalidate(&e->g2);e->g2.verify_serial=0;
+		}
 		if(e->p122_mode_seen!=(unsigned)(value+1)){
 			e->p122_mode_seen=(unsigned)(value+1);
 			glstage_on=value>=1;
@@ -2353,10 +2362,10 @@ frame_end(struct eagl *e, bool finished, enum s9_p4_end_reason end_reason)
 			    e->glcost.count[top[k]],(unsigned long long)e->glcost.us[top[k]]);
 		s9_gl_cost_reset(&e->glcost);
 	}
-	if (g2_bind_on && e->frames % 60 == 0) {
+	if ((g2_bind_on || e->p127542_g2) && e->frames % 60 == 0) {
 		say("hakios-gl-g2: up=%llu.%03llus frames=%u..%u attempted=%u skipped=%u driver=%u invalidated=%u fault=%u verify=%d\n",
 		    after/1000000,(after/1000)%1000,e->frames-59,e->frames,e->g2.attempts,
-		    e->g2.skipped,e->g2.executed,e->g2.invalidations,e->g2_fault?1:0,g2_verify_on);
+		    e->g2.skipped,e->g2.executed,e->g2.invalidations,e->g2_fault?1:0,g2_verify_on || e->p127542_g2);
 	}
 	if (g21_diag_on && e->frames % 60 == 0) {
 		say("hakios-gl-g21: up=%llu.%03llus frames=%u..%u attempted=%u client_same=%u client_diff=%u cache_same=%u cache_diff=%u cache_invalid=%u raw=%u forwarded=%u deletes=%u other=%u\n",
@@ -2528,9 +2537,9 @@ my_glBindTexture(void *context, GLenum target, GLuint texture)
 			else e->g2.cache_different++;
 		} else e->g2.other_target_or_unit++;
 	}
-	bool skip = g2_bind_on && !e->g2_fault &&
+	bool skip = (g2_bind_on || e->p127542_g2) && !e->g2_fault &&
 	    s9_g2_redundant(&e->g2,e->unit,target,texture,GL_TEXTURE_2D);
-	if (skip && g2_verify_on && ((++e->g2.verify_serial % 128u) == 0)) {
+	if (skip && (g2_verify_on || e->p127542_g2) && ((++e->g2.verify_serial % 128u) == 0 || (e->p127542_g2 && e->g2.verify_serial==1))) {
 		GLint actual = -1;
 		glGetIntegerv(GL_TEXTURE_BINDING_2D,&actual);
 		if (actual < 0 || (GLuint)actual != texture) {
@@ -5564,6 +5573,7 @@ install(void)
 			glstage_on=glcost_on=0;
 			say("p122-gl: boot_enabled=1 initial_mode=0 glstage=0 glcost=0 policy_writes=0\n");
 		}
+		p127542_g2_available=s9_has_boot_flag(arguments,"p12754=1");
 		g2_bind_on = s9_has_boot_flag(arguments, "g2_bind=1");
 		if(p122_enabled && g2_bind_on){
 			g2_bind_on=0;
