@@ -131,6 +131,8 @@ typedef GLDEBUGPROC GLDEBUGPROCKHR;
 #define GL_VERSION                      0x1f02
 #define GL_EXTENSIONS                   0x1f03
 #define GL_TEXTURE_BINDING_2D           0x8069
+#define GL_TEXTURE0                     0x84c0
+#define GL_ACTIVE_TEXTURE               0x84e0
 #define GL_BGRA                         0x80e1
 #define GL_INFO_LOG_LENGTH              0x8b84
 #define GL_COMPILE_STATUS               0x8b81
@@ -2767,7 +2769,6 @@ trace_pixels(struct eagl *e)
 #define GL_TEXTURE_WRAP_S               0x2802
 #define GL_TEXTURE_WRAP_T               0x2803
 #define GL_TEXTURE_MAG_FILTER           0x2800
-#define GL_TEXTURE0                     0x84c0
 #define GL_UNSIGNED_SHORT               0x1403
 #define GL_FLOAT                        0x1406
 #define GL_HALF_FLOAT                   0x140b

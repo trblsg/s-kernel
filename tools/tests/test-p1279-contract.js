@@ -2,6 +2,14 @@ const fs=require('fs'),assert=require('assert');
 const read=p=>fs.readFileSync(require('path').join(__dirname,'../..',p),'utf8');
 const e=read('userland/src/eagl.c'), m=read('drivers/gpu/mali/hakios.mali.c'),g=read('drivers/power/exynos/hakios.exynos_cpufreq.c'),a=read('drivers/power/exynos/hakios.p1277_idle.h'),r=read('drivers/power/exynos/hakios.p12753.h'),p=read('drivers/display/panel/hakios.s6e3ha8.c');
 for(const s of ['s9_g2_forward(&current->g2,p1279_gl_on','GL_ACTIVE_TEXTURE','p1279_delete_epoch','p1279_native_unit==e->unit','(p1279_gl_on || (value==0 && hashmode==0))','kern.hakios.p1279_hash_mode','s9_ioshash4_reference(base,size)','p1279-resumed-gl:','zero_hash_bytes','glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0)','glClientWaitSync(sync, GL_SYNC_FLUSH_COMMANDS_BIT, 0)'])assert(e.includes(s),s);
+// eagl.c intentionally declares its own GLES types/tokens, not SDK GL headers.
+// Verify each token has exactly one correct definition BEFORE its first use.
+for (const [token,value] of [['GL_TEXTURE0',0x84c0],['GL_ACTIVE_TEXTURE',0x84e0]]) {
+    const definitions=[...e.matchAll(new RegExp('^#define[ \\t]+'+token+'[ \\t]+(0x[0-9a-fA-F]+)[ \\t]*$','gm'))];
+    assert.strictEqual(definitions.length,1,token+' must be declared exactly once');
+    assert.strictEqual(Number(definitions[0][1]),value,token+' GLES enum value');
+    assert.strictEqual(e.search(new RegExp('\\b'+token+'\\b')),definitions[0].index+definitions[0][0].indexOf(token),token+' used before declaration');
+}
 assert(m.includes('p1279_irq_observe();')&&m.includes('good>=1024')&&m.includes('p1279_irq_state=3')&&m.includes('p1279_hash_mode=2'));
 assert(g.includes('p1279_auto_admit();')&&g.includes('MIN(boost_ms,150u)')&&g.includes('MIN(BURST_MS,60u)'));
 assert(a.includes('p1279_auto_pending,false')&&a.includes('p1279_revision'));
