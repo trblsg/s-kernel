@@ -155,6 +155,7 @@
 #include <sys/hakios.exynos_soc.h>
 #include <sys/hakios.scion_gov.h>
 #include "hakios.p12_thermal.h"
+#include "hakios.p12781_active.h"
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/sysctl.h>
@@ -300,6 +301,8 @@ static void p1277_admission_exit(bool *held){if(*held)lck_mtx_unlock(&p1277_admi
         if((legacy) && p1277_auto_blocks())return EBUSY; \
     }
 static uint64_t p1277_short_boost,p1277_short_burst;
+static bool p12781_profile;
+static uint64_t p12781_tail_hits,p12781_tail_bypass;
 static bool p1277_active_now(void){
     return __atomic_load_n(&p1277_active_enabled,__ATOMIC_ACQUIRE)!=0;
 }
@@ -1271,6 +1274,15 @@ boost_floor(struct cluster *c, uint64_t now)
 		}
 		if (touch_held(now)) {
 			khz = c == &clusters[1] && gov_policy == 4 && pace.floor != 0 ? pace.floor : p1277_touch_floor(c,c->scion_touch);
+            if(p12781_profile && p1277_active_now() && gov_policy==2){
+                uint32_t before=khz;
+                khz=p12781_tail_target(khz,c==&clusters[1],true,gov_policy,c->load,
+                    clusters[0].sum_now+clusters[1].sum_now,
+                    __atomic_load_n(&fingers,__ATOMIC_ACQUIRE)!=0,frames_moving(now),
+                    now<__atomic_load_n(&p12_late_until,__ATOMIC_ACQUIRE));
+                if(khz<before)__atomic_fetch_add(&p12781_tail_hits,1,__ATOMIC_RELAXED);
+                else if(before>(c==&clusters[1]?1261000u:1053000u))__atomic_fetch_add(&p12781_tail_bypass,1,__ATOMIC_RELAXED);
+            }
 		}
 		if (frames_moving(now)) {
 			khz = MAX(khz, c->frame_khz);
@@ -2048,6 +2060,8 @@ hakios_exynos_cpufreq_gov_start(void)
 	uint32_t rev7_profile=0;
 	(void)PE_parse_boot_argn("p1277",&rev7_profile,sizeof(rev7_profile));
 	bool rev7_grant=rev7_profile==1 && p124_enabled && p12754_optin();
+	uint32_t rev8_profile=0;
+	p12781_profile=rev7_grant && PE_parse_boot_argn("p1278",&rev8_profile,sizeof(rev8_profile)) && rev8_profile==1;
 	(void)PE_parse_boot_argn("p1277_active",&p1277_active_permission,sizeof(p1277_active_permission));
 	bool rev7_active_boot=p1277_active_permission==1;
 	p1277_active_permission=rev7_active_boot || rev7_grant;

@@ -43,7 +43,7 @@ static inline bool p1278_dpu_wqhd(const struct p1278_dpu_state *s){
         const uint32_t *e=s->enc[i];
         /* Encoder width can be half the decoder picture when DSCC is used.
          * Validate real geometry, 8bpp, two slices and exact chunk width. */
-        if((e[0]&(1u<<3)) || (e[2]&0x00ffffffu)!=((128u<<16)|2960u) ||
+        if((e[0]&(1u<<28)) || ((e[0]&(1u<<3))!=0)!=(n==3) || (e[2]&0x00ffffffu)!=((128u<<16)|2960u) ||
            e[3]!=(((n==3?720u:1440u)<<16)|40u) ||
            e[4]!=((720u<<16)|720u) || ((e[0]&1u)!= (n==1)))return false;
     }
@@ -55,7 +55,8 @@ static inline bool p1278_link_same(const struct p1278_link_state *a,const struct
 }
 static inline bool p1278_dpu_same(const struct p1278_dpu_state *a,const struct p1278_dpu_state *b){
     if(a->path!=b->path || a->connection!=b->connection || a->start!=b->start || a->end!=b->end ||
-       a->src_offset!=b->src_offset || a->img_size!=b->img_size || a->scaled_size!=b->scaled_size ||
+       a->src_size!=b->src_size || a->src_offset!=b->src_offset || a->img_size!=b->img_size || a->scaled_size!=b->scaled_size ||
+       a->path0!=b->path0 || a->path1!=b->path1 ||
        a->in_con!=b->in_con || a->dpp_in!=b->dpp_in)return false;
     for(unsigned i=0;i<2;i++)for(unsigned j=0;j<17;j++)if(a->enc[i][j]!=b->enc[i][j])return false;
     return true;
@@ -63,5 +64,25 @@ static inline bool p1278_dpu_same(const struct p1278_dpu_state *a,const struct p
 bool hakios_p1278_dpu_capture(struct p1278_dpu_state *s);
 bool hakios_p1278_dpu_hold_begin(void);
 bool hakios_p1278_dpu_hold_end(void);
-bool hakios_p1278_dpu_full_latched(uint32_t gen,uint32_t *frame);
+/* Refusal bits are independent so a snapshot can expose multiple mismatches. */
+enum { P78_CAPTURE=1u, P78_LINK=2u, P78_DSC=4u, P78_FIFO=8u,
+       P78_HOLD=16u, P78_RESTORE=32u, P78_CHANGED=64u, P78_DRAIN=128u,
+       P78_ID=256u, P78_COMMAND=512u, P78_FRAME=1024u };
+static inline bool p1278_fifo_drained(uint32_t f){
+    return (f&0xf00u)==0x500u; /* PH/PL empty, neither full */
+}
+static inline bool p1278_phy_drained(uint32_t phy){
+    return (phy&0x2ffu)==0xfu; /* all 4 data lanes STOP, no data/clock ULPS; clock may remain HS */
+}
+static inline uint32_t p1278_admission(bool captured,const struct p1278_link_state *l,const struct p1278_dpu_state *d){
+    uint32_t why=0;
+    if(!captured)why|=P78_CAPTURE;
+    if(!p1278_link_wqhd(l))why|=P78_LINK;
+    if(captured && !p1278_dpu_wqhd(d))why|=P78_DSC;
+    if(!p1278_fifo_drained(l->fifo))why|=P78_FIFO;
+    return why;
+}
+bool hakios_p1278_dpu_full_latched(uint32_t gen,uint32_t *frame,uint32_t *submitted);
+bool hakios_p1278_dpu_held_idle(uint32_t frame);
+bool hakios_p1278_dpu_hold_faulted(void);
 #endif

@@ -123,7 +123,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `p1277_active` | K | `hakios.exynos_cpufreq.c`, `hakios.mali.c` | `CONFIG_P1277_ACTIVE` |  |
 | `p1277_gpu_dvs` | K | `hakios.mali.c` | `CONFIG_P1277_GPU_DVS` |  |
 | `p1277_panel` | K | `hakios.s6e3ha8.c` | `CONFIG_P1277_PANEL` |  |
-| `p1278` | K | `hakios.exynos_dpu.c`, `hakios.s6e3ha8.c` | `CONFIG_P1278` |  |
+| `p1278` | K | `hakios.exynos_cpufreq.c`, `hakios.exynos_dpu.c`, `hakios.s6e3ha8.c` | `CONFIG_P1278` |  |
 | `p12_gpu_boot_auto` | K | `hakios.mali.c` | `CONFIG_P12_GPU_BOOT_AUTO` |  |
 | `p3power` | K | `hakios.mali.c` | `CONFIG_P3POWER` |  |
 | `p3rail` | K | `hakios.mali.c` | `CONFIG_P3RAIL` |  |

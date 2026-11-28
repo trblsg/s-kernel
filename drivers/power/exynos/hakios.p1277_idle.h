@@ -568,19 +568,28 @@ static int p1278_active_stats_sysctl(__unused struct sysctl_oid *o,__unused void
     uint64_t boost_ns=0,burst_ns=0;
     absolutetime_to_nanoseconds(p1277_boost_span(),&boost_ns);
     absolutetime_to_nanoseconds(p1277_burst_span(),&burst_ns);
-    char out[240];
-    snprintf(out,sizeof(out),"version=1 active=%u boost_ms=%llu burst_ms=%llu lit_touch=%u big_touch=%u big_frame=%u g2_request=%u g2_effective=%u",
+    unsigned policy=gov_policy;
+    bool tail=p12781_profile && p1277_active_now() && policy==2;
+    uint32_t lit=p1277_touch_floor(&clusters[0],policy>=2?clusters[0].scion_touch:clusters[0].touch_khz);
+    uint32_t big=policy>=2?clusters[1].scion_touch:clusters[1].touch_khz;
+    char out[420];
+    snprintf(out,sizeof(out),"version=1 active=%u boost_ms=%llu burst_ms=%llu lit_touch=%u big_touch=%u big_frame=%u g2_request=%u g2_effective=%u policy=%u tail=%u lit_tail=%u big_tail=%u lit_floor=%u big_floor=%u tail_hits=%llu tail_bypass=%llu",
         p1277_active_now()?1u:0u,(unsigned long long)(boost_ns/NSEC_PER_MSEC),(unsigned long long)(burst_ns/NSEC_PER_MSEC),
-        p1277_touch_floor(&clusters[0],gov_policy>=2?clusters[0].scion_touch:clusters[0].touch_khz),gov_policy>=2?clusters[1].scion_touch:clusters[1].touch_khz,clusters[1].frame_khz,
+        lit,big,clusters[1].frame_khz,
         __atomic_load_n(&p1277_g2_request,__ATOMIC_ACQUIRE),
-        (__atomic_load_n(&p1277_g2_request,__ATOMIC_ACQUIRE) && p127542_g2_safe())?1u:0u);
+        (__atomic_load_n(&p1277_g2_request,__ATOMIC_ACQUIRE) && p127542_g2_safe())?1u:0u,
+        policy,tail?1u:0u,p12781_tail_target(lit,false,tail,policy,0,0,false,false,false),
+        p12781_tail_target(big,true,tail,policy,0,0,false,false,false),
+        clusters[0].boost_floor,clusters[1].boost_floor,
+        (unsigned long long)__atomic_load_n(&p12781_tail_hits,__ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&p12781_tail_bypass,__ATOMIC_RELAXED));
     return SYSCTL_OUT(req,out,strlen(out)+1);
 }
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p1278_active_stats,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1278_active_stats_sysctl,"A","Rev8 active control and raw G2 rollback witness, not context skip proof");
 static int p1278_revision_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
-    int v=8;return SYSCTL_OUT(req,&v,sizeof(v));
+    int v=81;return SYSCTL_OUT(req,&v,sizeof(v));
 }
-SYSCTL_PROC(_kern_hakios,OID_AUTO,p1278_revision,CTLTYPE_INT|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1278_revision_sysctl,"I","P1278 implementation revision; legacy audit ABI 6 unchanged");
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1278_revision,CTLTYPE_INT|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1278_revision_sysctl,"I","P1278.1 implementation revision (81); legacy audit ABI 6 unchanged");
 static int p1277_revision_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
     int v=7;return SYSCTL_OUT(req,&v,sizeof(v));
 }

@@ -146,12 +146,12 @@ function P12-ReplyShape([string]$Name,[string]$Reply,[bool]$Mixed){
         '^p12753_revision$' {return ($Reply -ceq '1')}
         '^p12754_revision$' {return ($Reply -cmatch '^[123456]$')}
         '^p1277_layer2$' {return ($Reply -cmatch '^[0-4]$')}
-        '^p1278_revision$' {return ($Reply -ceq '8')}
+        '^p1278_revision$' {return ($Reply -ceq '81')}
         '^p1278_panel_mode$' {return ($Reply -cmatch '^[12]$')}
         '^p1278_panel_review$' {return ($Reply -cmatch '^[0-3]$')}
-        '^p1278_panel_stats$' {return ($Reply -cmatch "^version=1 permission=[01] mode=[12] off_mode=[0-2] off_verified=[01] off_count=$dec replays=$dec clean=$dec reviewed=[0-3] reason=$dec first=$dec done=$dec diag=$dec raw=[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{2} id=[0-9a-f]{6} pending=$dec failed=[01]$")}
+        '^p1278_panel_stats$' {return ($Reply -cmatch "^version=1 permission=[01] mode=[12] off_mode=[0-2] off_verified=[01] off_count=$dec replays=$dec clean=$dec reviewed=[0-3] reason=$dec first=$dec done=$dec diag=$dec raw=[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{2} id=[0-9a-f]{6} pending=$dec failed=[01] refusal=$dec drain=[0-3] irq_raw=[0-9a-f]{8}$")}
         '^p1278_irq_stats$' {return ($Reply -cmatch "^version=1 enabled=[01] attached=[01] waits=$dec late=$dec spins=$dec naps=$dec fallback=$dec arm_fail=$dec fault=$dec$")}
-        '^p1278_active_stats$' {return ($Reply -cmatch "^version=1 active=[01] boost_ms=$dec burst_ms=$dec lit_touch=$dec big_touch=$dec big_frame=$dec g2_request=[01] g2_effective=[01]$")}
+        '^p1278_active_stats$' {return ($Reply -cmatch "^version=1 active=[01] boost_ms=$dec burst_ms=$dec lit_touch=$dec big_touch=$dec big_frame=$dec g2_request=[01] g2_effective=[01] policy=$dec tail=[01] lit_tail=$dec big_tail=$dec lit_floor=$dec big_floor=$dec tail_hits=$dec tail_bypass=$dec$")}
         '^p1277_revision$' {return ($Reply -ceq '7')}
         '^p1277_auto_stats$' {return ($Reply -cmatch "^version=1 permission=[01] enabled=[01] state=[0-5] stage=[0-5] samples=$dec retries=$dec abox_driver_ok=[01] fault=$dec last_uv=$dec last_mhz=$dec last_reason=$dec own_lease=$dec live_mode=$dec ufs_safe=[01] interactive_qualification=0$")}
         '^p1277_layer2_stats$' {return ($Reply -cmatch "^version=1 request=[0-4] module=[0-4] state=[0-2] result=[0-4] samples=$dec restored=[01] power_qualified=0$")}

@@ -644,11 +644,12 @@ static uint32_t p1277_panel_permission,p1277_panel_request,p1277_panel_persisten
 static uint32_t p1277_panel_sleep_verified,p1277_panel_wake_uncertain;
 static uint32_t p1278_permission,p1278_mode=1,p1278_off_mode,p1278_off_verified,p1278_off_count,p1278_replays,p1278_reviewed,p1278_review_cycle,p1278_clean_cycles,p1278_reason;
 static uint32_t p1278_first_frame,p1278_done_frame,p1278_diag_valid,p1278_diag_raw[4];
-static bool p1278_first_seen,p1278_pre_valid,p1278_replay_ok,p1278_wake_cmd_ok;
+static bool p1278_pre_valid,p1278_replay_ok,p1278_wake_cmd_ok;
+static uint32_t p1278_refusal,p1278_drain_samples,p1278_frame_irq_raw;
 static uint64_t p1278_not_before;
 static struct p1278_link_state p1278_pre_link;
 static struct p1278_dpu_state p1278_pre_dpu;
-#define P78_DSIM_FRAME_DONE (1u<<24)
+/* DSIM FRAME_DONE belongs to the link's existing IRQ state. Read only. */
 static uint32_t fresh_ok,fresh_fallback,fresh_fault,fresh_sleep;
 static bool fresh_off_ok;
 static uint64_t fresh_deadline,fresh_arm_until;
@@ -674,26 +675,36 @@ uint32_t hakios_p127545_panel_generation(void);
 uint32_t hakios_p127545_panel_generation(void){return __atomic_load_n(&fresh_ready,__ATOMIC_ACQUIRE);}
 static void fresh_schedule(void){uint64_t t;clock_interval_to_deadline(10,NSEC_PER_MSEC,&t);thread_call_enter_delayed(fresh_call,t);}
 /* DSIM offsets/packet types from pinned Samsung dpu_9810 regs and
- * mipi_display.h. FRAME_DONE is observed/cleared only with its IRQ masked;
- * no IRQ routing changes and no writes to the encoder's host registers. */
+ * mipi_display.h. Rev8.1 does not claim or clear DSIM interrupts; use
+ * read-only PHY stop-state plus a fresh full-window DPU latch under TE hold. */
 static void p1278_link_capture(struct p1278_link_state *s){
     s->config=rd(DSIM_CONFIG);s->resol=rd(0x3c);s->cprs=rd(0x74);
     s->slice01=rd(0x78);s->slice23=rd(0x7c);s->mask=rd(0x54);
     s->irq=rd(DSIM_INTSRC);s->fifo=rd(DSIM_FIFOCTRL);s->phy=rd(0x1c);
 }
 static void p1278_snapshot(const char *where,const struct p1278_link_state *l,const struct p1278_dpu_state *d){
-    say("p1278-panel: %s id=%06x cfg=%x resol=%x cprs=%x slices=%x/%x mask=%x irq=%x fifo=%x phy=%x frame=%u trig=%x shadow=%x path=%x conn=%x windows=%x/%x win=%x..%x src=%x offset=%x img=%x scaled=%x format=%x/%x base=%x bg=%x/%x err=%x/%x\\n",
+    say("p1278-panel: %s id=%06x cfg=%x resol=%x cprs=%x slices=%x/%x mask=%x irq=%x fifo=%x phy=%x frame=%u trig=%x shadow=%x path=%x conn=%x windows=%x/%x win=%x..%x src=%x offset=%x img=%x scaled=%x format=%x/%x base=%x bg=%x/%x err=%x/%x\n",
         where,panel_id,l->config,l->resol,l->cprs,l->slice01,l->slice23,l->mask,l->irq,l->fifo,l->phy,d->frame,d->trigger,d->shadow,d->path,d->connection,d->path0,d->path1,d->start,d->end,d->src_size,d->src_offset,d->img_size,d->scaled_size,d->in_con,d->dpp_in,d->base,d->bg0,d->bg1,d->err_i,d->err_d);
     for(unsigned i=0;i<2;i++)if(d->path&(1u<<(4+i))){
         const uint32_t *v=d->enc[i];
-        say("p1278-panel: %s enc%u ctrl=%x/%x pps=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\\n",where,i,v[0],v[1],v[16],v[2],v[3],v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11],v[12],v[13],v[14],v[15]);
+        say("p1278-panel: %s enc%u ctrl=%x/%x pps=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",where,i,v[0],v[1],v[16],v[2],v[3],v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11],v[12],v[13],v[14],v[15]);
     }
 }
-static bool p1278_fifo_idle(void){return (rd(DSIM_FIFOCTRL)&(EMPTY_PH|EMPTY_PL))==(EMPTY_PH|EMPTY_PL);}
-static bool p1278_clear_done(void){
-    if(!(rd(0x54)&P78_DSIM_FRAME_DONE))return false;
-    wr(DSIM_INTSRC,P78_DSIM_FRAME_DONE);__builtin_arm_dsb(15);
-    return !(rd(DSIM_INTSRC)&P78_DSIM_FRAME_DONE);
+static bool p1278_fifo_idle(void){return p1278_fifo_drained(rd(DSIM_FIFOCTRL));}
+/* Require three consecutive observations of the same frame, drained active
+ * DPU channels and stopped data lanes while our TE mask prevents transfers.
+ * A queued shadow update cannot start another transfer while held. This
+ * is transport-drain evidence, not a panel GRAM CRC or fresh IRQ proof. */
+static bool p1278_drain_held(uint32_t frame){
+    p1278_drain_samples=0;
+    for(unsigned i=0;i<3;i++){
+        if(!hakios_p1278_dpu_held_idle(frame) || !p1278_fifo_idle() ||
+           !p1278_phy_drained(rd(0x1c)))return false;
+        p1278_drain_samples++;
+        if(i!=2)IOSleep(1);
+    }
+    p1278_frame_irq_raw=rd(DSIM_INTSRC);
+    return true;
 }
 /* One short read each, once per first cycle/mode, on a drained masked
  * link. Raw readback is diagnostic only, not TE pulse/DSC retention proof. */
@@ -729,20 +740,17 @@ static bool p1278_full_area(void){
 static bool p1278_completed(uint32_t gen,uint64_t now){
     struct p1278_link_state l;
     struct p1278_dpu_state d;
-    uint32_t frame=0;
-    if(p1277_panel_failed || !p1278_replay_ok || now<p1278_not_before || !(rd(0x54)&P78_DSIM_FRAME_DONE) ||
-       !p1278_fifo_idle() || !hakios_p1278_dpu_full_latched(gen,&frame))return false;
-    if(!p1278_first_seen){
-        /* Clear only our masked bit after a real, fresh full-window latch.
-         * Demand a subsequent physical completion, not a stale flag. */
-        if(!p1278_clear_done())return false;
-        p1278_first_seen=true;p1278_first_frame=frame;return false;
-    }
-    if(frame==p1278_first_frame || !(rd(DSIM_INTSRC)&P78_DSIM_FRAME_DONE))return false;
+    uint32_t frame=0,submitted=0;
+    if(p1277_panel_failed || !p1278_replay_ok || now<p1278_not_before)return false;
+    if(!p1278_fifo_idle()){p1278_refusal|=P78_FIFO;return false;}
+    if(!hakios_p1278_dpu_full_latched(gen,&frame,&submitted)){p1278_refusal|=P78_FRAME;return false;}
     p1278_link_capture(&l);
-    if(!hakios_p1278_dpu_capture(&d) || d.frame!=frame || !p1278_link_same(&p1278_pre_link,&l) ||
-       !p1278_dpu_same(&p1278_pre_dpu,&d) || !p1278_dpu_wqhd(&d))return false;
-    p1278_done_frame=frame;p1278_snapshot("complete",&l,&d);return true;
+    bool captured=hakios_p1278_dpu_capture(&d);
+    uint32_t why=p1278_admission(captured,&l,&d);
+    if(!captured || d.frame!=frame || !p1278_link_same(&p1278_pre_link,&l) ||
+       !p1278_dpu_same(&p1278_pre_dpu,&d))why|=P78_CHANGED;
+    if(why){p1278_refusal|=why;return false;}
+    p1278_first_frame=submitted;p1278_done_frame=frame;return true;
 }
 /* A timeout is a compatibility wake, never success evidence. */
 static void fresh_worker(thread_call_param_t a __unused,thread_call_param_t b __unused){
@@ -763,20 +771,24 @@ static void fresh_worker(thread_call_param_t a __unused,thread_call_param_t b __
         held=hakios_p1278_dpu_hold_begin();
         struct p1278_link_state l;struct p1278_dpu_state d;
         if(held)p1278_link_capture(&l);
-        latched=held && hakios_p1278_dpu_capture(&d) && p1278_dpu_wqhd(&d) &&
-            p1278_dpu_same(&p1278_pre_dpu,&d) && p1278_link_same(&p1278_pre_link,&l) &&
-            p1278_fifo_idle() && !p1277_panel_failed && hakios_display_requested_on()==1;
-        if(!latched && held){if(!hakios_p1278_dpu_hold_end())p1278_wake_cmd_ok=false;held=false;}
+        latched=held && hakios_p1278_dpu_capture(&d) && d.frame==p1278_done_frame &&
+            p1278_dpu_wqhd(&d) && p1278_dpu_same(&p1278_pre_dpu,&d) &&
+            p1278_link_same(&p1278_pre_link,&l) && p1278_drain_held(d.frame) &&
+            !p1277_panel_failed && hakios_display_requested_on()==1;
+        if(latched)p1278_snapshot("complete",&l,&d);
+        else p1278_refusal|=held?P78_DRAIN:P78_HOLD;
+        if(!latched && held){if(!hakios_p1278_dpu_hold_end()){p1278_wake_cmd_ok=false;p1278_refusal|=P78_RESTORE;}held=false;}
+        if(hakios_p1278_dpu_hold_faulted()){p1278_wake_cmd_ok=false;p1278_refusal|=P78_RESTORE;}
         if(!latched && mach_absolute_time()<fresh_deadline && p1278_wake_cmd_ok){fresh_schedule();lck_mtx_unlock(panel_lock);return;}
     }
     __atomic_store_n(&fresh_ready,0,__ATOMIC_RELEASE);
     if(hakios_display_requested_on()!=1){if(held)(void)hakios_p1278_dpu_hold_end();if(rev8){p1277_panel_retire();p1278_reason=7;p1278_reviewed=0;panel_asleep=true;__atomic_store_n(&p1277_panel_wake_uncertain,1,__ATOMIC_RELEASE);}lck_mtx_unlock(panel_lock);return;}
     bool ok=dsim_send(key_on,sizeof(key_on)) && dsim_send(on,sizeof(on));
     ok=dsim_send(key_off,sizeof(key_off)) && ok;
-    if(held && !hakios_p1278_dpu_hold_end()){ok=false;p1278_wake_cmd_ok=false;}
+    if(held && !hakios_p1278_dpu_hold_end()){ok=false;p1278_wake_cmd_ok=false;p1278_refusal|=P78_RESTORE;}
     bool persistent=__atomic_load_n(&p1277_panel_persistent,__ATOMIC_ACQUIRE)!=0;
-    if(latched && ok){fresh_ok++;if(rev8){p1278_clean_cycles++;p1278_reason=0;}}else{
-        if(rev8){p1278_reason=ok?5:6;p1278_reviewed=0;}
+    if(latched && ok){fresh_ok++;if(rev8){p1278_clean_cycles++;p1278_reason=0;p1278_refusal=0;}}else{
+        if(rev8){p1278_reason=ok?5:6;p1278_reviewed=0;p1278_refusal|=ok?P78_FRAME:P78_COMMAND;}
         fresh_fallback++;if(!ok)fresh_fault++;
         if(persistent)p1277_panel_retire();
     }
@@ -788,7 +800,7 @@ static void fresh_worker(thread_call_param_t a __unused,thread_call_param_t b __
     }
     if(ok && (!rev8 || p1278_wake_cmd_ok) && (!persistent || !latched))fresh_disarm();
     say("p127545-panel: gen=%u latch=%u display29=%u fallback=%u\n",gen,latched,ok,!latched||!ok);
-    if(rev8)say("p1278-panel: mode=%u gen=%u first=%u done=%u replay=%u dcs29=%u clean=%u reason=%u diag=%x raw=%02x/%02x/%02x/%02x\n",p1278_off_mode,gen,p1278_first_frame,p1278_done_frame,p1278_replay_ok,ok,p1278_clean_cycles,p1278_reason,p1278_diag_valid,p1278_diag_raw[0],p1278_diag_raw[1],p1278_diag_raw[2],p1278_diag_raw[3]);
+    if(rev8)say("p12781-panel: mode=%u gen=%u submit=%u done=%u replay=%u dcs29=%u clean=%u reason=%u refusal=%x drain=%u irq_raw=%08x diag=%x raw=%02x/%02x/%02x/%02x\n",p1278_off_mode,gen,p1278_first_frame,p1278_done_frame,p1278_replay_ok,ok,p1278_clean_cycles,p1278_reason,p1278_refusal,p1278_drain_samples,p1278_frame_irq_raw,p1278_diag_valid,p1278_diag_raw[0],p1278_diag_raw[1],p1278_diag_raw[2],p1278_diag_raw[3]);
     lck_mtx_unlock(panel_lock);
 }
 
@@ -823,21 +835,36 @@ static int p1278_power_locked(bool on){
     __atomic_store_n(&p1278_off_verified,0,__ATOMIC_RELEASE);
     __atomic_store_n(&p1277_panel_sleep_verified,0,__ATOMIC_RELEASE);
     if(!on){
+        p1278_refusal=0;p1278_drain_samples=0;p1278_frame_irq_raw=0;
         if(!p1278_panel_id_ok(panel_id) || !panel_write || panel_level<0 ||
-           (p1278_mode==2 && !(p1278_reviewed&1u)) ||
-           !hakios_p1278_dpu_hold_begin()){
-            p1278_reason=1;p1277_panel_retire();fresh_disarm();return EBUSY;
+           (p1278_mode==2 && !(p1278_reviewed&1u))){
+            p1278_refusal=P78_ID;p1278_reason=1;p1277_panel_retire();fresh_disarm();return EBUSY;
+        }
+        if(!hakios_p1278_dpu_hold_begin()){
+            p1278_refusal=P78_HOLD;p1278_reason=1;
+            if(hakios_p1278_dpu_hold_faulted()){p1278_refusal|=P78_RESTORE;p1278_reason=8;
+                __atomic_store_n(&p1277_panel_wake_uncertain,1,__ATOMIC_RELEASE);}
+            p1277_panel_retire();fresh_disarm();return EBUSY;
         }
         p1278_link_capture(&p1278_pre_link);
         p1278_pre_valid=hakios_p1278_dpu_capture(&p1278_pre_dpu);
         if(p1278_pre_valid)p1278_snapshot("before-off",&p1278_pre_link,&p1278_pre_dpu);
-        if(!p1278_pre_valid || !p1278_link_wqhd(&p1278_pre_link) ||
-           !p1278_dpu_wqhd(&p1278_pre_dpu) || !(p1278_pre_link.mask&P78_DSIM_FRAME_DONE) ||
-           !p1278_fifo_idle()){
+        p1278_refusal=p1278_admission(p1278_pre_valid,&p1278_pre_link,&p1278_pre_dpu);
+        if(!p1278_refusal && !p1278_drain_held(p1278_pre_dpu.frame))p1278_refusal|=P78_DRAIN;
+        if(p1278_refusal){
             bool released=hakios_p1278_dpu_hold_end();
-            p1278_reason=released?2:8;p1277_panel_retire();fresh_disarm();return EIO;
+            if(!released){p1278_refusal|=P78_RESTORE;__atomic_store_n(&p1277_panel_wake_uncertain,1,__ATOMIC_RELEASE);}
+            p1278_reason=released?2:8;p1277_panel_retire();fresh_disarm();
+            say("p12781-panel: pre-off refused mask=%x released=%u (no DCS)\n",p1278_refusal,released);
+            return EIO;
         }
         if(!(p1278_diag_valid&3u))p1278_read_diag(0);
+        if(!p1278_drain_held(p1278_pre_dpu.frame)){
+            bool released=hakios_p1278_dpu_hold_end();
+            p1278_refusal|=P78_DRAIN;
+            if(!released){p1278_refusal|=P78_RESTORE;__atomic_store_n(&p1277_panel_wake_uncertain,1,__ATOMIC_RELEASE);}
+            p1278_reason=released?2:8;p1277_panel_retire();fresh_disarm();return EIO;
+        }
         p1278_off_mode=p1278_mode;p1278_replay_ok=false;p1278_wake_cmd_ok=false;
         bool first=dsim_send(key,sizeof(key)) && dsim_send(off,sizeof(off));
         first=dsim_send(close,sizeof(close)) && first;
@@ -857,9 +884,10 @@ static int p1278_power_locked(bool on){
             __atomic_store_n(&p1277_panel_wake_uncertain,0,__ATOMIC_RELEASE);
         }else{
             p1278_reason=3;fresh_fault++;p1277_panel_retire();p1278_reviewed=0;
+            p1278_refusal|=P78_COMMAND;if(!released)p1278_refusal|=P78_RESTORE;
             __atomic_store_n(&p1277_panel_wake_uncertain,1,__ATOMIC_RELEASE);
         }
-        say("p1278-panel: off mode=%u gen=%u dcs28=%u dcs10=%u released=%u verified=%u\\n",p1278_off_mode,fresh_gen,first,p1278_off_mode==2&&second,released,fresh_off_ok);
+        say("p1278-panel: off mode=%u gen=%u dcs28=%u dcs10=%u released=%u verified=%u\n",p1278_off_mode,fresh_gen,first,p1278_off_mode==2&&second,released,fresh_off_ok);
         return fresh_off_ok?0:EIO;
     }
     __atomic_store_n(&p1277_panel_wake_uncertain,1,__ATOMIC_RELEASE);
@@ -871,10 +899,12 @@ static int p1278_power_locked(bool on){
         p1278_link_capture(&l);
         bool captured=hakios_p1278_dpu_capture(&d);
         if(captured)p1278_snapshot("before-wake",&l,&d);
-        valid=captured && p1278_pre_valid && p1278_link_wqhd(&l) && p1278_dpu_wqhd(&d) &&
-            p1278_link_same(&p1278_pre_link,&l) && p1278_dpu_same(&p1278_pre_dpu,&d) &&
-            p1278_fifo_idle() && (l.mask&P78_DSIM_FRAME_DONE);
-    }
+        p1278_refusal=p1278_admission(captured,&l,&d);
+        if(!p1278_pre_valid || !captured || !p1278_link_same(&p1278_pre_link,&l) ||
+           !p1278_dpu_same(&p1278_pre_dpu,&d))p1278_refusal|=P78_CHANGED;
+        if(!p1278_refusal && !p1278_drain_held(d.frame))p1278_refusal|=P78_DRAIN;
+        valid=p1278_refusal==0;
+    }else p1278_refusal|=P78_HOLD;
     bool replay=valid && fresh_off_ok && !p1277_panel_failed;
     bool sleepout=true;
     if(p1278_off_mode==2){
@@ -887,21 +917,28 @@ static int p1278_power_locked(bool on){
     }else p1278_not_before=deadline_us(20000);
     if(held && !(p1278_diag_valid&12u))p1278_read_diag(2);
     int brightness_error=panel_level>=0?panel_set_impl(panel_level,true):EINVAL;
-    bool cleared=held && p1278_fifo_idle() && p1278_clear_done();
+    bool drained=held && p1278_fifo_idle();
+    /* Publish the new generation before releasing TE: a normal renderer
+     * may queue a fresh buffer while the trigger is still held. The worker
+     * cannot run until panel_lock is released, after restore is witnessed. */
+    p1278_drain_samples=0;p1278_first_frame=p1278_done_frame=0;
+    clock_interval_to_deadline(650,NSEC_PER_MSEC,&fresh_deadline);
+    __atomic_store_n(&fresh_ready,fresh_gen,__ATOMIC_RELEASE);
     bool released=held && hakios_p1278_dpu_hold_end();
+    if(!drained)p1278_refusal|=P78_FIFO;
+    if(!released)p1278_refusal|=P78_RESTORE;
+    if(!sleepout || brightness_error || !replay)p1278_refusal|=P78_COMMAND;
     panel_asleep=false;
-    p1278_wake_cmd_ok=sleepout && !brightness_error && (!held || released);
-    p1278_replay_ok=replay && p1278_wake_cmd_ok && cleared && released;
+    p1278_wake_cmd_ok=sleepout && !brightness_error && held && released && drained &&
+        (p1278_off_mode==1 || replay) && !hakios_p1278_dpu_hold_faulted();
+    p1278_replay_ok=replay && p1278_wake_cmd_ok && drained && released;
     if(!p1278_replay_ok){
         p1278_reason=4;p1277_panel_retire();p1278_reviewed=0;
     }
-    p1278_first_seen=false;p1278_first_frame=p1278_done_frame=0;
     /* Still recover visibly if a diagnostic/refused replay occurs.
      * It is never a qualified wake and the policy cannot repeat. */
-    clock_interval_to_deadline(650,NSEC_PER_MSEC,&fresh_deadline);
-    __atomic_store_n(&fresh_ready,fresh_gen,__ATOMIC_RELEASE);
     fresh_schedule();
-    say("p1278-panel: wake mode=%u gen=%u held=%u match=%u sleepout=%u replay=%u brightness=%d cleared=%u released=%u\\n",p1278_off_mode,fresh_gen,held,valid,sleepout,p1278_replay_ok,brightness_error,cleared,released);
+    say("p1278-panel: wake mode=%u gen=%u held=%u match=%u sleepout=%u replay=%u brightness=%d drained=%u released=%u refusal=%x\n",p1278_off_mode,fresh_gen,held,valid,sleepout,p1278_replay_ok,brightness_error,drained,released,p1278_refusal);
     return p1278_replay_ok?0:EIO;
 }
 
@@ -1180,9 +1217,9 @@ SYSCTL_PROC(_kern_hakios,OID_AUTO,p1278_panel_review,CTLTYPE_INT|CTLFLAG_RW|CTLF
 static int p1278_panel_stats_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
     if(!panel_lock)return ENODEV;
     lck_mtx_lock(panel_lock);
-    char out[352];
-    snprintf(out,sizeof(out),"version=1 permission=%u mode=%u off_mode=%u off_verified=%u off_count=%u replays=%u clean=%u reviewed=%u reason=%u first=%u done=%u diag=%u raw=%02x/%02x/%02x/%02x id=%06x pending=%u failed=%u",
-        p1278_permission,p1278_mode,p1278_off_mode,p1278_off_verified,p1278_off_count,p1278_replays,p1278_clean_cycles,p1278_reviewed,p1278_reason,p1278_first_frame,p1278_done_frame,p1278_diag_valid,p1278_diag_raw[0],p1278_diag_raw[1],p1278_diag_raw[2],p1278_diag_raw[3],panel_id,fresh_ready,p1277_panel_failed);
+    char out[480];
+    snprintf(out,sizeof(out),"version=1 permission=%u mode=%u off_mode=%u off_verified=%u off_count=%u replays=%u clean=%u reviewed=%u reason=%u first=%u done=%u diag=%u raw=%02x/%02x/%02x/%02x id=%06x pending=%u failed=%u refusal=%u drain=%u irq_raw=%08x",
+        p1278_permission,p1278_mode,p1278_off_mode,p1278_off_verified,p1278_off_count,p1278_replays,p1278_clean_cycles,p1278_reviewed,p1278_reason,p1278_first_frame,p1278_done_frame,p1278_diag_valid,p1278_diag_raw[0],p1278_diag_raw[1],p1278_diag_raw[2],p1278_diag_raw[3],panel_id,fresh_ready,p1277_panel_failed,p1278_refusal,p1278_drain_samples,p1278_frame_irq_raw);
     lck_mtx_unlock(panel_lock);return SYSCTL_OUT(req,out,strlen(out)+1);
 }
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p1278_panel_stats,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1278_panel_stats_sysctl,"A","Rev8 physical display recovery witnesses, visual review and input power are separate");

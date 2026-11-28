@@ -278,7 +278,9 @@ void hakios_exynos_halt_off(__unused boolean_t reboot) {}  /* a halt hands the p
 bool hakios_p1278_dpu_capture(__unused struct p1278_dpu_state *s){return false;}
 bool hakios_p1278_dpu_hold_begin(void){return false;}
 bool hakios_p1278_dpu_hold_end(void){return false;}
-bool hakios_p1278_dpu_full_latched(__unused uint32_t gen,__unused uint32_t *frame){return false;}
+bool hakios_p1278_dpu_full_latched(__unused uint32_t gen,__unused uint32_t *frame,__unused uint32_t *submitted){return false;}
+bool hakios_p1278_dpu_held_idle(__unused uint32_t frame){return false;}
+bool hakios_p1278_dpu_hold_faulted(void){return false;}
 bool hakios_p545_disp_dpu_quiesce(void){return false;}
 bool hakios_p545_disp_dpu_restore(void){return false;}
 uint32_t hakios_p545_disp_frame_seq(void){return 0;}

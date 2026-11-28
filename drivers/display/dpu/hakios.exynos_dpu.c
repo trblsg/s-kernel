@@ -532,16 +532,21 @@ bool hakios_p1278_dpu_hold_end(void){
     bool owned=rd(decon,TRIG_CONTROL)==(p1278_saved_trigger|HW_TRIG_MASKED);
     if(owned){wr(decon,TRIG_CONTROL,p1278_saved_trigger);__builtin_arm_dsb(15);}
     bool ok=owned && rd(decon,TRIG_CONTROL)==p1278_saved_trigger;
-    if(!ok)p1278_hold_fault=true;
+    if(!ok)__atomic_store_n(&p1278_hold_fault,true,__ATOMIC_RELEASE);
     p1278_hold=false;lck_spin_unlock(&psr_lock);
     lck_mtx_unlock(&p1278_transition_lock);
     return ok;
 }
+bool hakios_p1278_dpu_hold_faulted(void){return __atomic_load_n(&p1278_hold_fault,__ATOMIC_ACQUIRE);}
 bool hakios_p1278_dpu_hold_begin(void){
     if(!lck_mtx_try_lock(&p1278_transition_lock))return false;
     lck_spin_lock(&psr_lock);
     if(probed<=0 || mode!=2 || !decon || !dpp || !dma || !p1278_dsc ||
-       p545_dpu_masked || p1278_hold || p1278_hold_fault || !psr_release_locked()){
+       p545_dpu_masked || p1278_hold || p1278_hold_fault){
+        lck_spin_unlock(&psr_lock);lck_mtx_unlock(&p1278_transition_lock);return false;
+    }
+    if(!psr_release_locked()){
+        __atomic_store_n(&p1278_hold_fault,true,__ATOMIC_RELEASE);
         lck_spin_unlock(&psr_lock);lck_mtx_unlock(&p1278_transition_lock);return false;
     }
     uint32_t trig=rd(decon,TRIG_CONTROL);
@@ -647,10 +652,10 @@ bool hakios_p127545_frame_latched(uint32_t gen){
 }
 /* The frame candidate is still temporal; require the full physical main
  * window and all active channel idle, in addition to fresh shadow take.
- * DSIM independently observes a new masked FRAME_DONE edge in panel code. */
-bool hakios_p1278_dpu_full_latched(uint32_t gen,uint32_t *frame){
+ * Panel code independently checks a drained DSIM PHY while TE is held. */
+bool hakios_p1278_dpu_full_latched(uint32_t gen,uint32_t *frame,uint32_t *submitted){
     P545_DISP_GUARD(false,false);
-    if(!frame || !lck_mtx_try_lock(&p1278_transition_lock))return false;
+    if(!frame || !submitted || !lck_mtx_try_lock(&p1278_transition_lock))return false;
     bool ok=false;
     lck_spin_lock(&psr_lock);
     if(gen && gen==p127545_submit_gen && gen==hakios_p127545_panel_generation() &&
@@ -662,9 +667,19 @@ bool hakios_p1278_dpu_full_latched(uint32_t gen,uint32_t *frame){
        (rd(decon,DATA_PATH_0)&(1u<<(4*win))) &&
        p545_dpu_idle()){
         uint32_t f=rd(decon,FRAME_COUNT);
-        if(f!=p127545_submit_frame){*frame=f;ok=true;}
+        if(f!=p127545_submit_frame){*frame=f;*submitted=p127545_submit_frame;ok=true;}
     }
     lck_spin_unlock(&psr_lock);lck_mtx_unlock(&p1278_transition_lock);return ok;
+}
+/* Called only by the panel's serialized transition owner. Pending shadow
+ * requests may queue behind the held trigger; no new transfer may start. */
+bool hakios_p1278_dpu_held_idle(uint32_t frame){
+    P545_DISP_GUARD(false,false);
+    lck_spin_lock(&psr_lock);
+    bool ok=p1278_hold && !p1278_hold_fault &&
+        rd(decon,TRIG_CONTROL)==(p1278_saved_trigger|HW_TRIG_MASKED) &&
+        rd(decon,FRAME_COUNT)==frame && p1278_dpu_transfer_idle();
+    lck_spin_unlock(&psr_lock);return ok;
 }
 static void
 psr_mask_locked(unsigned owner,uint32_t threshold)

@@ -43,7 +43,10 @@ static unsigned gov_policy=2,big_cores=4,hakios_cpu_exit_mask,p1273_gate_phase;
 static int p1273_gate_lock,p12752_lock,temperature=61000,pmic_error;
 static unsigned p12752_idle_mode;
 static bool bad_table,wrong_rate;
-struct cluster{unsigned online,sum_now,cur,touch_khz,frame_khz,scion_touch;} clusters[2]={{4,0,1053000,1456000,0},{4,0,650000,1800000,1200000}};
+struct cluster{unsigned online,sum_now,cur,touch_khz,frame_khz,scion_touch,boost_floor;} clusters[2]={{4,0,1053000,1456000,0},{4,0,650000,1800000,1200000}};
+#include "../../drivers/power/exynos/hakios.p12781_active.h"
+static bool p12781_profile=true;
+static uint64_t p12781_tail_hits,p12781_tail_bypass;
 #define NSEC_PER_MSEC 1000000ull
 static void absolutetime_to_nanoseconds(uint64_t t,uint64_t *n){*n=t;}
 static uint64_t p1277_boost_span(void){return 150*NSEC_PER_MSEC;}
