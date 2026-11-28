@@ -2,13 +2,13 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **734 arguments**: 640 read by the kernel, 24 by the loader, 88 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **741 arguments**: 647 read by the kernel, 24 by the loader, 88 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
 Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl kern.bootargs`).
 
-## GPU and display (128)
+## GPU and display (132)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -119,6 +119,10 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `p1272_probe` | K | `hakios.mali.c` | `CONFIG_P1272_PROBE` |  |
 | `p12753` | K | `hakios.p125_sysctl.h`, `hakios.p12753.h`, `hakios.p127545_disp.h`, `hakios.s6e3ha8.c` | `CONFIG_P12753` |  |
 | `p12754` | K | `hakios.bcm4361_bt.c`, `hakios.exynos_acpm.c`, `hakios.exynos_camera.c`, `hakios.exynos_mfc.c`, `hakios.p125_sysctl.h`, `hakios.p127545_disp.h`, `hakios.s6e3ha8.c` | `CONFIG_P12754` |  |
+| `p1277` | K | `hakios.exynos_cpufreq.c`, `hakios.mali.c`, `hakios.s6e3ha8.c` | `CONFIG_P1277` |  |
+| `p1277_active` | K | `hakios.exynos_cpufreq.c`, `hakios.mali.c` | `CONFIG_P1277_ACTIVE` |  |
+| `p1277_gpu_dvs` | K | `hakios.mali.c` | `CONFIG_P1277_GPU_DVS` |  |
+| `p1277_panel` | K | `hakios.s6e3ha8.c` | `CONFIG_P1277_PANEL` |  |
 | `p12_gpu_boot_auto` | K | `hakios.mali.c` | `CONFIG_P12_GPU_BOOT_AUTO` |  |
 | `p3power` | K | `hakios.mali.c` | `CONFIG_P3POWER` |  |
 | `p3rail` | K | `hakios.mali.c` | `CONFIG_P3RAIL` |  |
@@ -628,7 +632,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 | `ufs_write_guid` | L | `loader.c` | `CONFIG_UFS_WRITE_GUID` |  |
 
-## User space (194)
+## User space (197)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -787,6 +791,9 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `p12751` | KU | `hakios.p1274_lab.h`, `hakios.p12751.h`, `init.c` | `CONFIG_P12751` |  |
 | `p12752` | K | `hakios.p1274_lab.h` | `CONFIG_P12752` |  |
 | `p127545_disp` | K | `hakios.p127545_disp.h` | `CONFIG_P127545_DISP` |  |
+| `p1277_auto_idle` | K | `hakios.exynos_cpufreq.c` | `CONFIG_P1277_AUTO_IDLE` |  |
+| `p1277_g2` | K | `hakios.exynos_cpufreq.c` | `CONFIG_P1277_G2` |  |
+| `p1277_psci` | K | `hakios.exynos_cpufreq.c` | `CONFIG_P1277_PSCI` |  |
 | `passcode_debug` | U | `passcoded.m` | `CONFIG_PASSCODE_DEBUG` |  |
 | `passcode_reset` | K | `MiniAppleKeyStore.cpp` | `CONFIG_PASSCODE_RESET` |  |
 | `passcode_selftest` | K | `MiniAppleKeyStore.cpp` | `CONFIG_PASSCODE_SELFTEST` |  |

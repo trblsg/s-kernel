@@ -46,6 +46,7 @@ $script:P1274ProfileAllowed=$false
 $script:P12752IdleAllowed=$false
 $script:P12753HostEnabled=$false
 $script:P12754HostEnabled=$false
+$script:P1277HostEnabled=$false
 $script:P12753ArmAllowed=$false
 $script:P127544WarmAllowed=$false
 $script:P127544CompositeAllowed=$false
@@ -141,6 +142,13 @@ function P12-ReplyShape([string]$Name,[string]$Reply,[bool]$Mixed){
         '^p12752_revision$' {return ($Reply -ceq '1')}
         '^p12753_revision$' {return ($Reply -ceq '1')}
         '^p12754_revision$' {return ($Reply -cmatch '^[123456]$')}
+        '^p1277_revision$' {return ($Reply -ceq '7')}
+        '^p1277_auto_stats$' {return ($Reply -cmatch "^version=1 permission=[01] enabled=[01] state=[0-5] stage=[0-5] samples=$dec retries=$dec abox_driver_ok=[01] fault=$dec last_uv=$dec last_mhz=$dec last_reason=$dec own_lease=$dec live_mode=$dec ufs_safe=[01] interactive_qualification=0$")}
+        '^p1277_layer2_stats$' {return ($Reply -cmatch "^version=1 request=[0-4] module=[0-4] state=[0-2] result=[0-4] samples=$dec restored=[01] power_qualified=0$")}
+        '^p1277_burst_stats$' {return ($Reply -cmatch "^version=1 request=[01] owned=[01] trace_state=[0-5] observed_trigger=$dec trace_generation=$dec threshold=150 dwell_ms=250 pretrigger=0$")}
+        '^p1277_panel_stats$' {return ($Reply -cmatch "^version=1 permission=[01] request=[01] persistent=[01] failed=[01] asleep=[01] pending=$dec sleep=$dec latch29=$dec fallback=$dec fault=$dec sleep_verified=[01] wake_uncertain=[01]$")}
+        '^p1277_gpu_dvs_stats$' {return ($Reply -cmatch "^version=1 permission=[01] active=[01] failed=[01] high=$dec rebase=$dec last_configured_vsel=$dec fault=$dec$")}
+        '^p1277_psci_stats$' {return ($Reply -cmatch '^version=1 permission=[01] done=[01] raw_version=0x[0-9a-f]{8} raw_features=0x[0-9a-f]{8} signed_features=-?[0-9]{1,10} osi=[01] extended=[01] conduit=SMC_EL2_possible suspend_called=0$')}
         '^(mali_irq|p127542_g2|p127545_panel)$' {return ($Reply -cmatch '^[01]$')}
         '^p127545_panel_stats$' {return ($Reply -cmatch "^version=1 mode=[01] gen=$dec pending=$dec sleep=$dec latch29=$dec fallback=$dec fault=$dec$")}
         '^p127545_disp_review$' {return ($Reply -cmatch '^(0|200000|134000)$')}
@@ -325,6 +333,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup,[ValidateRan
     if($script:P12752IdleAllowed -or $script:P1274HostEnabled){$allowed+=@('p12751_boot_latch','p12752_revision','p12752_eligibility','p12752_idle_mode','p12752_idle_info','p12752_idle_select','p12752_idle_page','p12752_profile')}
     if($script:P12753HostEnabled){$allowed+=@('p12753_revision','p12753_guard','p12753_status','p12753_arm','p12753_select','p12753_page')}
     if($script:P12754HostEnabled){$allowed+=@('p12754_revision','p12754_wait','p12754_rate','p127541_stats','p1231_ufs_stats','p127542_audio','p127542_audio_result','mali_irq','p127542_g2','p127543_wait','p127543_rail','p127543_assist','p127544_window','p127545_cmu','p127545_ect_mif','p127545_ect_int','p127545_int_bounds','p127545_panel','p127545_panel_stats','p127545_hci','p127545_mfc_stats','p127545_cam_stats','p127545_disp_stats','p127545_disp_review')}
+    if($script:P1277HostEnabled){$allowed+=@('p1277_revision','p1277_auto_stats','p1277_layer2_stats','p1277_burst_stats','p1277_panel_stats','p1277_gpu_dvs_stats','p1277_psci_stats')}
     if($Name -notin $allowed){throw "P12 sysctl disallowed $Name"}
     if($script:P124HostEnabled -and $Name -eq 'p1231_hash_mode' -and $Value -eq '1'){throw 'P12.4 rejects scalar thermal trial'}
     if($Value -ne '' -and -not (

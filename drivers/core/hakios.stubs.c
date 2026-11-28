@@ -266,6 +266,7 @@ bool hakios_s6e3ha8_blank(__unused int (*say)(const char *, ...)) { return false
 int hakios_s6e3ha8_power(bool on);
 int hakios_s6e3ha8_power(__unused bool on) { return ENODEV; }    /* no panel driver: the screen as iOS draws it */
 uint32_t hakios_p127545_panel_generation(void) { return 0; }
+bool hakios_p1277_panel_auto_compatible(void) { return false; }
 int hakios_p9_panel_auto_on(void) { return 0; }       /* no Samsung S9 runtime panel mode */
 #endif
 

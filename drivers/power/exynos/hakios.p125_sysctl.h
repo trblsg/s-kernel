@@ -1,5 +1,12 @@
 /* P12.5 debug-only observation controls, no hardware power policy writes. */
 static int p125_page_select;
+/* Separate automatic policy owner. Never copy the interactive gate mask. */
+static uint32_t p1277_auto_permission,p1277_auto_enabled;
+static uint64_t p1277_auto_lease;
+static bool p1277_auto_blocks(void){
+    return __atomic_load_n(&p1277_auto_enabled,__ATOMIC_ACQUIRE) || __atomic_load_n(&p1277_auto_lease,__ATOMIC_ACQUIRE);
+}
+static unsigned p1277_auto_guard_reason(uint64_t lease);
 /* P12.6 policy is separate from the observation probe. All waits are bounded
  * so removal/expiry never depends on host USB or a producer wake. */
 static unsigned
@@ -32,7 +39,9 @@ p126_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     if(e || req->newptr==USER_ADDR_NULL)return e;
     if(__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE))return EBUSY;
     if(v<0 || v>(int)P126_MASK)return EINVAL;
+    P1277_ADMISSION(v!=0,true);
     if(!v){hakios_p126_stop(0);return 0;}
+    if(p1277_auto_blocks())return EBUSY;
     if(__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE))return EBUSY;
     if(__atomic_load_n(&hakios_p126_lease,__ATOMIC_ACQUIRE) || hakios_p127_mode())return EBUSY;
     if(p125_thermal_reason())return EPERM;
@@ -248,7 +257,8 @@ p1273_trace_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__u
     if(v!=0 && v!=1)return EINVAL;
     uint64_t now=mach_absolute_time();
     if(__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE))return EBUSY;
-    if(!v){hakios_p1273_trace_stop(0,now);return 0;}
+    if(!v){if(p1277_auto_blocks())return EBUSY;hakios_p1273_trace_stop(0,now);return 0;}
+    P1277_ADMISSION(true,true);
     if(__atomic_load_n(&hakios_p1274_trace_late,__ATOMIC_ACQUIRE))return EBUSY;
     int enabled=0;
     if(!PE_parse_boot_argn("p1273",&enabled,sizeof(enabled)) || enabled!=1 ||
@@ -479,6 +489,7 @@ static int p1273_cap_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void 
     int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
     if(e || !req->newptr)return e;
     if(v<0 || v>3)return EINVAL;
+    P1277_ADMISSION(v!=0,true);
     uint64_t now=mach_absolute_time();
     if(!v){
         lck_spin_lock(&p1273_cap_lock);
@@ -699,6 +710,8 @@ p1273_gate_begin_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__u
     if(e || !req->newptr)return e;
     if(__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE))return EBUSY;
     if(v && !p1273_gate_bit((unsigned)v))return EINVAL;
+    P1277_ADMISSION(v!=0,true);
+    if(v && p1277_auto_blocks())return EBUSY;
     bool enabled=p1273_gate_enabled(),idle=p1273_gate_idle();
     unsigned thermal=p125_thermal_reason();
     bool battery_ok=hakios_battery_temperature()>0;
@@ -712,7 +725,7 @@ p1273_gate_begin_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,__u
         lck_spin_unlock(&p1273_gate_lock);
         return 0;
     }
-    if(!enabled || thermal || !battery_ok || !idle || !p1273_gate_idle()){
+    if(p1277_auto_blocks() || !enabled || thermal || !battery_ok || !idle || !p1273_gate_idle()){
         lck_spin_unlock(&p1273_gate_lock);return EPERM;
     }
     if(p1273_gate_phase){lck_spin_unlock(&p1273_gate_lock);return EBUSY;}
@@ -971,6 +984,17 @@ static void
 p127_guard(void)
 {
     uint64_t lease=__atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE);
+    if(p1277_auto_blocks()){
+        lck_spin_lock(&p1273_gate_lock);
+        lease=__atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE);
+        if(lease && lease==__atomic_load_n(&p1277_auto_lease,__ATOMIC_ACQUIRE)){
+            unsigned reason=p1277_auto_guard_reason(lease);
+            lck_spin_unlock(&p1273_gate_lock);
+            if(reason)(void)hakios_p127_stop_owned(lease,reason);
+            return;
+        }
+        lck_spin_unlock(&p1273_gate_lock);
+    }
     if(!lease){
         if(__atomic_load_n(&hakios_p1273_gate_watch,__ATOMIC_ACQUIRE)){
             lck_spin_lock(&p1273_gate_lock);
@@ -1038,9 +1062,11 @@ static int
 p127_arm_mode_internal(int v,bool assist,bool audit_composite)
 {
     if(v<0 || v>(int)P127_MASK || P127_FLOOR(v)>5)return EINVAL;
+    P1277_ADMISSION(v!=0,true);
     if(p12754_optin() && P127_FLOOR(v)>4)return EPERM;
     if(audit_composite!=p127545_is_composite((unsigned)v) || (audit_composite && (assist || !__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE))))return EPERM;
-    if(!v){hakios_p127_stop(0);return 0;}
+    if(!v){if(p1277_auto_blocks())return EBUSY;hakios_p127_stop(0);return 0;}
+    if(p1277_auto_blocks())return EBUSY;
     if(__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE))return EBUSY;
     if(!(v&P127_BASE))return EINVAL;
     /* Only exact combined masks can pass the same-boot gate. */
@@ -1097,7 +1123,7 @@ p127_arm_mode_internal(int v,bool assist,bool audit_composite)
     if(p1273_gate_phase && (p1273_gate_phase!=1 || p1273_gate_mode!=(unsigned)v)){
         lck_spin_unlock(&p1273_gate_lock);return EBUSY;
     }
-    if(!p1273_gate_idle()){lck_spin_unlock(&p1273_gate_lock);return EBUSY;}
+    if(p1277_auto_blocks() || !p1273_gate_idle()){lck_spin_unlock(&p1273_gate_lock);return EBUSY;}
     if(p1273_gate_phase==1){
         uint64_t gate_span=0;nanoseconds_to_absolutetime(120ULL*NSEC_PER_SEC,&gate_span);
         if(gate_span<span)next=((now+gate_span)&~(uint64_t)P127_MASK)|(unsigned)v;
@@ -1375,6 +1401,7 @@ static int p1273_offline_s_sysctl(__unused struct sysctl_oid *oidp,__unused void
     if(e || !req->newptr)return e;
     if(__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE))return EBUSY;
     if(v!=0 && v!=60)return EINVAL; /* first hardware qualification only */
+    P1277_ADMISSION(v!=0,true);
     if(__atomic_load_n(&hakios_p125_lease,__ATOMIC_ACQUIRE) ||
        __atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE) ||
        __atomic_load_n(&hakios_p1273_offline_fixed,__ATOMIC_ACQUIRE))return EBUSY;
@@ -1457,6 +1484,7 @@ p125_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     if(e || req->newptr==USER_ADDR_NULL)return e;
     if(__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE))return EBUSY;
     if(v<0 || v>3)return EINVAL;
+    P1277_ADMISSION(true,true);
     if(!v){p125_finish(0);return 0;}
     if(__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE))return EBUSY;
     if(__atomic_load_n(&hakios_p125_lease,__ATOMIC_ACQUIRE))return EBUSY;

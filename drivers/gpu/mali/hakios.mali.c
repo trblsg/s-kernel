@@ -265,7 +265,12 @@ static void mali_irq_detach(void);
 static bool g3d_ensure_on(void);        /* (mali_job_lock held: the G3D back on after g3d_sleep) */
 static bool g3d_power_on(void);         /* (mali_job_lock held: the power-on steps, without the g3d_sleep test) */
 static void g3d_idle_gate(void);
-static void gov_rebase(void);
+static bool gov_rebase(void);
+/* Rev7: explicit permission, runtime opt-in only. Never alias boot VSEL. */
+static uint32_t p1277_gpu_dvs, p1277_dvs_live, p1277_dvs_failed;
+static bool gov_dvs; /* shared with early power-off rollback */
+static uint32_t p1277_dvs_high_count, p1277_dvs_rebase_count, p1277_dvs_last_vsel;
+static bool p1277_dvs_fallback_locked(void);
 static uint32_t pll_mhz(void);
 static void g3d_lab_monitor_start(void);
 static void p5_monitor_snapshot(uint64_t now,uint64_t up_ns,uint32_t status,
@@ -1097,6 +1102,13 @@ g3d_off(void)
 		return;
 	}
 clocks:
+    /* A failed partial-domain OFF is not permission to remove its PLL
+     * or lower BUCK6. This also covers boot cleanup. */
+    if((rd(pmu,PMU_G3D_STATUS)&G3D_ON)!=0){
+        g3d_lab_gpu_safe=false;g3d_lab_trip(3);
+        __atomic_store_n(&p1272_live,0,__ATOMIC_RELEASE);
+        return;
+    }
 	wr(cmu_g3d, MUX_G3D_USER, rd(cmu_g3d, MUX_G3D_USER) & ~MUX_SEL);
 	wr(cmu_g3d, PLL_CON0, rd(cmu_g3d, PLL_CON0) & ~MUX_SEL);
 	wr(cmu_g3d, PLL_CON2, PLL_CON2_OFF);
@@ -1109,6 +1121,7 @@ clocks:
 			rail_changed = false;
 		} else {
 			say("mali: B6OUT not put back (it reads otherwise, or ACPM did not answer)\n");
+			if(p1277_dvs_live){p1277_dvs_failed=1;p1277_dvs_live=0;gov_dvs=false;g3d_lab_trip(5);}
 		}
 	}
 	powered_here = false;
@@ -1276,20 +1289,25 @@ step_power(void)
 		say("mali: 2: B6OUT cannot be read: not written either (ACPM does not answer); the GPU is not touched at the "
 		    "boot's voltage\n");
 		return false;
-	} else if (b6out_found >= B6OUT_950MV) {
-		say("mali: 2: B6OUT is %#x (%u mV) already: not written\n", b6out_found, 300 + b6out_found * 25 / 4);
 	} else {
+		/* b6out_found is immutable rollback evidence, NOT the current rail.
+		 * A runtime DVS/OFF cycle can leave a different VSEL. Read anew
+		 * before clock, PMU, DTZPC or reset. */
 		uint8_t now = 0;
-
-		say("mali: 2: ACPM: B6OUT = %#x (950 mV, was %#x = %u mV), read back, then %u us\n", B6OUT_950MV, b6out_found,
-		    300 + b6out_found * 25 / 4, RAIL_SETTLE_US);
-		rail_changed = true;
-		if (!rail_set(B6OUT_950MV)) {
-			say("mali: 2: BUCK6 is not at 950 mV: the GPU is not touched at the boot's voltage\n");
-			(void)rail_read("now", &now);
-			return false;
+		if (!rail_read("before power-on", &now)) return false;
+		if (p1277_gpu_dvs && now > B6OUT_950MV) return false;
+		if (now < B6OUT_950MV) {
+			rail_changed = true;
+			if (!rail_set(B6OUT_950MV)) {
+				say("mali: 2: BUCK6 raise not verified; no GPU power-on\n");
+				return false;
+			}
+			now = B6OUT_950MV;
 		}
-		(void)rail_read("now", &now);
+		if (p1277_gpu_dvs) {
+			p1277_dvs_last_vsel = now;
+			p1277_dvs_high_count++;
+		}
 	}
 	/* the clock: PLL_G3D at the rate asked for */
 	g3d_apm_levels();
@@ -1447,6 +1465,15 @@ g3d_power_on(void)
 	lck_mtx_unlock(&mali_lock);
 	gpu_answered = true;
 	g3d_awake = true;
+	/* All reset/protection/AS0 work ran at the verified high rail.
+	 * Rebase BEFORE publishing live/arming IRQ. Failed rail recovery
+	 * leaves p1272_live=0 and job dispatch fenced. */
+	if (!gov_rebase()) {
+		g3d_lab_wake_failed++;
+		g3d_lab_gpu_safe = false;
+		g3d_lab_trip(5);
+		return false;
+	}
 	g3d_lab_gpu_safe = true;
 	__atomic_store_n(&p1272_live,1,__ATOMIC_RELEASE);
 	if (mali_irq) {
@@ -1454,7 +1481,6 @@ g3d_power_on(void)
 	}
 	now = mach_absolute_time();
 	__atomic_store_n(&g3d_last_busy, now, __ATOMIC_RELAXED);
-	gov_rebase();
 	if (g3d_off_at != 0) {
 		uint64_t off_ns, wake_ns;
 
@@ -2288,6 +2314,20 @@ mali_submit_observed(uint64_t chain, bool fragment,struct p1273_wake_info *obs)
          * registers or submit future jobs. IRQ callback quiesced first. */
         mali_irq_detach();
         __atomic_store_n(&p1272_live,0,__ATOMIC_RELEASE);
+        /* A faulted job can reach reset BEFORE the worker's post-job
+         * voltage handler. Retire the pilot here, with submission fenced,
+         * and never reset at an unverified low rail. */
+        if(p1277_dvs_live){
+            g3d_lab_job_faults++;g3d_lab_trip(6);
+            lck_mtx_unlock(&mali_lock);
+            bool high=p1277_dvs_fallback_locked();
+            lck_mtx_lock(&mali_lock);
+            if(!high){
+                __atomic_store_n(&mali_irq_armed,0,__ATOMIC_RELEASE);
+                lck_mtx_unlock(&mali_lock);lck_mtx_unlock(&mali_job_lock);
+                return MALI_HUNG;
+            }
+        }
         if(!gpu_reset() || !gpu_cores_on(&which)){
             g3d_lab_gpu_safe=false;g3d_lab_trip(4);
             __atomic_store_n(&mali_irq_armed,0,__ATOMIC_RELEASE);
@@ -2805,7 +2845,7 @@ hakios_mali_frame(void)
 	hakios_exynos_bus_busy();       /* bus_max=2: the memory bus at its top while frames come (hakios.exynos_acpm.c) */
 }
 static unsigned gov_level, gov_cap = G3D_RATES_MOST - 1, gov_down, gov_failed;
-static bool gov_dvs;                    /* mali_dvs=1 and every level's voltage known: BUCK6 follows the level */
+/* gov_dvs is declared alongside power-transition ownership above. */
 
 /* B6OUT for a level under mali_dvs: the APM's voltage + the margin, rounded up, between the floor and 950 mV */
 static uint8_t
@@ -2813,7 +2853,8 @@ gov_vsel(unsigned level)
 {
 	uint32_t uv = g3d_rates[level].uv + mali_dvs_margin, vsel;
 
-	uv = uv < mali_dvs_floor ? mali_dvs_floor : uv;
+	uint32_t floor = p1277_dvs_live ? 850000u : mali_dvs_floor;
+	uv = uv < floor ? floor : uv;
 	vsel = uv <= 300000 ? 0 : (uv - 300000 + 6249) / 6250;
 	return (uint8_t)(vsel > B6OUT_MOST ? B6OUT_MOST : vsel);
 }
@@ -2881,50 +2922,53 @@ gov_start(void)
 static void
 gov_set(unsigned level)
 {
-	bool switched;
-
-	if (level == gov_level || level >= GOV_LEVELS) {
-		return;
-	}
-	lck_mtx_lock(&mali_job_lock);
-    /* No governor clock/rail changes while another owner has gated the
-     * domain or marked it unsafe. Preserve existing rate decisions. */
-    if(!p1272_mmio_ok()){
+    bool switched;
+    lck_mtx_lock(&mali_job_lock);
+    if (level == gov_level || level >= GOV_LEVELS || gov_level >= GOV_LEVELS ||
+        !gov_on || !p1272_mmio_ok()) {
         lck_mtx_unlock(&mali_job_lock);return;
     }
-	/* mali_dvs: the voltage up before the clock goes up (a failed raise: no switch) */
-	if (gov_dvs && level > gov_level && gov_vsel(level) > gov_vsel(gov_level) && !rail_set(gov_vsel(level))) {
-		say("mali: mali_dvs: BUCK6 not raised for %u MHz: no switch\n", g3d_rates[level].mhz);
-        lck_mtx_unlock(&mali_job_lock);
-		return;
-	}
-	pll_quiet = true;
-	switched = pll_switch(&g3d_rates[level]);
-	pll_quiet = false;
-	/* ... and down only after the clock has come down */
-	if (switched && gov_dvs && level < gov_level && gov_vsel(level) < gov_vsel(gov_level)) {
-		(void)rail_set(gov_vsel(level));
-	}
-	lck_mtx_unlock(&mali_job_lock);
-	if (switched) {
-		gov_ups += level > gov_level;
-		gov_downs += level < gov_level;
-		gov_level = level;
-		gov_switches++;
-		gov_failed = 0;
-		return;
-	}
-	if ((gov_level = gov_level_now()) >= GOV_LEVELS || ++gov_failed >= 3) {
-		gov_on = false;
-		if (gov_dvs) {
-			gov_dvs = false;
-            lck_mtx_lock(&mali_job_lock);
-			if(p1272_power_present())(void)rail_set(B6OUT_950MV);
-            lck_mtx_unlock(&mali_job_lock);
-		}
-		say("mali: mali_gov: PLL_G3D did not switch to %u MHz (%u times in a row; it runs at %u MHz): the governor stops\n",
-		    g3d_rates[level].mhz, gov_failed, pll_mhz());
-	}
+    /* Voltage first on increase, clock first on decrease. The Rev7 pilot
+     * validates every supported OPP against its fixed 850mV floor. */
+    if (gov_dvs && level > gov_level && gov_vsel(level) > gov_vsel(gov_level) &&
+        !rail_set(gov_vsel(level))) {
+        say("mali: mali_dvs: BUCK6 not raised for %u MHz: no switch\n",g3d_rates[level].mhz);
+        lck_mtx_unlock(&mali_job_lock);return;
+    }
+    pll_quiet=true;
+    switched=pll_switch(&g3d_rates[level]);
+    pll_quiet=false;
+    if (switched && gov_dvs && level < gov_level && gov_vsel(level)<gov_vsel(gov_level)) {
+        if (!rail_set(gov_vsel(level))) {
+            gov_dvs=false;
+            if (!rail_set(B6OUT_950MV)) {
+                g3d_lab_gpu_safe=false;
+                __atomic_store_n(&p1272_live,0,__ATOMIC_RELEASE);
+                g3d_lab_trip(5);
+            }
+        }
+    }
+    if (switched) {
+        gov_ups += level > gov_level;
+        gov_downs += level < gov_level;
+        gov_level=level;gov_switches++;gov_failed=0;
+        lck_mtx_unlock(&mali_job_lock);return;
+    }
+    if(p1277_dvs_live)(void)p1277_dvs_fallback_locked();
+    if ((gov_level=gov_level_now())>=GOV_LEVELS || ++gov_failed>=3) {
+        gov_on=false;
+        if(gov_dvs) {
+            gov_dvs=false;
+            if(!p1272_power_present() || !rail_set(B6OUT_950MV)) {
+                g3d_lab_gpu_safe=false;
+                __atomic_store_n(&p1272_live,0,__ATOMIC_RELEASE);
+                g3d_lab_trip(5);
+            }
+        }
+        say("mali: mali_gov: PLL_G3D did not switch to %u MHz (%u times in a row; it runs at %u MHz): the governor stops\n",
+            g3d_rates[level].mhz,gov_failed,pll_mhz());
+    }
+    lck_mtx_unlock(&mali_job_lock);
 }
 
 /* `busy` more of the GPU's time at `now` (mach_absolute_time); a window that has ended decides. No locks held. */
@@ -3094,17 +3138,62 @@ gov_window(uint64_t now, uint64_t busy)
 	}
 }
 
+/* Rev7 deliberately starts at a conservative fixed 850mV floor across
+ * ALL advertised governor OPPs. Reject unknown/too-high rates; do not
+ * derive permission from the nominal clock alone. Called under job lock. */
+static bool
+p1277_dvs_table_ok(void)
+{
+    if (!mali_acpm || !acpm_ok || !g3d_nrates || g3d_nrates > G3D_RATES_MOST || mali_dvs_margin<25000u) return false;
+    for (unsigned i=0;i<GOV_LEVELS;i++) {
+        if (!g3d_rates[i].uv || (uint64_t)g3d_rates[i].uv + mali_dvs_margin > 850000u) return false;
+    }
+    return true;
+}
+static bool
+p1277_dvs_fallback_locked(void)
+{
+    p1277_dvs_live=0; gov_dvs=false; p1277_dvs_failed=1;
+    rail_changed=true; /* even a failed write may have changed hardware */
+    if (acpm_ok && b6out_known && rail_set(B6OUT_950MV)) {
+        rail_changed=true; p1277_dvs_last_vsel=B6OUT_950MV;
+        return true;
+    }
+    g3d_lab_gpu_safe=false;
+    __atomic_store_n(&p1272_live,0,__ATOMIC_RELEASE);
+    g3d_lab_trip(5);
+    return false;
+}
 /* After a runtime power-on the PLL is at mali_mhz (step 2), not at the level the governor last chose. */
-static void
+static bool
 gov_rebase(void)
 {
-	if (!gov_on) {
-		return;
-	}
-	gov_level = gov_level_now();
-	gov_since = mach_absolute_time();
-	gov_busy = 0;
-	gov_down = 0;
+    if (!gov_on) return !p1277_dvs_live || p1277_dvs_fallback_locked();
+    gov_level = gov_level_now();
+    gov_since = mach_absolute_time();
+    gov_busy = 0;
+    gov_down = 0;
+    if (gov_level >= GOV_LEVELS) {
+        gov_on=false;
+        if(p1277_dvs_live)return p1277_dvs_fallback_locked();
+        if(gov_dvs){gov_dvs=false;return rail_set(B6OUT_950MV);}
+        return true;
+    }
+    if (p1277_dvs_live) {
+        if (!p1272_power_present()) { (void)p1277_dvs_fallback_locked(); return false; }
+        if (gov_level >= GOV_LEVELS || !p1277_dvs_table_ok())return p1277_dvs_fallback_locked();
+        if (!rail_set(gov_vsel(gov_level))) return p1277_dvs_fallback_locked();
+        rail_changed=true;
+        p1277_dvs_last_vsel=gov_vsel(gov_level);
+        p1277_dvs_rebase_count++;
+    } else if (gov_dvs) {
+        /* Legacy DVS too must not index an unknown OPP after power-on. */
+        if (gov_level >= GOV_LEVELS || !rail_set(gov_vsel(gov_level))) {
+            gov_dvs=false;
+            if (!rail_set(B6OUT_950MV)) return false;
+        }
+    }
+    return true;
 }
 
 /*
@@ -3200,6 +3289,18 @@ g3d_idle_gate(void)
 		lck_mtx_unlock(&mali_job_lock);
 		return;
 	}
+	/* Rev7: every reset during the OFF path also needs the high rail.
+	 * g3d_lab_mv remains the legacy manual-test sentinel, not live VSEL. */
+	if (p1277_dvs_live) {
+		if (!p1272_power_present() || !rail_set(B6OUT_950MV)) {
+			(void)p1277_dvs_fallback_locked();
+			lck_mtx_unlock(&mali_job_lock);
+			return;
+		}
+		rail_changed=true;
+		p1277_dvs_last_vsel=B6OUT_950MV;
+		p1277_dvs_high_count++;
+	}
 	say("g3d-lab: OFF candidate mode=%u idle=%ums job_age=%llums frame_age=%llums queue=0\n",
 	    gate_mode, ms, job_age, frame_age);
 	mali_irq_off();            /* detach GIC before any GPU block can disappear */
@@ -3214,6 +3315,11 @@ g3d_idle_gate(void)
 		say("g3d-lab: G3D domain OFF; next GPU job must restore SMC/PLL/MMU first\n");
 	} else if (state == G3D_ON) {
 		g3d_awake = true;
+		/* OFF was refused after raising the rail. Do not resume DVS
+		 * until a new boot; retain the verified stock rail. */
+		if (p1277_dvs_live && !p1277_dvs_fallback_locked()) {
+			lck_mtx_unlock(&mali_job_lock); return;
+		}
 		if (!g3d_lab_gpu_safe && g3d_lab_protection_ok && p1272_power_present()) {
 			/* A reset may have run before DTZPC SAVE refused.
 			 * Reconstruct cores and MMU before allowing ANY job. */
@@ -3276,7 +3382,7 @@ g3d_sleep_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 			return ENODEV;
 		}
 		lck_mtx_lock(&mali_job_lock);
-		if (g3d_lab_mv != 950 || g3d_lab_fault || !g3d_lab_gpu_safe || !g3d_lab_protection_ok) {
+		if (p1277_dvs_live || g3d_lab_mv != 950 || g3d_lab_fault || !g3d_lab_gpu_safe || !g3d_lab_protection_ok) {
 			lck_mtx_unlock(&mali_job_lock);
 			return EBUSY; /* existing sysctl cannot bypass Lab rail/fault guards */
 		}
@@ -3292,6 +3398,7 @@ g3d_sleep_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 		return 0;
 	}
 	lck_mtx_lock(&mali_job_lock);
+	if (p1277_dvs_live){lck_mtx_unlock(&mali_job_lock);return EBUSY;}
 	if (g3d_awake && !p1272_mmio_ok()) {
 		lck_mtx_unlock(&mali_job_lock);
 		return EIO; /* use g3d_lab_reset for GPU reinit before dispatch */
@@ -3336,6 +3443,63 @@ SYSCTL_PROC(_kern_hakios, OID_AUTO, g3d_sleep_ms, CTLTYPE_INT | CTLFLAG_RW | CTL
 
 #include "hakios.p7_gpu_lab.h" /* P7 durable G3D PMU/PLL state ring */
 #include "hakios.mali_lab.h" /* G3D independent OFF-state sampler, reused by P5 */
+
+/* Runtime pilot only, after the existing autonomous OFF path is ready.
+ * 0 restores 950mV (or leaves a verified OFF domain asleep); 1 arms.
+ * No boot-time DVS writes from p1277_gpu_dvs permission alone. */
+static int
+p1277_gpu_dvs_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req)
+{
+    if(!lck_mtx_try_lock(&mali_job_lock))return EBUSY;
+    int v=(int)p1277_dvs_live;
+    lck_mtx_unlock(&mali_job_lock);
+    int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(e || !req->newptr)return e;
+    if(v<0 || v>1)return EINVAL;
+    if(!p1277_gpu_dvs || !hakios_mali_ready())return ENODEV;
+    if(!lck_mtx_try_lock(&mali_job_lock))return EBUSY;
+    if(!v){
+        if(!p1277_dvs_live){lck_mtx_unlock(&mali_job_lock);return 0;}
+        if(!g3d_awake && pmu && (rd(pmu,PMU_G3D_STATUS)&G3D_ON)==0){
+            p1277_dvs_live=0;gov_dvs=false;
+            lck_mtx_unlock(&mali_job_lock);return 0;
+        }
+        if(!p1272_power_present() || !rail_set(B6OUT_950MV)){
+            (void)p1277_dvs_fallback_locked();
+            lck_mtx_unlock(&mali_job_lock);return EIO;
+        }
+        rail_changed=true;p1277_dvs_last_vsel=B6OUT_950MV;
+        p1277_dvs_live=0;gov_dvs=false;
+        lck_mtx_unlock(&mali_job_lock);return 0;
+    }
+    if(p1277_dvs_live){lck_mtx_unlock(&mali_job_lock);return 0;}
+    if(p1277_dvs_failed || g3d_lab_fault || gov_dvs || !gov_on || !p9_auto_gpu ||
+       !g3d_sleep || g3d_lab_gate!=2 || g3d_lab_mv!=950 ||
+       !p1272_mmio_ok() || hakios_display_requested_on()!=1 || !b6out_known ||
+       !p1277_dvs_table_ok() || gov_level_now()>=GOV_LEVELS){
+        lck_mtx_unlock(&mali_job_lock);return EPERM;
+    }
+    uint8_t actual=0;
+    if(!rail_read("Rev7 pilot before",&actual) || actual!=B6OUT_950MV){
+        lck_mtx_unlock(&mali_job_lock);return EIO;
+    }
+    gov_level=gov_level_now();
+    if(gov_level>=GOV_LEVELS){lck_mtx_unlock(&mali_job_lock);return EIO;}
+    p1277_dvs_live=1;gov_dvs=true;rail_changed=true;
+    if(!rail_set(gov_vsel(gov_level))){
+        (void)p1277_dvs_fallback_locked();lck_mtx_unlock(&mali_job_lock);return EIO;
+    }
+    rail_changed=true;p1277_dvs_last_vsel=gov_vsel(gov_level);
+    lck_mtx_unlock(&mali_job_lock);return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1277_gpu_dvs,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1277_gpu_dvs_sysctl,"I","Rev7 guarded 850mV active rail pilot, existing OFF retained");
+static int p1277_gpu_dvs_stats_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
+    if(!lck_mtx_try_lock(&mali_job_lock))return EBUSY;
+    char buf[200];snprintf(buf,sizeof(buf),"version=1 permission=%u active=%u failed=%u high=%u rebase=%u last_configured_vsel=%u fault=%u",
+        p1277_gpu_dvs,p1277_dvs_live,p1277_dvs_failed,p1277_dvs_high_count,p1277_dvs_rebase_count,p1277_dvs_last_vsel,g3d_lab_fault);
+    lck_mtx_unlock(&mali_job_lock);return SYSCTL_OUT(req,buf,strlen(buf)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1277_gpu_dvs_stats,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1277_gpu_dvs_stats_sysctl,"A","Rev7 GPU DVS transition witness, cached VSEL not live rail");
 #include "hakios.p5_lab.h"   /* P5 per-client/PMU read-only probes; mode0 off */
 
 /*
@@ -3783,10 +3947,17 @@ hakios_mali_init(void)
 	g3d_sleep_ms = g3d_sleep_ms < 500 ? 500 : g3d_sleep_ms > 60000 ? 60000 : g3d_sleep_ms;
 	(void)PE_parse_boot_argn("mali_max", &mali_max, sizeof(mali_max));
 	(void)PE_parse_boot_argn("mali_dvs", &mali_dvs, sizeof(mali_dvs));
+	uint32_t rev7_profile=0;
+	(void)PE_parse_boot_argn("p1277",&rev7_profile,sizeof(rev7_profile));
+	(void)PE_parse_boot_argn("p1277_gpu_dvs", &p1277_gpu_dvs, sizeof(p1277_gpu_dvs));
+	/* Permission only: user must explicitly enable the runtime pilot. */
+	p1277_gpu_dvs = (p1277_gpu_dvs == 1 || rev7_profile == 1) && !mali_dvs && mali_acpm;
 	(void)PE_parse_boot_argn("mali_dvs_margin", &mali_dvs_margin, sizeof(mali_dvs_margin));
 	(void)PE_parse_boot_argn("mali_dvs_floor", &mali_dvs_floor, sizeof(mali_dvs_floor));
 	(void)PE_parse_boot_argn("mali_nap_us", &mali_nap_us, sizeof(mali_nap_us));
 	mali_nap_us = mali_nap_us < 10 ? 10 : mali_nap_us > 1000 ? 1000 : mali_nap_us;
+	uint32_t rev7_active=0;
+	if(PE_parse_boot_argn("p1277_active",&rev7_active,sizeof(rev7_active)) && rev7_active==1)mali_irq=1;
 	(void)PE_parse_boot_argn("mali_irq", &mali_irq, sizeof(mali_irq));
 	mali_irq = mali_irq != 0;
 	if (!PE_parse_boot_argn("mali", &last_step, sizeof(last_step)) || last_step == 0) {

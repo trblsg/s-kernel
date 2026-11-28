@@ -387,7 +387,7 @@ static uint32_t p66_mode_cached,p67_mode_cached,p611_mode_cached,p612_mode_cache
 static int glstage_on;                       /* boot-arg glstage=1: 60-frame timing aggregates */
 static int glcost_on;                        /* boot-arg glcost=1: per-slot CPU wall timing */
 static int p122_enabled;                      /* boot-arg p122=1; runtime mode controls ONLY diagnostics */
-static bool p127542_g2_available;
+static bool p127542_g2_available,p1277_g2_available;
 static int g2_bind_on;                        /* boot-arg g2_bind=1, otherwise legacy code path */
 static int g2_verify_on;                      /* boot-arg g2_verify=1: sample actual GL binding */
 static int g21_diag_on;                       /* boot-arg g21_diag=1: G2 reasons, even with skipping OFF */
@@ -1729,6 +1729,11 @@ frame_begin(struct eagl *e)
 		int trial=0;size_t trial_size=sizeof(trial);
 		bool trial_on=p127542_g2_available && mode_ok && value==0 && hashmode==0 && !e->g2_fault &&
 		    sysctlbyname("kern.hakios.p127542_g2",&trial,&trial_size,NULL,0)==0 && trial_size==sizeof(trial) && trial==1;
+		/* Rev7 uses the verified context path, never the global bypass. */
+		if(!trial_on && p1277_g2_available && mode_ok && value==0 && hashmode==0 && !e->g2_fault){
+		    trial=0;trial_size=sizeof(trial);
+		    trial_on=sysctlbyname("kern.hakios.p1277_g2",&trial,&trial_size,NULL,0)==0 && trial_size==sizeof(trial) && trial==1;
+		}
 		if(trial_on!=e->p127542_g2){
 		    say("p127542-g2: enabled=%u context=%p skipped=%u fault=%u\n",trial_on,(void*)e,e->g2.skipped,e->g2_fault);
 		    e->p127542_g2=trial_on;s9_g2_invalidate(&e->g2);e->g2.verify_serial=0;
@@ -5574,6 +5579,7 @@ install(void)
 			say("p122-gl: boot_enabled=1 initial_mode=0 glstage=0 glcost=0 policy_writes=0\n");
 		}
 		p127542_g2_available=s9_has_boot_flag(arguments,"p12754=1");
+		p1277_g2_available=p127542_g2_available && p122_enabled && (s9_has_boot_flag(arguments,"p1277_g2=1") || s9_has_boot_flag(arguments,"p1277=1"));
 		g2_bind_on = s9_has_boot_flag(arguments, "g2_bind=1");
 		if(p122_enabled && g2_bind_on){
 			g2_bind_on=0;

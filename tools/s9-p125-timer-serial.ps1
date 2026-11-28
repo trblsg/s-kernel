@@ -4,7 +4,7 @@
 param(
  [ValidatePattern('^COM[0-9]+$')][string]$Port='COM125',
  [string]$ReconnectPort='',
- [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump','DriverTrials','EnergyTrials','EnergyOffline','Idle52','Idle52Offline','Idle52Recover','Audit53','Audit53Recover','Audit53Compare','Guard53','Hardware54','Foreground542','Panel545','Mfc545Probe','Cam545Probe','Disp545Probe','IdleAssist543','GpuCacheCheck','P1273Diagnostics','BusTrace','ThermalTrace','ThermalTraceDump','ThermalGpuDump','OffBurstCapABA','OfflineABA','FunctionalGate','CombinedConnected')][string]$Scenario='Trace',
+ [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump','DriverTrials','EnergyTrials','EnergyOffline','Idle52','Idle52Offline','Idle52Recover','Audit53','Audit53Recover','Audit53Compare','Guard53','Rev7Status','Hardware54','Foreground542','Panel545','Mfc545Probe','Cam545Probe','Disp545Probe','IdleAssist543','GpuCacheCheck','P1273Diagnostics','BusTrace','ThermalTrace','ThermalTraceDump','ThermalGpuDump','OffBurstCapABA','OfflineABA','FunctionalGate','CombinedConnected')][string]$Scenario='Trace',
  [ValidateRange(30,90)][int]$TraceSeconds=60,
  [ValidateRange(12,40)][int]$AggregateSeconds=20,
  [string]$SymbolMap='',
@@ -67,6 +67,7 @@ $script:P1272HostEnabled=$true
 $script:P12752IdleAllowed=[bool]$P12752Idle
 $script:P12752IdleDirty=$false
 $script:P12754HostEnabled=[bool]$P12754
+$script:P1277HostEnabled=$Scenario -eq 'Rev7Status'
 $script:P12753HostEnabled=$Scenario -in @('Audit53','Audit53Recover','Guard53','Hardware54','Foreground542','Panel545','Mfc545Probe','Cam545Probe','Disp545Probe','IdleAssist543')
 $script:P12753ArmAllowed=($Scenario -eq 'Audit53' -and [bool]$AllowOfflineTrial) -or ($Scenario -eq 'Hardware54' -and $P12754) -or ($Scenario -eq 'Mfc545Probe' -and $P12754 -and $AllowMfc545) -or ($Scenario -eq 'Cam545Probe' -and $P12754 -and $AllowCam545) -or ($Scenario -eq 'Disp545Probe' -and $P12754 -and $AllowDisp545)
 $script:P127545MfcAllowed=$Scenario -eq 'Audit53' -and $Audit53Module -eq 'MFCQCH' -and [bool]$AllowMfc545
@@ -78,7 +79,7 @@ $script:P127545DispProbeAllowed=$Scenario -eq 'Disp545Probe' -and [bool]$AllowDi
 $script:P127544WarmAllowed=$Scenario -eq 'Audit53' -and [bool]$WarmAudit
 $script:P127544CompositeAllowed=$script:P127544WarmAllowed -and $Audit53Module -like 'COMPOSITE*' -and [bool]$AllowComposite545
 $script:P127545LongWaitAllowed=$script:P127544WarmAllowed -and [bool]$LongWait545
-$script:P1273HostEnabled=([bool]$P1273Telemetry -or [bool]$P12752Idle -or $script:P12753HostEnabled -or $Scenario -in @('P1273Diagnostics','BusTrace','ThermalTrace','ThermalTraceDump','ThermalGpuDump','OffBurstCapABA','OfflineABA','FunctionalGate','CombinedConnected'))
+$script:P1273HostEnabled=([bool]$P1273Telemetry -or [bool]$P12752Idle -or $script:P12753HostEnabled -or $Scenario -in @('Rev7Status','P1273Diagnostics','BusTrace','ThermalTrace','ThermalTraceDump','ThermalGpuDump','OffBurstCapABA','OfflineABA','FunctionalGate','CombinedConnected'))
 $script:P1273GateDirty=$false
 $script:P1273OfflineDirty=$false
 $script:P1273CapDirty=$false
@@ -1406,21 +1407,58 @@ function P12754-FrozenIdentity($S,$CP){
         if($v[$k] -ne $S[$k]){throw 'P12754 frozen phase changed; no retry'}
     }
 }
+# Only recover a frozen cursor transport. Re-open the same COM, sync
+# read-only, and prove the same boot AND frozen phase before retrying.
+function P1277-ReopenFrozen($S,$CP){
+    $target=$script:Port
+    if(-not $target){throw 'P1277 frozen reconnect: no exact COM'}
+    if($null -ne $script:LifeCurrentSegment){$script:LifeCurrentSegment.End=Life-Now}
+    $script:LifeCurrentSegment=$null
+    if($null -ne $script:LifeSerial){try{$script:LifeSerial.Dispose()}catch{};$script:LifeSerial=$null}
+    $until=(Life-Now).AddSeconds(30)
+    $AckTimeoutSeconds=5
+    while((Life-Now) -lt $until){
+        Life-CheckSafety (Life-Now);P12-EarlyThermalGuard
+        try{
+            P125-Open $target
+            $script:LifePartial='';$script:LifeSynced=$false;$script:LifeFenceSent=$false;$script:LifeFenceEcho=$false
+            $script:LifeState='UNKNOWN';$script:LifeScene='UNKNOWN'
+            Life-SyncReadOnly
+        }catch{
+            $retry=(P125-IsReadDisconnect $_.Exception) -or ($_.Exception.Message -like 'P10 display sysctl reply absent;*')
+            for($e=$_.Exception;$null -ne $e;$e=$e.InnerException){
+                if($e -is [System.UnauthorizedAccessException] -or $e -is [System.TimeoutException]){$retry=$true;break}
+            }
+            if($null -ne $script:LifeSerial){try{$script:LifeSerial.Dispose()}catch{};$script:LifeSerial=$null}
+            if(-not $retry){throw}
+            Start-Sleep -Milliseconds 500
+            continue
+        }
+        # Identity mismatch is fatal, not a retryable serial error.
+        P12754-FrozenIdentity $S $CP
+        Life-Say 'P1277 frozen reconnect: exact boot/phase confirmed; retry cursor only'
+        return
+    }
+    throw 'P1277 frozen reconnect timeout; retained partial CSV'
+}
 function P12754-FrozenRow($S,$CP,[int]$Index){
     for($attempt=0;$attempt -lt 3;$attempt++){
         try{
-            [void](P12-Query 'p12753_select' "$Index")
-        }catch{
-            if($_.Exception.Message -notmatch 'Missing echo and sysctl readback'){throw}
-            P12754-FrozenIdentity $S $CP
-            if((P12-Query 'p12753_select') -ne "$Index"){
-                if($attempt -eq 2){throw 'P12754 frozen cursor not confirmed'}
-                continue
+            try{[void](P12-Query 'p12753_select' "$Index")}catch{
+                if($_.Exception.Message -notmatch 'Missing echo and sysctl readback'){throw}
+                P12754-FrozenIdentity $S $CP
+                if((P12-Query 'p12753_select') -ne "$Index"){
+                    if($attempt -eq 2){throw 'P12754 frozen cursor not confirmed'}
+                    continue
+                }
             }
+            $r=P125-Fields (P12-Query 'p12753_page')
+            if($r.select -ne "$Index" -or $r.phase -ne $S.start){throw 'P12754 row identity changed'}
+            return $r
+        }catch{
+            if($attempt -eq 2 -or -not (P125-IsReadDisconnect $_.Exception)){throw}
+            P1277-ReopenFrozen $S $CP
         }
-        $r=P125-Fields (P12-Query 'p12753_page')
-        if($r.select -ne "$Index" -or $r.phase -ne $S.start){throw 'P12754 row identity changed'}
-        return $r
     }
     throw 'P12754 cursor retries exhausted'
 }
@@ -1632,12 +1670,14 @@ function P12753-ReadAudit([string]$Stem,$CP){
     $railVerified=$rail.Count -eq 2 -and @($rail|Where-Object {$_.valid -eq '1' -and $_.opp_valid -eq '1'}).Count -eq 2
     $railValues=@($rail|Where-Object {$_.valid -eq '1' -and $_.opp_valid -eq '1'}|ForEach-Object {[uint64]$_.opp_uv})
     $aboxEvidence=[ordered]@{stop=(P12753-Diff $a.Metrics $m 'abox_stop');resume=(P12753-Diff $a.Metrics $m 'abox_resume');idle_wait=(P12753-Diff $a.Metrics $m 'abox_idle_wait');fault=(P12753-Diff $a.Metrics $m 'abox_fault')}
+    $observedApplied=$null;$rollbackObserved=$null
     if($P12754 -and ($CP.Module -like 'COMPOSITE*' -or $CP.Module -match '^LITTLE(949|832|715|598)$')){
         $target=if($CP.Module -like 'COMPOSITE*'){598}else{[int]$Matches[1]};$thermal=@($rows|Where-Object {$_.kind -eq '1'})
         $matched=@($thermal|Where-Object {[int]$_.lkhz -eq 1000*$target -and [Math]::Abs([double]$_.lmeas-$target) -le .03*$target})
         $rate=P125-Fields (P12-Query 'p12754_rate')
         $rate|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath "$Stem.restore54.json"
         $restore=$restore -and $rate.fresh -eq '1' -and [uint64]$rate.cur -ge 1053000 -and [Math]::Abs(1000.0*[double]$rate.meas-[double]$rate.cur) -le .03*[double]$rate.cur
+        $observedApplied=$matched.Count -gt 0 -and (P12753-Diff $a.Status $e.Status 'floor_hits') -gt 0
         $applied=$thermal.Count -gt 0 -and $matched.Count -ge [Math]::Ceiling(.8*$thermal.Count) -and $railVerified -and (P12753-Diff $a.Status $e.Status 'floor_hits') -gt 0 -and [uint64]$e.Status.little_cur -ge 1053000 -and $e.Status.ufs_safe -eq '1'
     }
     if($CP.PSObject.Properties['UfsBefore']){
@@ -1645,6 +1685,13 @@ function P12753-ReadAudit([string]$Stem,$CP){
         $ufsPost|ConvertTo-Json|Set-Content -Encoding UTF8 -LiteralPath "$Stem.ufs544-after.json"
         $restore=$restore -and $ufsPost.floor_safe -eq '1' -and $ufsPost.dead -eq '0' -and $ufsPost.read_errors -eq $CP.UfsBefore.read_errors -and $ufsPost.write_errors -eq $CP.UfsBefore.write_errors
     }elseif($CP.Module -like 'COMPOSITE*'){$restore=$false}
+    if($null -ne $observedApplied){
+        # Rollback is independent of complete coverage or BUCK3 samples.
+        $rollbackObserved=[bool]($restore -and $CP.PSObject.Properties['UfsBefore'])
+        if($CP.Module -like 'COMPOSITE*'){
+            $observedApplied=[bool]($observedApplied -and $aboxEvidence.stop -gt 0 -and $aboxEvidence.idle_wait -gt 0)
+        }
+    }
     if($CP.Module -eq 'MFCQCH'){
         $mfcAfter=P125-Fields (P12-Query 'p127545_mfc_stats')
         P12754-FrozenIdentity $s $CP
@@ -1697,6 +1744,9 @@ function P12753-ReadAudit([string]$Stem,$CP){
     if($CP.Module -eq 'ISPPREQCH'){$extra.cam_evidence=[bool]($applied -and $restore);$extra.cam_after=$camAfter}
     if($CP.Module -in @('DISP400','DISP200','DISP134')){$extra.disp_evidence=[bool]($applied -and $restore);$extra.disp_after=$dispAfter}
     if($CP.PSObject.Properties['PreconditionSeconds']){$extra.precondition_s=$CP.PreconditionSeconds;$extra.wait_s=$CP.WaitSeconds}
+    $extra.observed_applied=$observedApplied
+    $extra.rollback_observed=$rollbackObserved
+    $extra.qualification_complete=[bool]($applied -and $restore -and $summary.power_verified)
     foreach($k in $extra.Keys){$summary|Add-Member -NotePropertyName $k -NotePropertyValue $extra[$k]}
     $summary|ConvertTo-Json -Depth 6|Set-Content -Encoding UTF8 -LiteralPath $out
     Life-Say "P12753 $($CP.Module) verified=$($summary.power_verified) applied=$applied restored=$restore mean_W=$($summary.mean_discharge_w)"
@@ -2315,6 +2365,18 @@ function P125-Run {
         $script:LifeRaw=[IO.FileStream]::new($raw,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
         P125-Open $Port
         Life-SyncReadOnly
+        if($Scenario -eq 'Rev7Status'){
+            if((P12-Query 'p1277_revision') -ne '7'){throw 'P1277 revision 7 required'}
+            $nonce=P12-Query 'p1273_boot_identity'
+            $report=[ordered]@{version=1;revision=7;boot=$nonce;observed_utc=(Get-Date).ToUniversalTime().ToString('o');power_qualified=$false;values=[ordered]@{}}
+            foreach($key in @('p1277_auto_stats','p1277_layer2_stats','p1277_burst_stats','p1277_panel_stats','p1277_gpu_dvs_stats','p1277_psci_stats')){
+                try{$report.values[$key]=P125-Fields (P12-Query $key)}catch{$report.values[$key]=@{unavailable=$true;error=$_.Exception.Message}}
+            }
+            if((P12-Query 'p1273_boot_identity') -ne $nonce){throw 'Rev7Status boot changed'}
+            $report|ConvertTo-Json -Depth 8|Set-Content -Encoding UTF8 -LiteralPath "$stem.rev7-status.json"
+            Write-Host "Rev7 read-only status: $stem.rev7-status.json"
+            return
+        }
         if($Scenario -eq 'Guard53'){
             if((P12-Query 'p12753_revision') -ne '1'){throw 'P12753 ABI mismatch'}
             if($P12754){P12754-Require;P12-Query 'p12754_wait'|Set-Content -Encoding UTF8 -LiteralPath "$stem.wait54.txt"

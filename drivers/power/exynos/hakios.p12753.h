@@ -228,7 +228,7 @@ extern int hakios_p9_panel_auto_on(void);
 extern bool hakios_p545_mfc_restored(void),hakios_p545_cam_restored(void),hakios_p545_disp_restored(void);
 static bool p12753_other_idle(void){
     lck_spin_lock(&p12752_lock);bool old_idle=p12752_idle_mode==0;lck_spin_unlock(&p12752_lock);
-    return hakios_p545_mfc_restored() && hakios_p545_cam_restored() && hakios_p545_disp_restored() &&
+    return !p1277_auto_blocks() && hakios_p545_mfc_restored() && hakios_p545_cam_restored() && hakios_p545_disp_restored() &&
         !hakios_p9_panel_auto_on() && gov_running && !ocp_on && gov_policy==2 && clusters[0].online==4 && clusters[1].online==4 &&
         big_cores==SCION_BIG_CORES && !hakios_cpu_exit_mask && hakios_p124_ufs_safe() &&
         p1273_gate_idle() && p12753_gate_clear() && old_idle && !__atomic_load_n(&hakios_p1273_offline_duration,__ATOMIC_ACQUIRE);
@@ -437,12 +437,13 @@ static int p12753_arm_sysctl(__unused struct sysctl_oid *o,__unused void *a,__un
        (v>=15 && !warm && !probe) || (extended && !warm) ||
        (p545_probe((unsigned)v) && !probe))return EINVAL;
     if(!v){if(__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE))__atomic_store_n(&p12753_cancel,1,__ATOMIC_RELEASE);return 0;}
+    P1277_ADMISSION(true,true);
     if(!p12753_enabled() || !p12753_other_idle() || !p12753_qualified((unsigned)v) || p125_thermal_reason() || hakios_battery_temperature()<=0)return EPERM;
     uint64_t now=mach_absolute_time();
     uint64_t fg=__atomic_load_n(&hakios_p12753_fg_link,__ATOMIC_ACQUIRE);
     if((fg&3u)!=3u || now<(fg&~3ULL) || now-(fg&~3ULL)>p1274_ticks_ms(15000))return EPERM;
     lck_spin_lock(&p12753_lock);
-    if(__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE)){lck_spin_unlock(&p12753_lock);return EBUSY;}
+    if(p1277_auto_blocks() || __atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE)){lck_spin_unlock(&p12753_lock);return EBUSY;}
     if(p12754_optin()){
         p12754_preflight=p12753_temp_mask(p12753_gbig,p12753_glit,p12753_ggpu,p12753_gbat,p12753_gage,
             v==14?67000:warm?63001:60001,v==14?66000:warm?62001:59001,v==14?68000:warm?62001:60001,45);

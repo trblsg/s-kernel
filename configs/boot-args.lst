@@ -471,6 +471,13 @@ p12754	k
 p127545_disp	k
 p127545_ect	l
 p127545_qch	k
+p1277	k
+p1277_active	k
+p1277_auto_idle	k
+p1277_g2	k
+p1277_gpu_dvs	k
+p1277_panel	k
+p1277_psci	k
 p127_intx	k
 p127_intx_attach	k
 p127_intx_detach	k

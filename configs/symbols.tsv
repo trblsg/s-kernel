@@ -336,7 +336,7 @@ M3_PREP	arg	m3_prep	User space	k	hakios.exynos_m3.c,hakios_arm_init.h,hakios_com
 MACHINE_NAME	arg	machine_name	CPU, memory and boot	k	GenericARMPE.cpp	
 MALI	arg	mali	GPU and display	k	hakios.mali.c	run the first N steps (9: all, then serve)
 MALI_ACPM	arg	mali_acpm	GPU and display	k	hakios.mali.c	do not raise the rail. The GPU is then touched at the boot's voltage, which hung the S9+ (test only).
-MALI_DVS	arg	mali_dvs	GPU and display	k	hakios.mali.c	the voltage up before the clock goes up (a failed raise: no switch)
+MALI_DVS	arg	mali_dvs	GPU and display	k	hakios.mali.c	
 MALI_DVS_FLOOR	arg	mali_dvs_floor	GPU and display	k	hakios.mali.c	
 MALI_DVS_MARGIN	arg	mali_dvs_margin	GPU and display	k	hakios.mali.c	
 MALI_FASTMAP	arg	mali_fastmap	GPU and display	k	hakios.mali.c	walk the page tables through the GPU's caches; each buffer entered is then an MMU update of AS 0
@@ -447,6 +447,13 @@ P12754	arg	p12754	GPU and display	k	hakios.bcm4361_bt.c,hakios.exynos_acpm.c,hak
 P127545_DISP	arg	p127545_disp	User space	k	hakios.p127545_disp.h	
 P127545_ECT	arg	p127545_ect	Loader	l	loader.c	
 P127545_QCH	arg	p127545_qch	Cameras	k	hakios.exynos_camera.c,hakios.exynos_mfc.c	
+P1277	arg	p1277	GPU and display	k	hakios.exynos_cpufreq.c,hakios.mali.c,hakios.s6e3ha8.c	
+P1277_ACTIVE	arg	p1277_active	GPU and display	k	hakios.exynos_cpufreq.c,hakios.mali.c	
+P1277_AUTO_IDLE	arg	p1277_auto_idle	User space	k	hakios.exynos_cpufreq.c	
+P1277_G2	arg	p1277_g2	User space	k	hakios.exynos_cpufreq.c	
+P1277_GPU_DVS	arg	p1277_gpu_dvs	GPU and display	k	hakios.mali.c	
+P1277_PANEL	arg	p1277_panel	GPU and display	k	hakios.s6e3ha8.c	
+P1277_PSCI	arg	p1277_psci	User space	k	hakios.exynos_cpufreq.c	
 P127_INTX	arg	p127_intx	Wi-Fi	k	lx_pci.c	
 P127_INTX_ATTACH	arg	p127_intx_attach	Wi-Fi	k	lx_pci.c	
 P127_INTX_DETACH	arg	p127_intx_detach	Wi-Fi	k	lx_pci.c	

@@ -161,6 +161,7 @@ g3d_lab_gate_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
 	if (reached < STEPS || !mali_gov || !gov_on)
 		return ENODEV;
 	lck_mtx_lock(&mali_job_lock);
+	if(p1277_dvs_live){lck_mtx_unlock(&mali_job_lock);return EBUSY;}
 	if (value >= 2 && (g3d_lab_fault || g3d_lab_mv != 950 || gov_dvs ||
 	    !g3d_lab_gpu_safe || !g3d_lab_protection_ok)) {
 		lck_mtx_unlock(&mali_job_lock);
@@ -208,6 +209,7 @@ p9_auto_gpu_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
     if (reached < STEPS || !mali_gov || !gov_on || !pmu || !cmu_g3d)
         return ENODEV;
     lck_mtx_lock(&mali_job_lock);
+    if(p1277_dvs_live && value!=(int)p9_auto_gpu){lck_mtx_unlock(&mali_job_lock);return EBUSY;}
     if (value == (int)p9_auto_gpu) {
         lck_mtx_unlock(&mali_job_lock);
         return 0;
@@ -548,6 +550,8 @@ g3d_lab_reset_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
 		return EINVAL;
 	if(!hakios_mali_ready())return ENODEV;
 	lck_mtx_lock(&mali_job_lock);
+	/* Explicit recovery retires the Rev7 voltage pilot before wake. */
+	if(p1277_dvs_live){p1277_dvs_live=0;gov_dvs=false;p1277_dvs_failed=1;}
 	if (!g3d_awake && !g3d_power_on()) {
 		lck_mtx_unlock(&mali_job_lock);
 		say("g3d-lab: RESET failed: power recovery incomplete, reboot/rollback needed\n");
@@ -616,9 +620,14 @@ SYSCTL_PROC(_kern_hakios, OID_AUTO, g3d_lab_reset,
 static void
 g3d_lab_restore_after_job_error(void)
 {
-	if (g3d_lab_mv == 950)
-		return;
 	lck_mtx_lock(&mali_job_lock);
+	if(p1277_dvs_live){
+		g3d_lab_job_faults++;
+		g3d_lab_trip(6);
+		(void)p1277_dvs_fallback_locked();
+		lck_mtx_unlock(&mali_job_lock);return;
+	}
+	if(g3d_lab_mv==950){lck_mtx_unlock(&mali_job_lock);return;}
 	g3d_lab_job_faults++;
 	g3d_lab_trip(6);
 	if (g3d_awake && acpm_ok && rail_set(B6OUT_950MV)) {

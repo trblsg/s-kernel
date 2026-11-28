@@ -83,6 +83,7 @@ power/exynos bsd/dev/hakios.p8_unified_lab.h
 power/exynos bsd/dev/hakios.p610_gov_diag.h
 power/exynos bsd/dev/hakios.p12_thermal.h
 power/exynos bsd/dev/hakios.p125_sysctl.h
+power/exynos bsd/dev/hakios.p1277_idle.h
 power/exynos bsd/dev/hakios.p1273_gate.h
 power/exynos bsd/dev/hakios.p1274_policy.h
 power/exynos bsd/dev/hakios.p1274_lab.h

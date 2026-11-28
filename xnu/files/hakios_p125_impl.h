@@ -251,9 +251,8 @@ void hakios_p1273_event(unsigned event,uint64_t count)
     unsigned active=hakios_p127_mode()==watch?0:1;
     __atomic_fetch_add(&hakios_p1273_events[active][event],count,__ATOMIC_RELAXED);
 }
-void hakios_p127_stop(unsigned reason)
+static void p127_stop_publish(uint64_t v,unsigned reason)
 {
-    uint64_t v=__atomic_exchange_n(&hakios_p127_lease,0,__ATOMIC_ACQ_REL);
     if(v){
         __atomic_store_n(&hakios_p127_reason,reason,__ATOMIC_RELEASE);
         __atomic_store_n(&hakios_p1273_last_stop_reason,reason,__ATOMIC_RELAXED);
@@ -265,6 +264,18 @@ void hakios_p127_stop(unsigned reason)
             thread_wakeup((event_t)&hakios_p127_audio_event);
         }
     }
+}
+void hakios_p127_stop(unsigned reason)
+{
+    uint64_t v=__atomic_exchange_n(&hakios_p127_lease,0,__ATOMIC_ACQ_REL);
+    p127_stop_publish(v,reason);
+}
+bool hakios_p127_stop_owned(uint64_t lease,unsigned reason)
+{
+    if(!lease)return false;
+    uint64_t expected=lease;
+    if(!__atomic_compare_exchange_n(&hakios_p127_lease,&expected,0,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return false;
+    p127_stop_publish(lease,reason);return true;
 }
 void hakios_p127_wfi(unsigned cpu,uint64_t ticks)
 {

@@ -159,6 +159,8 @@ void hakios_p126_audio_set(unsigned state);
 unsigned hakios_p126_audio_get(void);
 unsigned hakios_p127_mode(void);
 void hakios_p127_stop(unsigned reason);
+/* Exact lease cancellation: never revoke a newer owner's policy. */
+bool hakios_p127_stop_owned(uint64_t lease,unsigned reason);
 void hakios_p127_wfi(unsigned cpu,uint64_t ticks);
 void hakios_p127_metric(unsigned group,unsigned index,uint64_t value);
 void hakios_p127_audio_wake(void);

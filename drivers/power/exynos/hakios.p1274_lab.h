@@ -494,6 +494,7 @@ static int p1274_arm_profile(int v,unsigned mode) {
     if(p52 && (!p12752_boot_enabled() || p52>4 || (mode&255u)!=4u))return EINVAL;
     if(p52)mode=4;
     if(!v){__atomic_store_n(&p1274_cancel,1,__ATOMIC_RELEASE);return 0;}
+    P1277_ADMISSION(true,true);
     uint64_t now=mach_absolute_time(),end=p1274_ticks_ms(720000);
     if(!p1274_boot_enabled() || now>=p1274_ticks_ms(225000) || p125_thermal_reason() ||
        hakios_battery_temperature()<=0 || p1274_conflict() || big_cores!=SCION_BIG_CORES ||

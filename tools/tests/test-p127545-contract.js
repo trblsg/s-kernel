@@ -15,7 +15,7 @@ assert(h.includes('if(__atomic_load_n(&p12753_cancel,__ATOMIC_ACQUIRE)){p12753_f
 assert(w.includes('quiet<200000000ull?20:quiet<1000000000ull?40:80'));
 assert(p.includes('fresh_off_ok && first && !brightness_error') && p.includes('clock_interval_to_deadline(250,NSEC_PER_MSEC,&fresh_deadline)'));
 assert(p.includes('now<fresh_deadline && rd(DSIM_CONFIG)==fresh_dsim && hakios_p127545_frame_latched(gen)'));
-assert(p.includes('if(latched && ok)fresh_ok++;else{fresh_fallback++'));
+assert(/if\(latched && ok\)fresh_ok\+\+;else\{\s*fresh_fallback\+\+/.test(p));
 assert(d.includes('gen==p127545_submit_gen') && d.includes('rd(decon,FRAME_COUNT)!=p127545_submit_frame') && d.includes('!(rd(decon,SHADOW_REQ)&SHADOW_ALL)'));
 assert.strictEqual((d.match(/psr_shadow_gen\(gen\);/g)||[]).length,3);
 assert(p.includes('static uint32_t fresh_mode,fresh_boot') && h.includes('!hakios_p9_panel_auto_on()'));
@@ -24,7 +24,7 @@ assert(gpu.includes('mali_queue[at].panel_generation=hakios_p127545_panel_genera
 assert(gpu.includes('!dropped && fragment && !p5_job_status && panel_gen && panel_gen==hakios_p127545_panel_generation()'));
 assert.strictEqual((d.match(/gen=p127545_candidate\(\);/g)||[]).length,3);
 assert(d.indexOf('wr(decon,SHADOW_REQ,rd(decon,SHADOW_REQ)|SHADOW_ALL);',d.indexOf('psr_shadow_gen('))<d.indexOf('p127545_submit_frame=rd(decon,FRAME_COUNT)'));
-assert(p.includes('if(ok)fresh_disarm();') && p.includes('clock_interval_to_deadline(60,NSEC_PER_SEC,&fresh_arm_until)'));
+assert(p.includes('if(ok && (!persistent || !latched))fresh_disarm();') && p.includes('clock_interval_to_deadline(60,NSEC_PER_SEC,&fresh_arm_until)'));
 assert(host.includes("Panel545 actual G3D OFF not verified") && host.includes("Panel545 fresh fragment/latch/29 evidence failed; no qualification"));
 const cmuFn=cmu.slice(cmu.indexOf('p127545_cmu_sysctl('),cmu.indexOf('SYSCTL_DECL(_kern_hakios)',cmu.indexOf('p127545_cmu_sysctl(')));
 assert(cmuFn.includes('memcmp(r,r2,sizeof(r))==0') && cmuFn.includes('write_allowed=0') && !/\b(?:wr|hakios_acpm_dvfs_set)\s*\(/.test(cmuFn));
@@ -76,6 +76,6 @@ for(const owner of ['cam','mfc']){
 }
 const finish=h.slice(h.indexOf('static void p12753_finish'),h.indexOf('static int p12753_arm_sysctl'));
 assert(finish.indexOf('hakios_p545_disp_end()')<finish.indexOf('__atomic_store_n(&hakios_p125_stop_reason,reason'));
-assert(h.includes('return hakios_p545_mfc_restored() && hakios_p545_cam_restored() && hakios_p545_disp_restored()'));
+assert(h.includes('return !p1277_auto_blocks() && hakios_p545_mfc_restored() && hakios_p545_cam_restored() && hakios_p545_disp_restored()'));
 assert(!ect.includes('offs[P545_ECT_MAX_DIR]'));
 console.log('P127545 source contracts incl. staged headers, rollback interlock and bounded ECT PASS (not full XNU or hardware evidence)');

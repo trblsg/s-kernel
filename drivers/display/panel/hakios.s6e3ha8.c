@@ -632,11 +632,30 @@ static uint32_t p9_panel_auto, panel_sleep_boot;
 extern int hakios_display_requested_on(void);
 extern bool hakios_p127545_frame_latched(uint32_t gen);
 static uint32_t fresh_mode,fresh_boot,fresh_gen,fresh_ready,fresh_dsim;
+/* Rev7 persistent DCS policy, independent from the Rev6 one-shot pilot. */
+static uint32_t p1277_panel_permission,p1277_panel_request,p1277_panel_persistent,p1277_panel_failed;
+/* Published only after successful DCS sleep. Wake uncertainty survives
+ * the early panel_asleep=false transition until 11 + 29 are verified. */
+static uint32_t p1277_panel_sleep_verified,p1277_panel_wake_uncertain;
 static uint32_t fresh_ok,fresh_fallback,fresh_fault,fresh_sleep;
 static bool fresh_off_ok;
 static uint64_t fresh_deadline,fresh_arm_until;
 /* Called with panel_lock held. Never disarm an asleep panel. */
-static void fresh_disarm(void){panel_sleep=panel_sleep_boot;__atomic_store_n(&fresh_mode,0,__ATOMIC_RELEASE);}
+static void fresh_disarm(void){panel_sleep=panel_sleep_boot;__atomic_store_n(&p1277_panel_sleep_verified,0,__ATOMIC_RELEASE);__atomic_store_n(&p1277_panel_persistent,0,__ATOMIC_RELEASE);__atomic_store_n(&fresh_mode,0,__ATOMIC_RELEASE);}
+static void p1277_panel_retire(void){
+    __atomic_store_n(&p1277_panel_failed,1,__ATOMIC_RELEASE);
+    __atomic_store_n(&p1277_panel_request,0,__ATOMIC_RELEASE);
+}
+/* Only a verified Rev7 persistent owner can coexist with Auto Idle.
+ * Legacy panel pilots and pending fresh-frame wake stay exclusive. */
+bool hakios_p1277_panel_auto_compatible(void);
+bool hakios_p1277_panel_auto_compatible(void){
+    return __atomic_load_n(&p1277_panel_persistent,__ATOMIC_ACQUIRE) &&
+           __atomic_load_n(&p1277_panel_request,__ATOMIC_ACQUIRE) &&
+           __atomic_load_n(&p1277_panel_sleep_verified,__ATOMIC_ACQUIRE) &&
+           !__atomic_load_n(&p1277_panel_wake_uncertain,__ATOMIC_ACQUIRE) &&
+           !__atomic_load_n(&fresh_ready,__ATOMIC_ACQUIRE);
+}
 static thread_call_t fresh_call;
 uint32_t hakios_p127545_panel_generation(void);
 uint32_t hakios_p127545_panel_generation(void){return __atomic_load_n(&fresh_ready,__ATOMIC_ACQUIRE);}
@@ -655,8 +674,15 @@ static void fresh_worker(thread_call_param_t a __unused,thread_call_param_t b __
     if(hakios_display_requested_on()!=1){lck_mtx_unlock(panel_lock);return;}
     bool ok=dsim_send(key_on,sizeof(key_on)) && dsim_send(on,sizeof(on));
     ok=dsim_send(key_off,sizeof(key_off)) && ok;
-    if(latched && ok)fresh_ok++;else{fresh_fallback++;if(!ok)fresh_fault++;}
-    if(ok)fresh_disarm();
+    bool persistent=__atomic_load_n(&p1277_panel_persistent,__ATOMIC_ACQUIRE)!=0;
+    if(latched && ok)fresh_ok++;else{
+        fresh_fallback++;if(!ok)fresh_fault++;
+        if(persistent)p1277_panel_retire();
+    }
+    /* A verified fresh frame keeps Rev7 armed across screen cycles.
+     * Any timeout/failed DCS retires it, never certifies success. */
+    if(ok && persistent)__atomic_store_n(&p1277_panel_wake_uncertain,0,__ATOMIC_RELEASE);
+    if(ok && (!persistent || !latched))fresh_disarm();
     say("p127545-panel: gen=%u latch=%u display29=%u fallback=%u\n",gen,latched,ok,!latched||!ok);
     lck_mtx_unlock(panel_lock);
 }
@@ -664,7 +690,8 @@ static void fresh_worker(thread_call_param_t a __unused,thread_call_param_t b __
 int
 hakios_p9_panel_auto_on(void)
 {
-    return (int)(__atomic_load_n(&p9_panel_auto, __ATOMIC_ACQUIRE) || __atomic_load_n(&fresh_mode,__ATOMIC_ACQUIRE));
+    return (int)(__atomic_load_n(&p9_panel_auto, __ATOMIC_ACQUIRE) || __atomic_load_n(&fresh_mode,__ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&p1277_panel_request,__ATOMIC_ACQUIRE) || __atomic_load_n(&p1277_panel_wake_uncertain,__ATOMIC_ACQUIRE));
 }
 
 int hakios_s6e3ha8_power(bool on);
@@ -679,16 +706,38 @@ hakios_s6e3ha8_power(bool on)
 	int level;
 	uint32_t gen=0;
 
-	if (!panel_sleep || dsim == 0 || panel_lock == NULL) {
-		return ENODEV;
-	}
+	if (dsim == 0 || panel_lock == NULL) return ENODEV;
 	lck_mtx_lock(panel_lock);
-	if (on == !panel_asleep) {
+	/* Delay activation until an actual OFF request after panel init.
+	 * No early-boot DCS writes, no fake display event. */
+	if(!on && !panel_sleep && !panel_asleep && fresh_boot && fresh_call &&
+	   __atomic_load_n(&p1277_panel_request,__ATOMIC_ACQUIRE) &&
+	   !__atomic_load_n(&p1277_panel_failed,__ATOMIC_ACQUIRE) &&
+	   !fresh_mode && !p9_panel_auto && !panel_sleep_boot && panel_write && panel_level>=0 &&
+	   hakios_display_requested_on()==0){
+#if __has_include(<kern/hakios_p125.h>)
+	    if(!__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE) && !hakios_p127_mode())
+#endif
+	    {fresh_arm_until=UINT64_MAX;panel_sleep=1;
+	     __atomic_store_n(&p1277_panel_persistent,1,__ATOMIC_RELEASE);
+	     __atomic_store_n(&fresh_mode,1,__ATOMIC_RELEASE);}
+	}
+	if(!panel_sleep){lck_mtx_unlock(panel_lock);return ENODEV;}
+	/* Failed DCS wake: do not issue another sleep sequence until recovery. */
+	if(!on && !panel_asleep && p1277_panel_persistent && p1277_panel_failed){lck_mtx_unlock(panel_lock);return EIO;}
+	/* A failed DCS wake is not equivalent to a fully awake panel. An
+	 * explicit ON may retry the compatibility sequence, never qualify it. */
+	if(on && fresh_ready && !panel_asleep){lck_mtx_unlock(panel_lock);return 0;}
+	if (on == !panel_asleep && !(on && p1277_panel_wake_uncertain)) {
 		lck_mtx_unlock(panel_lock);
 		return 0;                       /* (already so) */
 	}
 	if (!on && !panel_asleep && __atomic_load_n(&fresh_mode,__ATOMIC_ACQUIRE) && mach_absolute_time()>=fresh_arm_until){
 		fresh_disarm();lck_mtx_unlock(panel_lock);return 0;
+	}
+	if(p1277_panel_persistent){
+	    __atomic_store_n(&p1277_panel_sleep_verified,0,__ATOMIC_RELEASE);
+	    if(on)__atomic_store_n(&p1277_panel_wake_uncertain,1,__ATOMIC_RELEASE);
 	}
 	if (__atomic_load_n(&fresh_mode,__ATOMIC_ACQUIRE)){
 		if(++fresh_gen==0)++fresh_gen;
@@ -704,7 +753,13 @@ hakios_s6e3ha8_power(bool on)
 		second = dsim_send(key1_off, sizeof(key1_off)) && second;
 		delay(100 * 1000);              /* Samsung's wait after sleep-in */
 		panel_asleep = true;
-		if(gen){fresh_off_ok=first&&second;if(fresh_off_ok)fresh_sleep++;else fresh_fault++;}
+		if(p1277_panel_persistent){
+		    __atomic_store_n(&p1277_panel_sleep_verified,first&&second,__ATOMIC_RELEASE);
+		    if(first&&second)__atomic_store_n(&p1277_panel_wake_uncertain,0,__ATOMIC_RELEASE);
+		}
+		if(gen){fresh_off_ok=first&&second;if(fresh_off_ok)fresh_sleep++;else{
+		    fresh_fault++;if(__atomic_load_n(&p1277_panel_persistent,__ATOMIC_ACQUIRE))p1277_panel_retire();
+		}}
 		level = panel_level;
 	} else {
 		first = dsim_send(key1_on, sizeof(key1_on)) && dsim_send(sleep_out, sizeof(sleep_out));
@@ -720,17 +775,20 @@ hakios_s6e3ha8_power(bool on)
 		lck_mtx_lock(panel_lock);
 		if(gen){
 			if(gen!=fresh_gen || hakios_display_requested_on()!=1 || panel_asleep){lck_mtx_unlock(panel_lock);return EBUSY;}
-			if(fresh_off_ok && first && !brightness_error && panel_write && rd(DSIM_CONFIG)==fresh_dsim && fresh_call){
+			if(fresh_off_ok && first && !brightness_error && panel_write && rd(DSIM_CONFIG)==fresh_dsim && fresh_call && !p1277_panel_failed){
 				clock_interval_to_deadline(250,NSEC_PER_MSEC,&fresh_deadline);
 				__atomic_store_n(&fresh_ready,gen,__ATOMIC_RELEASE);
 				fresh_schedule();lck_mtx_unlock(panel_lock);return 0;
 			}
 			fresh_fallback++;fresh_fault++;
+			if(__atomic_load_n(&p1277_panel_persistent,__ATOMIC_ACQUIRE))p1277_panel_retire();
 		}
 		delay(20 * 1000);
 		second = dsim_send(key1_on, sizeof(key1_on)) && dsim_send(display_on, sizeof(display_on));
 		second = dsim_send(key1_off, sizeof(key1_off)) && second;
-		if(gen && first && second)fresh_disarm();
+		if(p1277_panel_persistent && first && second && !brightness_error)__atomic_store_n(&p1277_panel_wake_uncertain,0,__ATOMIC_RELEASE);
+		if(gen && first && second && (!p1277_panel_persistent || !p1277_panel_wake_uncertain))fresh_disarm();
+		if(p1277_panel_wake_uncertain)second=false;
 		lck_mtx_unlock(panel_lock);
 	}
 	say("s6e3ha8: panel_sleep: %s: %s %s, %s %s (brightness %d; FIFOCTRL %x, INTSRC %x)\n", on ? "screen on" : "screen off",
@@ -765,7 +823,7 @@ p9_panel_mode_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
         if(err)return err;
     }
     lck_mtx_lock(panel_lock);
-    if(__atomic_load_n(&fresh_mode,__ATOMIC_ACQUIRE) || hakios_display_requested_on()!=1){lck_mtx_unlock(panel_lock);return EBUSY;}
+    if(__atomic_load_n(&p1277_panel_request,__ATOMIC_ACQUIRE) || __atomic_load_n(&fresh_mode,__ATOMIC_ACQUIRE) || hakios_display_requested_on()!=1){lck_mtx_unlock(panel_lock);return EBUSY;}
     panel_sleep=value?1u:panel_sleep_boot;
     __atomic_store_n(&p9_panel_auto,(uint32_t)value,__ATOMIC_RELEASE);
     lck_mtx_unlock(panel_lock);
@@ -811,10 +869,12 @@ static int p127545_panel_sysctl(__unused struct sysctl_oid *oidp,__unused void *
     P545_DISP_GUARD(true,EBUSY);
     if(!fresh_boot || !panel_lock || !dsim || !fresh_call)return ENODEV;
     lck_mtx_lock(panel_lock);
+    if(__atomic_load_n(&p1277_panel_request,__ATOMIC_ACQUIRE) ||
+       __atomic_load_n(&p1277_panel_persistent,__ATOMIC_ACQUIRE)){lck_mtx_unlock(panel_lock);return EBUSY;}
 #if __has_include(<kern/hakios_p125.h>)
     if(v && (__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE) || hakios_p127_mode())){lck_mtx_unlock(panel_lock);return EBUSY;}
 #endif
-    if(hakios_display_requested_on()!=1 || panel_asleep || fresh_ready || p9_panel_auto || panel_sleep_boot || (v && (!panel_write || panel_level<0))){lck_mtx_unlock(panel_lock);return EBUSY;}
+    if(hakios_display_requested_on()!=1 || panel_asleep || fresh_ready || p1277_panel_wake_uncertain || p9_panel_auto || panel_sleep_boot || (v && (!panel_write || panel_level<0))){lck_mtx_unlock(panel_lock);return EBUSY;}
     if(v){
         if(fresh_mode){lck_mtx_unlock(panel_lock);return EBUSY;}
         clock_interval_to_deadline(60,NSEC_PER_SEC,&fresh_arm_until);
@@ -830,6 +890,41 @@ static int p127545_panel_stats_sysctl(__unused struct sysctl_oid *oidp,__unused 
     lck_mtx_unlock(panel_lock);return SYSCTL_OUT(req,out,strlen(out)+1);
 }
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p127545_panel_stats,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p127545_panel_stats_sysctl,"A","DCS transmission and scanout evidence, not panel retention or power qualification");
+/* Opt-in control: enabling requests the next normal OFF, not a DCS
+ * command from sysctl. Disable only when awake and no pending frame. */
+static int p1277_panel_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
+    int v=(int)__atomic_load_n(&p1277_panel_request,__ATOMIC_ACQUIRE);
+    int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(e || !req->newptr)return e;
+    if(v!=0 && v!=1)return EINVAL;
+    if(!p1277_panel_permission || !fresh_boot || !panel_lock || !dsim || !fresh_call)return ENODEV;
+    P545_DISP_GUARD(true,EBUSY);
+    lck_mtx_lock(panel_lock);
+    if(hakios_display_requested_on()!=1 || panel_asleep || fresh_ready || p1277_panel_wake_uncertain || p9_panel_auto || panel_sleep_boot ||
+       (fresh_mode && !__atomic_load_n(&p1277_panel_persistent,__ATOMIC_ACQUIRE))){
+        lck_mtx_unlock(panel_lock);return EBUSY;
+    }
+    if(v && (__atomic_load_n(&p1277_panel_failed,__ATOMIC_ACQUIRE) || !panel_write || panel_level<0)){
+        lck_mtx_unlock(panel_lock);return EPERM;
+    }
+    if(!v && __atomic_load_n(&p1277_panel_persistent,__ATOMIC_ACQUIRE)){
+        /* A failed 29 leaves uncertain panel state; require recovery. */
+        if(__atomic_load_n(&p1277_panel_failed,__ATOMIC_ACQUIRE)){lck_mtx_unlock(panel_lock);return EIO;}
+        fresh_disarm();
+    }
+    __atomic_store_n(&p1277_panel_request,(uint32_t)v,__ATOMIC_RELEASE);
+    lck_mtx_unlock(panel_lock);return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1277_panel,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1277_panel_sysctl,"I","Rev7 persistent DCS sleep with fresh-frame wake");
+static int p1277_panel_stats_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
+    if(!panel_lock)return ENODEV;
+    lck_mtx_lock(panel_lock);
+    char out[280];snprintf(out,sizeof(out),"version=1 permission=%u request=%u persistent=%u failed=%u asleep=%u pending=%u sleep=%u latch29=%u fallback=%u fault=%u sleep_verified=%u wake_uncertain=%u",
+        p1277_panel_permission,p1277_panel_request,p1277_panel_persistent,p1277_panel_failed,
+        panel_asleep?1u:0u,fresh_ready,fresh_sleep,fresh_ok,fresh_fallback,fresh_fault,p1277_panel_sleep_verified,p1277_panel_wake_uncertain);
+    lck_mtx_unlock(panel_lock);return SYSCTL_OUT(req,out,strlen(out)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1277_panel_stats,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1277_panel_stats_sysctl,"A","Rev7 panel state, DCS/temporal witness not rail power");
 void
 hakios_s6e3ha8_init(void)
 {
@@ -863,6 +958,12 @@ hakios_s6e3ha8_init(void)
 	(void)PE_parse_boot_argn("p12753",&audit_boot,sizeof(audit_boot));
 	fresh_boot=(fresh_boot==1 && audit_boot==1);
 	if(fresh_boot)fresh_call=thread_call_allocate(fresh_worker,NULL);
+	uint32_t rev7_profile=0;
+	(void)PE_parse_boot_argn("p1277",&rev7_profile,sizeof(rev7_profile));
+	(void)PE_parse_boot_argn("p1277_panel",&p1277_panel_permission,sizeof(p1277_panel_permission));
+	bool rev7_panel_boot=p1277_panel_permission==1;
+	p1277_panel_permission=(rev7_panel_boot || rev7_profile==1) && fresh_boot && fresh_call && !panel_sleep_boot;
+	__atomic_store_n(&p1277_panel_request,rev7_panel_boot && p1277_panel_permission,__ATOMIC_RELEASE);
 	if (panel_sleep) {
 		say("s6e3ha8: panel_sleep=%u: the screen's off from iOS puts the panel to sleep (28, 10), its on wakes it (11, 29)\n",
 		    panel_sleep);

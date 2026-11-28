@@ -284,6 +284,30 @@ static int boost_event;
 static uint32_t gov_policy = 1;
 static uint32_t gov_stat = 1;
 static uint64_t burst_span, hold_span;
+static uint32_t p1277_active_permission,p1277_active_enabled,p1277_psci_permission,p1277_g2_permission;
+/* Serialize policy admission on sleepable sysctl paths; never take this
+ * mutex in input/IRQ, recount or per-driver consumers. Lock order is
+ * admission -> auto mutex -> gate spin (never the reverse). */
+static LCK_GRP_DECLARE(p1277_admission_group,"p1277-admission");
+static LCK_MTX_DECLARE(p1277_admission_lock,&p1277_admission_group);
+static bool p1277_auto_blocks(void);
+static void p1277_admission_exit(bool *held){if(*held)lck_mtx_unlock(&p1277_admission_lock);}
+#define P1277_ADMISSION(enter,legacy) \
+    bool p1277_admission_held __attribute__((cleanup(p1277_admission_exit)))=false; \
+    if(enter){ \
+        if(!lck_mtx_try_lock(&p1277_admission_lock))return EBUSY; \
+        p1277_admission_held=true; \
+        if((legacy) && p1277_auto_blocks())return EBUSY; \
+    }
+static uint64_t p1277_short_boost,p1277_short_burst;
+static bool p1277_active_now(void){
+    return __atomic_load_n(&p1277_active_enabled,__ATOMIC_ACQUIRE)!=0;
+}
+static uint64_t p1277_boost_span(void){return p1277_active_now()?p1277_short_boost:boost_span;}
+static uint64_t p1277_burst_span(void){return p1277_active_now()?p1277_short_burst:burst_span;}
+static uint32_t p1277_touch_floor(struct cluster *c,uint32_t stock){
+    return p1277_active_now() && c==&clusters[0]?MIN(stock,1456000u):stock;
+}
 static uint32_t big_cores = SCION_BIG_CORES;    /* the M3s the scheduler may use */
 static struct scion_park park;
 static struct scion_pace pace;
@@ -395,7 +419,7 @@ hakios_exynos_cpufreq_touch(void)
 	if(__atomic_load_n(&p124_cpu_mode,__ATOMIC_RELAXED)<=2)
 	    __atomic_store_n(&p124_cpu_until,0,__ATOMIC_RELEASE);
 	__atomic_fetch_add(&touch_count, 1, __ATOMIC_RELAXED);
-	if (!boost_on(before, boost_span, now)) {
+	if (!boost_on(before, p1277_boost_span(), now)) {
 		__atomic_store_n(&ramp_began, now, __ATOMIC_RELEASE);
 		if (__atomic_load_n(&p6_mode,__ATOMIC_RELAXED))
 			__atomic_fetch_add(&p6_boost_requests,1,__ATOMIC_RELAXED);
@@ -535,6 +559,7 @@ p12_cpu_mode_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
 	int e = sysctl_io_number(req, v, sizeof(v), &v, NULL);
 	if (e || req->newptr == USER_ADDR_NULL) return e;
 	if (v < 0 || v > 1) return EINVAL;
+	P1277_ADMISSION(v!=0,true);
 	if(v && __atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE))return EBUSY;
 	__atomic_store_n(&p12_cpu_mode, (uint32_t)v, __ATOMIC_RELEASE);
 	__atomic_store_n(&p12_frame_streak, 0, __ATOMIC_RELEASE);
@@ -1029,7 +1054,7 @@ touch_held(uint64_t now)
 {
 	uint64_t last = __atomic_load_n(&touch_last, __ATOMIC_ACQUIRE);
 
-	if (boost_on(last, boost_span, now)) {
+	if (boost_on(last, p1277_boost_span(), now)) {
 		return true;
 	}
 	return last != 0 && boost_span != 0 && __atomic_load_n(&fingers, __ATOMIC_ACQUIRE) != 0 && now - last <= hold_span;
@@ -1186,6 +1211,7 @@ p124_cpu_mode_sysctl(__unused struct sysctl_oid *oidp,__unused void *arg1,
     int err=sysctl_io_number(req,v,sizeof(v),&v,NULL);
     if(err || req->newptr==USER_ADDR_NULL)return err;
     if(v<0 || v>4)return EINVAL;
+    P1277_ADMISSION(v!=0,true);
     if(!v){__atomic_store_n(&p124_cpu_until,0,__ATOMIC_RELEASE);return 0;}
     if(__atomic_load_n(&hakios_p1274_deadline,__ATOMIC_ACQUIRE))return EBUSY;
     if(p124_cpu_active(now))return EBUSY;
@@ -1234,7 +1260,7 @@ boost_floor(struct cluster *c, uint64_t now)
 		bool limited=trial>=3 && c->load<70 && c->thermal==0 &&
 		    now>=__atomic_load_n(&p12_late_until,__ATOMIC_ACQUIRE);
 		if(trial>=3 && !limited)__atomic_fetch_add(&p124_cpu_bypass,1,__ATOMIC_RELAXED);
-		if (c->burst && boost_on(__atomic_load_n(&finger_edge, __ATOMIC_ACQUIRE), burst_span, now)) {
+		if (c->burst && boost_on(__atomic_load_n(&finger_edge, __ATOMIC_ACQUIRE), p1277_burst_span(), now)) {
 			uint32_t ceiling=ceiling_now(c);
 			if(limited){
 				uint32_t lower=s9_p124_boost_request(trial,ceiling,1,1,0);
@@ -1244,7 +1270,7 @@ boost_floor(struct cluster *c, uint64_t now)
 			return ceiling;
 		}
 		if (touch_held(now)) {
-			khz = c == &clusters[1] && gov_policy == 4 && pace.floor != 0 ? pace.floor : c->scion_touch;
+			khz = c == &clusters[1] && gov_policy == 4 && pace.floor != 0 ? pace.floor : p1277_touch_floor(c,c->scion_touch);
 		}
 		if (frames_moving(now)) {
 			khz = MAX(khz, c->frame_khz);
@@ -1257,8 +1283,8 @@ boost_floor(struct cluster *c, uint64_t now)
 		return khz == 0 ? 0 : MIN(c->levels[level_at_least(c, khz)], ceiling_now(c));
 	}
 
-	if (boost_on(__atomic_load_n(&touch_last, __ATOMIC_ACQUIRE), boost_span, now)) {
-		khz = MAX(khz, c->touch_khz);
+	if (boost_on(__atomic_load_n(&touch_last, __ATOMIC_ACQUIRE), p1277_boost_span(), now)) {
+		khz = MAX(khz, p1277_touch_floor(c,c->touch_khz));
 	}
 	if (boost_on(__atomic_load_n(&frame_last, __ATOMIC_ACQUIRE), frame_span, now)) {
 		khz = MAX(khz, c->frame_khz);
@@ -1858,7 +1884,7 @@ summary(uint64_t seconds)
 	snprintf(ml, sizeof(ml), l->measured ? "%u" : "?", l->measured);
 	snprintf(mb, sizeof(mb), b->measured ? "%u" : "?", b->measured);
 	now = mach_absolute_time();
-	touched = boost_on(__atomic_load_n(&touch_last, __ATOMIC_ACQUIRE), boost_span, now);
+	touched = boost_on(__atomic_load_n(&touch_last, __ATOMIC_ACQUIRE), p1277_boost_span(), now);
 	framed = boost_on(__atomic_load_n(&frame_last, __ATOMIC_ACQUIRE), frame_span, now);
 	touches = __atomic_exchange_n(&touch_count, 0, __ATOMIC_RELAXED);
 	frames = __atomic_exchange_n(&frame_count, 0, __ATOMIC_RELAXED);
@@ -1891,6 +1917,8 @@ summary(uint64_t seconds)
 	}
 }
 
+#include "hakios.p1277_idle.h"
+
 static void
 gov_thread(void *arg __unused, wait_result_t wr __unused)
 {
@@ -1898,6 +1926,7 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 
 	nanoseconds_to_absolutetime(NSEC_PER_SEC, &second);
 	log_every = second * log_seconds;
+	p1277_psci_query_once(); /* optional read-only capability SMC, no suspend */
 	measure(1);     /* the idle times so far, and which cores have been idle: the first window starts here */
 	for (;;) {
 		uint64_t now, ns, deadline, span_ms;
@@ -1931,6 +1960,7 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 		p1274_tick(now); /* bounded direct TMU, recorder and lower-only OFF policy */
 		p12753_audit_tick(now); /* delayed battery audit; bounded legacy policy leases */
 		p12752_idle_tick(now); /* explicit independent quiet-window evidence */
+		p1277_auto_tick(now); /* independent same-boot automatic qualification */
 		if(!__atomic_load_n(&hakios_p1274_trace_late,__ATOMIC_ACQUIRE))
 			p1273_trace_tick(now); /* existing legacy governor window */
 		p1273_cap_tick(now); /* lower-only, bounded, explicit OFF experiment */
@@ -2015,6 +2045,19 @@ hakios_exynos_cpufreq_gov_start(void)
 	if (!PE_parse_boot_argn("cpufreq_gov", &on, sizeof(on)) || on == 0) {
 		return false;
 	}
+	uint32_t rev7_profile=0;
+	(void)PE_parse_boot_argn("p1277",&rev7_profile,sizeof(rev7_profile));
+	bool rev7_grant=rev7_profile==1 && p124_enabled && p12754_optin();
+	(void)PE_parse_boot_argn("p1277_active",&p1277_active_permission,sizeof(p1277_active_permission));
+	bool rev7_active_boot=p1277_active_permission==1;
+	p1277_active_permission=rev7_active_boot || rev7_grant;
+	(void)PE_parse_boot_argn("p1277_psci",&p1277_psci_permission,sizeof(p1277_psci_permission));
+	p1277_psci_permission=p1277_psci_permission==1;
+	(void)PE_parse_boot_argn("p1277_g2",&p1277_g2_permission,sizeof(p1277_g2_permission));
+	p1277_g2_permission=(p1277_g2_permission==1 || rev7_grant) && p124_enabled && p12754_optin();
+	(void)PE_parse_boot_argn("p1277_auto_idle",&p1277_auto_permission,sizeof(p1277_auto_permission));
+	bool rev7_auto_boot=p1277_auto_permission==1;
+	p1277_auto_permission=(rev7_auto_boot || rev7_grant) && p12754_optin() && p1273_gate_enabled();
 	if (PE_parse_boot_argn("cpufreq_gov_ms", &value, sizeof(value)) && value >= 20 && value <= 200) {
 		window_ms = value;
 	}
@@ -2058,6 +2101,9 @@ hakios_exynos_cpufreq_gov_start(void)
 	nanoseconds_to_absolutetime((uint64_t)boost_ms * NSEC_PER_MSEC, &boost_span);
 	nanoseconds_to_absolutetime((uint64_t)frame_ms * NSEC_PER_MSEC, &frame_span);
 	nanoseconds_to_absolutetime((uint64_t)BURST_MS * NSEC_PER_MSEC, &burst_span);
+	nanoseconds_to_absolutetime((uint64_t)MIN(boost_ms,150u)*NSEC_PER_MSEC,&p1277_short_boost);
+	nanoseconds_to_absolutetime((uint64_t)MIN(BURST_MS,60u)*NSEC_PER_MSEC,&p1277_short_burst);
+	__atomic_store_n(&p1277_active_enabled,rev7_active_boot && p1277_active_permission,__ATOMIC_RELEASE);
 	nanoseconds_to_absolutetime((uint64_t)LATE_MS * NSEC_PER_MSEC, &late_span);
 	nanoseconds_to_absolutetime((uint64_t)MOVING_MS * NSEC_PER_MSEC, &moving_span);
 	nanoseconds_to_absolutetime((uint64_t)HOLD_MS * NSEC_PER_MSEC, &hold_span);
@@ -2152,5 +2198,10 @@ hakios_exynos_cpufreq_gov_start(void)
 	}
 	thread_deallocate(thread);
 	__atomic_store_n(&gov_running, true, __ATOMIC_RELEASE);
+	/* Publish boot opt-in only after the governor and admission guards exist. */
+	if(rev7_auto_boot && p1277_auto_permission && lck_mtx_try_lock(&p1277_admission_lock)){
+	    if(p1277_auto_legacy_idle())__atomic_store_n(&p1277_auto_enabled,1,__ATOMIC_RELEASE);
+	    lck_mtx_unlock(&p1277_admission_lock);
+	}
 	return true;
 }
