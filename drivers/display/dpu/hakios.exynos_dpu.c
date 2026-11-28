@@ -75,6 +75,7 @@
 #include <stdarg.h>
 #include <kern/clock.h>
 #include "hakios.p127545_disp_access.h" /* staged by drivers/map into bsd/dev */
+#include "hakios.p1278_panel.h"
 #include <kern/locks.h>
 #include <sys/sysctl.h>
 #if __has_include(<kern/hakios_p125.h>)
@@ -176,7 +177,7 @@ int hakios_scanout_planes(uint64_t upper, uint32_t upper_rowbytes, uint64_t lowe
 static const int type_of_channel[8] = { 2, 4, 5, 1, 3, 0, -1, -1 };
 static const char *const type_name[6] = { "G0", "G1", "VG0", "VG1", "VGF0", "VGF1" };
 
-static vm_offset_t decon, dpp, dma;
+static vm_offset_t decon, dpp, dma, p1278_dsc;
 static int probed;                      /* 0 until probed; 1 if the DECON is as expected; -1 if not (nothing written) */
 static unsigned win, boot_type;         /* the boot loader's window and its channel's block */
 static uint32_t boot_base, boot_data_path_1;
@@ -243,6 +244,9 @@ hakios_scanout_probe(uint64_t fb_phys, uint32_t width, uint32_t height, uint32_t
 		return -1;
 	}
 	decon = ml_io_map(DECON_PA, 0x2000);
+	uint32_t rev8=0;
+	if(PE_parse_boot_argn("p1278",&rev8,sizeof(rev8)) && rev8==1)
+		p1278_dsc=ml_io_map(DECON_PA+0x4000,0x2000);
 	dpp = ml_io_map(DPP_PA, BLOCK_SIZE);
 	dma = ml_io_map(DMA_PA, BLOCK_SIZE);
 	if (decon == 0 || dpp == 0 || dma == 0) {
@@ -435,6 +439,9 @@ static bool psr_b,psr_drained;
 static uint64_t psr_legacy_ticks,psr_legacy_masks,psr_legacy_unmasks,psr_faults;
 static LCK_GRP_DECLARE(psr_group,"hakios-psr");
 static LCK_SPIN_DECLARE(psr_lock,&psr_group);
+static LCK_MTX_DECLARE(p1278_transition_lock,&psr_group);
+static bool p1278_hold,p1278_hold_fault;
+static uint32_t p1278_saved_trigger;
 static void plane_off(void);
 static void psr_tick(thread_call_param_t,thread_call_param_t);
 #if __has_include(<kern/hakios_p125.h>)
@@ -452,9 +459,8 @@ static bool p545_dpu_masked;
 static uint32_t p545_dpu_trigger;
 bool hakios_p545_disp_dpu_quiesce(void);
 bool hakios_p545_disp_dpu_restore(void);
-static bool p545_dpu_idle(void){
-    if((rd(decon,GLOBAL_CONTROL)&(GC_CMD_MODE|GC_RUN|(1u<<5)))!=(GC_CMD_MODE|GC_RUN|(1u<<5)) ||
-       rd(decon,SHADOW_REQ)!=0)return false;
+static bool p1278_dpu_transfer_idle(void){
+    if((rd(decon,GLOBAL_CONTROL)&(GC_CMD_MODE|GC_RUN|(1u<<5)))!=(GC_CMD_MODE|GC_RUN|(1u<<5)))return false;
     uint32_t path0=rd(decon,DATA_PATH_0),path1=rd(decon,DATA_PATH_1);
     unsigned n=0;
     for(unsigned w=0;w<WINDOWS;w++){
@@ -467,6 +473,7 @@ static bool p545_dpu_idle(void){
     }
     return n>0;
 }
+static bool p545_dpu_idle(void){return rd(decon,SHADOW_REQ)==0 && p1278_dpu_transfer_idle();}
 bool hakios_p545_disp_dpu_quiesce(void){
     if(probed<=0 || mode!=2 || !decon || !dpp || !dma || psr_owner || psr_b || psr_ms || p545_dpu_masked)return false;
     if((rd(decon,GLOBAL_CONTROL)&(GC_CMD_MODE|GC_RUN))!=(GC_CMD_MODE|GC_RUN) || rd(decon,SHADOW_REQ)!=0)return false;
@@ -514,6 +521,67 @@ psr_release_locked(void)
     psr_owner=0;
     if(owner==2)hakios_p127_metric(2,1,1);else psr_legacy_unmasks++;
     return true;
+}
+/* Panel owns a short TE mask only while issuing configuration packets.
+ * No sleep with psr_lock held; attach/detach excluded by transition_lock.
+ * Normal presents may queue a shadow update but cannot release our mask.
+ * Callers already hold the stock DISP access scope. */
+bool hakios_p1278_dpu_hold_end(void){
+    lck_spin_lock(&psr_lock);
+    if(!p1278_hold){lck_spin_unlock(&psr_lock);return false;}
+    bool owned=rd(decon,TRIG_CONTROL)==(p1278_saved_trigger|HW_TRIG_MASKED);
+    if(owned){wr(decon,TRIG_CONTROL,p1278_saved_trigger);__builtin_arm_dsb(15);}
+    bool ok=owned && rd(decon,TRIG_CONTROL)==p1278_saved_trigger;
+    if(!ok)p1278_hold_fault=true;
+    p1278_hold=false;lck_spin_unlock(&psr_lock);
+    lck_mtx_unlock(&p1278_transition_lock);
+    return ok;
+}
+bool hakios_p1278_dpu_hold_begin(void){
+    if(!lck_mtx_try_lock(&p1278_transition_lock))return false;
+    lck_spin_lock(&psr_lock);
+    if(probed<=0 || mode!=2 || !decon || !dpp || !dma || !p1278_dsc ||
+       p545_dpu_masked || p1278_hold || p1278_hold_fault || !psr_release_locked()){
+        lck_spin_unlock(&psr_lock);lck_mtx_unlock(&p1278_transition_lock);return false;
+    }
+    uint32_t trig=rd(decon,TRIG_CONTROL);
+    if((trig&(HW_TRIG_EN|HW_TRIG_MASKED|SW_TRIG_EN))!=HW_TRIG_EN){
+        lck_spin_unlock(&psr_lock);lck_mtx_unlock(&p1278_transition_lock);return false;
+    }
+    p1278_saved_trigger=trig;p1278_hold=true;
+    wr(decon,TRIG_CONTROL,trig|HW_TRIG_MASKED);__builtin_arm_dsb(15);
+    lck_spin_unlock(&psr_lock);
+    for(unsigned i=0;i<25;i++){
+        if(rd(decon,TRIG_CONTROL)==(trig|HW_TRIG_MASKED) && p1278_dpu_transfer_idle())return true;
+        IOSleep(1);
+    }
+    (void)hakios_p1278_dpu_hold_end();return false;
+}
+bool hakios_p1278_dpu_capture(struct p1278_dpu_state *s){
+    P545_DISP_GUARD(false,false);
+    /* Panel callers are serialized by panel_lock; hold is owned by that caller. */
+    bool own=!p1278_hold;
+    if(own && !lck_mtx_try_lock(&p1278_transition_lock))return false;
+    lck_spin_lock(&psr_lock);
+    if(!s || probed<=0 || mode!=2 || !decon || !dpp || !dma || !p1278_dsc || channel_type>=6 || p1278_hold_fault){lck_spin_unlock(&psr_lock);if(own)lck_mtx_unlock(&p1278_transition_lock);return false;}
+    vm_offset_t i=idma(channel_type),d=dppc(channel_type);
+    bzero(s,sizeof(*s));
+    s->path=rd(decon,0x230);s->connection=rd(decon,0x250);
+    s->start=rd(decon,WIN_START(win));s->end=rd(decon,WIN_END(win));
+    s->src_size=rd(i,IDMA_SRC_SIZE);s->src_offset=rd(i,IDMA_SRC_OFFSET);s->img_size=rd(i,IDMA_IMG_SIZE);
+    s->scaled_size=rd(d,DPP_SCALED_SIZE);s->in_con=rd(i,IDMA_IN_CON);s->dpp_in=rd(d,DPP_IN_CON);
+    s->base=rd(i,IDMA_BASE_Y);s->frame=rd(decon,FRAME_COUNT);s->trigger=rd(decon,TRIG_CONTROL);s->shadow=rd(decon,SHADOW_REQ);
+    s->path0=rd(decon,DATA_PATH_0);s->path1=rd(decon,DATA_PATH_1);s->bg0=rd(decon,0x208);s->bg1=rd(decon,0x20c);
+    s->err_i=(rd(i,IDMA_CFG_ERR)&0x7ff)|(rd(i,IDMA_IRQ)&IDMA_IRQ_ERRORS);
+    s->err_d=(rd(d,DPP_CFG_ERR)&0x1f)|(rd(d,DPP_IRQ)&DPP_IRQ_ERRORS);
+    for(unsigned k=0;k<2;k++)if(s->path&(1u<<(4+k))){
+        vm_offset_t c=p1278_dsc+0x1000*k;
+        s->enc[k][0]=rd(c,0);s->enc[k][1]=rd(c,0xc);
+        for(unsigned j=0;j<14;j++)s->enc[k][2+j]=rd(c,0x24+4*j);
+        s->enc[k][16]=rd(c,0x20);
+    }
+    bool ok=mode==2 && rd(decon,0x230)==s->path && rd(decon,WIN_START(win))==s->start && rd(decon,WIN_END(win))==s->end;
+    lck_spin_unlock(&psr_lock);if(own)lck_mtx_unlock(&p1278_transition_lock);return ok;
 }
 static void
 psr_wake(void)
@@ -577,10 +645,31 @@ bool hakios_p127545_frame_latched(uint32_t gen){
     }
     lck_spin_unlock(&psr_lock);return ok;
 }
+/* The frame candidate is still temporal; require the full physical main
+ * window and all active channel idle, in addition to fresh shadow take.
+ * DSIM independently observes a new masked FRAME_DONE edge in panel code. */
+bool hakios_p1278_dpu_full_latched(uint32_t gen,uint32_t *frame){
+    P545_DISP_GUARD(false,false);
+    if(!frame || !lck_mtx_try_lock(&p1278_transition_lock))return false;
+    bool ok=false;
+    lck_spin_lock(&psr_lock);
+    if(gen && gen==p127545_submit_gen && gen==hakios_p127545_panel_generation() &&
+       probed>0 && mode==2 && !p1278_hold && !p1278_hold_fault && decon && dpp && dma &&
+       (rd(decon,TRIG_CONTROL)&(HW_TRIG_EN|HW_TRIG_MASKED|SW_TRIG_EN))==HW_TRIG_EN &&
+       rd(decon,WIN_START(win))==0 &&
+       (rd(decon,WIN_END(win))&0x3fff3fffu)==((2959u<<16)|1439u) &&
+       (rd(dppc(channel_type),DPP_SCALED_SIZE)&0x3fff3fffu)==((2960u<<16)|1440u) &&
+       (rd(decon,DATA_PATH_0)&(1u<<(4*win))) &&
+       p545_dpu_idle()){
+        uint32_t f=rd(decon,FRAME_COUNT);
+        if(f!=p127545_submit_frame){*frame=f;ok=true;}
+    }
+    lck_spin_unlock(&psr_lock);lck_mtx_unlock(&p1278_transition_lock);return ok;
+}
 static void
 psr_mask_locked(unsigned owner,uint32_t threshold)
 {
-    if(probed<=0 || mode!=2 || !threshold || psr_owner)return;
+    if(probed<=0 || mode!=2 || !threshold || psr_owner || p1278_hold)return;
     uint64_t now=mach_absolute_time(),ns=0;
     if(!psr_last_frame || now<psr_last_frame)return;
     absolutetime_to_nanoseconds(now-psr_last_frame,&ns);
@@ -1096,10 +1185,9 @@ hakios_scanout_planes(uint64_t upper, uint32_t upper_rowbytes, uint64_t lower, u
 }
 
 /* back to the boot loader's channel and buffer */
-void
-hakios_scanout_detach(const char *why)
+static void
+p1278_scanout_detach_locked(const char *why)
 {
-	P545_DISP_GUARD_VOID(true);
 	if (probed <= 0 || mode == 0) {
 		return;
 	}
@@ -1121,6 +1209,16 @@ hakios_scanout_detach(const char *why)
 	}
 	mode = 0;
 	channel_type = boot_type;
+}
+
+static void p1278_transition_exit(bool *held){if(*held)lck_mtx_unlock(&p1278_transition_lock);}
+void
+hakios_scanout_detach(const char *why)
+{
+    P545_DISP_GUARD_VOID(true);
+    lck_mtx_lock(&p1278_transition_lock);
+    p1278_scanout_detach_locked(why);
+    lck_mtx_unlock(&p1278_transition_lock);
 }
 
 /*
@@ -1189,7 +1287,7 @@ attach_vgf0(uint64_t phys, uint32_t width, uint32_t height, uint32_t rowbytes)
 	__asm__ volatile ("dsb sy" ::: "memory");
 	psr_shadow();
 	if (wait_taken(100) != 0) {
-		hakios_scanout_detach("the DECON did not take the window's new channel in 100 ms");
+		p1278_scanout_detach_locked("the DECON did not take the window's new channel in 100 ms");
 		return -1;
 	}
 	/* wait for three refreshes on the new channel, then read VGF0's error state */
@@ -1204,7 +1302,7 @@ attach_vgf0(uint64_t phys, uint32_t width, uint32_t height, uint32_t rowbytes)
 	say("exynos_dpu: VGF0 after %u refreshes: IDMA configuration errors %x, DPP's %x, IDMA error status %x, DPP's %x\n",
 	    rd(decon, FRAME_COUNT) - frames, errors_i, errors_d, irq_i, irq_d);
 	if (errors_i || errors_d || irq_i || irq_d) {
-		hakios_scanout_detach("VGF0 reports errors");
+		p1278_scanout_detach_locked("VGF0 reports errors");
 		return -1;
 	}
 	return 0;
@@ -1219,6 +1317,8 @@ hakios_scanout_attach(int want, const uint64_t *phys, unsigned count, uint32_t w
     unsigned shown)
 {
 	P545_DISP_GUARD(true,-1);
+	lck_mtx_lock(&p1278_transition_lock);
+	bool transition __attribute__((cleanup(p1278_transition_exit)))=true;
 	say("exynos_dpu: attach: %s asked for, %u buffers of %ux%u (%u bytes a row), the first at %#llx, %u drawn\n",
 	    want == 2 ? "VGF0's scaler (fb_dpp)" : want == 1 ? "flips (fb_flip)" : "nothing", count, width, height, rowbytes,
 	    count ? phys[0] : 0, shown);

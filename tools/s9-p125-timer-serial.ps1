@@ -4,7 +4,7 @@
 param(
  [ValidatePattern('^COM[0-9]+$')][string]$Port='COM125',
  [string]$ReconnectPort='',
- [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump','DriverTrials','EnergyTrials','EnergyOffline','Idle52','Idle52Offline','Idle52Recover','Audit53','Audit53Recover','Audit53Compare','Guard53','Rev7Status','Hardware54','Foreground542','Panel545','Mfc545Probe','Cam545Probe','Disp545Probe','IdleAssist543','GpuCacheCheck','P1273Diagnostics','BusTrace','ThermalTrace','ThermalTraceDump','ThermalGpuDump','OffBurstCapABA','OfflineABA','FunctionalGate','CombinedConnected')][string]$Scenario='Trace',
+ [ValidateSet('Trace','UsbCrossover','OfflineOnly','AggregateOnly','FrozenSummary','FrozenDump','DriverTrials','EnergyTrials','EnergyOffline','Idle52','Idle52Offline','Idle52Recover','Audit53','Audit53Recover','Audit53Compare','Guard53','Rev7Status','Rev7Suite','Rev8Status','Rev8Suite','Hardware54','Foreground542','Panel545','Mfc545Probe','Cam545Probe','Disp545Probe','IdleAssist543','GpuCacheCheck','P1273Diagnostics','BusTrace','ThermalTrace','ThermalTraceDump','ThermalGpuDump','OffBurstCapABA','OfflineABA','FunctionalGate','CombinedConnected')][string]$Scenario='Trace',
  [ValidateRange(30,90)][int]$TraceSeconds=60,
  [ValidateRange(12,40)][int]$AggregateSeconds=20,
  [string]$SymbolMap='',
@@ -53,6 +53,10 @@ param(
  [ValidateRange(0,180)][int]$WaitCoolSeconds=0,
  [switch]$AllowCombined,
  [switch]$AllowOfflineTrial,
+ [ValidateSet('AutoIdle','Panel','Active','IRQ','DVS','G2','Layer2MFC','Layer2Cam','Layer2Disp200','Layer2Disp134','Burst','Audio','MFC','DISP200','DISP134','Camera')][string[]]$Rev7Modules=@('AutoIdle','Panel','Active'),
+ [ValidateSet('AutoIdle','Panel','Active')][string[]]$Rev8Modules=@('AutoIdle','Panel','Active'),
+ [string]$Rev8Checkpoint='',
+ [switch]$KeepAutoIdle,
  [switch]$Execute,[switch]$LibraryOnly
 )
 Set-StrictMode -Version 2
@@ -67,8 +71,11 @@ $script:P1272HostEnabled=$true
 $script:P12752IdleAllowed=[bool]$P12752Idle
 $script:P12752IdleDirty=$false
 $script:P12754HostEnabled=[bool]$P12754
-$script:P1277HostEnabled=$Scenario -eq 'Rev7Status'
-$script:P12753HostEnabled=$Scenario -in @('Audit53','Audit53Recover','Guard53','Hardware54','Foreground542','Panel545','Mfc545Probe','Cam545Probe','Disp545Probe','IdleAssist543')
+$script:P1277HostEnabled=$Scenario -in @('Rev7Status','Rev7Suite','Rev8Status','Rev8Suite')
+$script:P1277SuiteAllowed=$Scenario -in @('Rev7Suite','Rev8Suite') -and [bool]$Execute
+$script:P1278HostEnabled=$Scenario -in @('Rev8Status','Rev8Suite')
+$script:P1278SuiteAllowed=$Scenario -eq 'Rev8Suite' -and [bool]$Execute
+$script:P12753HostEnabled=$Scenario -in @('Audit53','Audit53Recover','Guard53','Hardware54','Foreground542','Panel545','Mfc545Probe','Cam545Probe','Disp545Probe','IdleAssist543','Rev7Suite','Rev8Suite','Rev8Status')
 $script:P12753ArmAllowed=($Scenario -eq 'Audit53' -and [bool]$AllowOfflineTrial) -or ($Scenario -eq 'Hardware54' -and $P12754) -or ($Scenario -eq 'Mfc545Probe' -and $P12754 -and $AllowMfc545) -or ($Scenario -eq 'Cam545Probe' -and $P12754 -and $AllowCam545) -or ($Scenario -eq 'Disp545Probe' -and $P12754 -and $AllowDisp545)
 $script:P127545MfcAllowed=$Scenario -eq 'Audit53' -and $Audit53Module -eq 'MFCQCH' -and [bool]$AllowMfc545
 $script:P127545MfcProbeAllowed=$Scenario -eq 'Mfc545Probe' -and [bool]$AllowMfc545
@@ -343,6 +350,7 @@ function P125-PumpOff([int]$Seconds){
     $until=(Life-Now).AddSeconds($Seconds)
     while((Life-Now) -lt $until){
         Life-Pump;Life-CheckSafety (Life-Now);P12-EarlyThermalGuard
+        if($script:P1277SuiteAllowed -and (P127542-ReadKey) -eq [ConsoleKey]::N){throw 'Rev7 operator abort'}
         if($script:LifeState -ne 'OFF'){throw 'P125 display woke; stop observation'}
     }
 }
@@ -2339,6 +2347,8 @@ function P127545-Panel([string]$Stem){
         }
     }
 }
+if($Scenario -in @('Rev7Suite','Rev8Suite')){. (Join-Path $PSScriptRoot 's9-p1277-suite-lib.ps1')}
+if($Scenario -in @('Rev8Suite','Rev8Status')){. (Join-Path $PSScriptRoot 's9-p1278-suite-lib.ps1')}
 function P125-Run {
     P12752-CheckOptions
     P12753-Options
@@ -2350,6 +2360,8 @@ function P125-Run {
         P12753-Compare $r[0] $r[1] $r[2] $review $dispReview|ConvertTo-Json
         return
     }
+    if(-not $Execute -and $Scenario -in @('Rev8Suite','Rev8Status')){Write-Host ('Rev8 preview: '+$Scenario+' '+($Rev8Modules -join ', ')+'; no I/O');return}
+    if(-not $Execute -and $Scenario -eq 'Rev7Suite'){Write-Host ('Rev7Suite preview: '+($Rev7Modules -join ', ')+'; USB connected, only screen/visual prompts; no I/O');return}
     if(-not $Execute){
         Write-Host 'P12.5 preview: -Execute to measure OFF timer source. Trace=aggregate+detail; UsbCrossover=aggregate+A0/B/A1; OfflineOnly=B; AggregateOnly=aggregate; FrozenSummary=read-only counters; FrozenDump=read-only counters and pages on fixed firmware. Optional P12754 Audit53 -WaitCoolSeconds 0..180. DriverTrials=selective bounded A/B/A without page dumps; default COMBINED. ResumeSnapshot=FrozenDump checkpoint. EnergyTrials=guarded P12.7 A/B/A; EnergyOffline=connected/unplug/reconnect aggregate+WFI+FG. P1273Diagnostics=read-only floor/bus/WFIv2; BusTrace=90s baseline-only ACPM observation. Guard53=read-only boot thermal guard; Audit53=delayed battery window; Audit53Recover=frozen checkpoint; Audit53Compare=local A/B/A; FunctionalGate ABOX -HeadlessAudio=screen-OFF audio review; Foreground542=short connected Baseline/IRQ/G2 test; IdleAssist543=qualified connected OFF lease; HeadlessNetwork=external peer verification; ConnectedFloorReport=prior same-boot rail/functional report, not watts.'
         return
@@ -2365,6 +2377,9 @@ function P125-Run {
         $script:LifeRaw=[IO.FileStream]::new($raw,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
         P125-Open $Port
         Life-SyncReadOnly
+        if($Scenario -eq 'Rev8Suite'){P1278-RunSuite $stem;return}
+        if($Scenario -eq 'Rev8Status'){P1278-Status $stem;return}
+        if($Scenario -eq 'Rev7Suite'){P1277-RunSuite $stem;return}
         if($Scenario -eq 'Rev7Status'){
             if((P12-Query 'p1277_revision') -ne '7'){throw 'P1277 revision 7 required'}
             $nonce=P12-Query 'p1273_boot_identity'

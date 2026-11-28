@@ -305,6 +305,7 @@ static uint64_t mali_irq_waits;                 /* (jobs finished after an inter
 static uint64_t mali_irq_late;                  /* (jobs finished by the poll first) */
 static uint64_t mali_irq_fallbacks;
 static uint32_t mali_irq_missing;               /* (in a row, for the fallback) */
+static uint64_t p1278_spins_total,p1278_naps_total,p1278_irq_fallback_total,p1278_irq_arm_fail;
 static uint64_t mali_spin_rounds, mali_naps;    /* (instrumentation: the poll's 10 us rounds and sleeps) */
 static bool mali_irq_arm(void);                 /* (mali_job_lock held, G3D on: clear, unmask, attach) */
 static void mali_irq_off(void);                 /* (mali_job_lock held: detach, then clear if the G3D is on) */
@@ -1819,7 +1820,7 @@ mali_irq_fallback(void)
 	    "now on\n", MALI_IRQ_MISSES, rd(mali, JOB_INT_RAWSTAT), rd(mali, JOB_INT_MASK));
 	mali_irq = 0;
 	mali_irq_missing = 0;
-	mali_irq_fallbacks++;
+	mali_irq_fallbacks++;p1278_irq_fallback_total++;
 	/*
 	 * Detach only: the completed job's bit is what its caller reads next, and clearing it here would make the job
 	 * that just finished look hung, for a reset. The worker clears the bits itself once it has read them.
@@ -1844,7 +1845,7 @@ wait_job(uint32_t at, uint32_t mask, uint32_t want, uint32_t ms)
 				return true;
 			}
 			delay(10);
-			mali_spin_rounds++;
+			mali_spin_rounds++;p1278_spins_total++;
 		}
 		clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
 		while (mach_absolute_time() < deadline) {
@@ -1867,7 +1868,7 @@ wait_job(uint32_t at, uint32_t mask, uint32_t want, uint32_t ms)
 			(void)lck_mtx_sleep_deadline(&mali_wait_lock, LCK_SLEEP_DEFAULT, (event_t)&mali_wait_event, THREAD_UNINT,
 			    nap);
 			lck_mtx_unlock(&mali_wait_lock);
-			mali_naps++;
+			mali_naps++;p1278_naps_total++;
 		}
 		return job_bits(rd(mali, at), mask, want);
 	}
@@ -1876,7 +1877,7 @@ wait_job(uint32_t at, uint32_t mask, uint32_t want, uint32_t ms)
 			return true;
 		}
 		delay(10);
-		mali_spin_rounds++;
+		mali_spin_rounds++;p1278_spins_total++;
 	}
 	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
 	while (mach_absolute_time() < deadline) {
@@ -1889,7 +1890,7 @@ wait_job(uint32_t at, uint32_t mask, uint32_t want, uint32_t ms)
 		lck_mtx_lock(&mali_wait_lock);
 		(void)lck_mtx_sleep_deadline(&mali_wait_lock, LCK_SLEEP_DEFAULT, (event_t)&mali_wait_event, THREAD_UNINT, nap);
 		lck_mtx_unlock(&mali_wait_lock);
-		mali_naps++;
+		mali_naps++;p1278_naps_total++;
 	}
 	return job_bits(rd(mali, at), mask, want);
 }
@@ -3537,6 +3538,7 @@ mali_irq_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused 
 		mali_irq_fallbacks = 0;
 		if (g3d_awake || !g3d_sleep) {
 			if (!mali_irq_arm()) {
+				p1278_irq_arm_fail++;mali_irq=0;mali_irq_off();
 				lck_mtx_unlock(&mali_job_lock);
 				return ENODEV;
 			}
@@ -3550,6 +3552,17 @@ mali_irq_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused 
 SYSCTL_PROC(_kern_hakios, OID_AUTO, mali_irq, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
     mali_irq_sysctl, "I", "the JOB interrupt (SPI 282) instead of polling for a job's done bit (mali_irq=; 0 or 1)");
 
+/* Read monotonic evidence, independent of the existing 5s log resets. */
+static int p1278_irq_stats_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
+    if(reached<STEPS || !lck_mtx_try_lock(&mali_job_lock))return EBUSY;
+    char out[280];
+    snprintf(out,sizeof(out),"version=1 enabled=%u attached=%u waits=%llu late=%llu spins=%llu naps=%llu fallback=%llu arm_fail=%llu fault=%u",
+        mali_irq,mali_irq_attached?1u:0u,(unsigned long long)mali_irq_waits,(unsigned long long)mali_irq_late,
+        (unsigned long long)p1278_spins_total,(unsigned long long)p1278_naps_total,
+        (unsigned long long)p1278_irq_fallback_total,(unsigned long long)p1278_irq_arm_fail,g3d_lab_fault);
+    lck_mtx_unlock(&mali_job_lock);return SYSCTL_OUT(req,out,strlen(out)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1278_irq_stats,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1278_irq_stats_sysctl,"A","Rev8 monotonic GPU IRQ/poll witness; not performance or power certification");
 int hakios_mali_second(uint64_t *busy_ns, uint32_t *jobs, uint64_t *queued_ns, uint32_t *mhz, uint32_t *switches,
     int32_t *g3d_mc);
 

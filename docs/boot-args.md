@@ -2,13 +2,13 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **741 arguments**: 647 read by the kernel, 24 by the loader, 88 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **742 arguments**: 648 read by the kernel, 24 by the loader, 88 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
 Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl kern.bootargs`).
 
-## GPU and display (132)
+## GPU and display (133)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -123,6 +123,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `p1277_active` | K | `hakios.exynos_cpufreq.c`, `hakios.mali.c` | `CONFIG_P1277_ACTIVE` |  |
 | `p1277_gpu_dvs` | K | `hakios.mali.c` | `CONFIG_P1277_GPU_DVS` |  |
 | `p1277_panel` | K | `hakios.s6e3ha8.c` | `CONFIG_P1277_PANEL` |  |
+| `p1278` | K | `hakios.exynos_dpu.c`, `hakios.s6e3ha8.c` | `CONFIG_P1278` |  |
 | `p12_gpu_boot_auto` | K | `hakios.mali.c` | `CONFIG_P12_GPU_BOOT_AUTO` |  |
 | `p3power` | K | `hakios.mali.c` | `CONFIG_P3POWER` |  |
 | `p3rail` | K | `hakios.mali.c` | `CONFIG_P3RAIL` |  |

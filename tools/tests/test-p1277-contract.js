@@ -22,7 +22,7 @@ const wake=gpu.slice(gpu.indexOf('static bool\ng3d_power_on('),gpu.indexOf('stat
 assert(wake.includes('if (!gov_rebase())') && wake.indexOf('if (!gov_rebase())')<wake.indexOf('__atomic_store_n(&p1272_live,1'));
 assert(gpu.includes('rail_read("before power-on", &now)') && gpu.includes('rail_set(B6OUT_950MV)'));
 assert(gpu.includes('p1277_dvs_live ? 850000u') && gpu.includes('gov_level >= GOV_LEVELS'));
-assert(panel.includes('p1277_panel_retire()') && panel.includes('if(ok && (!persistent || !latched))fresh_disarm();'));
+assert(panel.includes('p1277_panel_retire()') && panel.includes('if(ok && (!rev8 || p1278_wake_cmd_ok) && (!persistent || !latched))fresh_disarm();'));
 assert(cpu.includes('MIN(boost_ms,150u)') && cpu.includes('MIN(BURST_MS,60u)') && cpu.includes('MIN(stock,1456000u)'));
 assert(g2.includes('sysctlbyname("kern.hakios.p1277_g2"') && g2.includes('hashmode==0 && !e->g2_fault'));
 assert(idle.includes('p1277_psci_read(0x8400000au,0xc4000001u)') && !idle.includes('p1277_psci_read(0xc4000001u'));

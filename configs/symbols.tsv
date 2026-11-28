@@ -454,6 +454,7 @@ P1277_G2	arg	p1277_g2	User space	k	hakios.exynos_cpufreq.c
 P1277_GPU_DVS	arg	p1277_gpu_dvs	GPU and display	k	hakios.mali.c	
 P1277_PANEL	arg	p1277_panel	GPU and display	k	hakios.s6e3ha8.c	
 P1277_PSCI	arg	p1277_psci	User space	k	hakios.exynos_cpufreq.c	
+P1278	arg	p1278	GPU and display	k	hakios.exynos_dpu.c,hakios.s6e3ha8.c	Permission for the guarded WQHD panel recovery pilots, disabled until runtime
 P127_INTX	arg	p127_intx	Wi-Fi	k	lx_pci.c	
 P127_INTX_ATTACH	arg	p127_intx_attach	Wi-Fi	k	lx_pci.c	
 P127_INTX_DETACH	arg	p127_intx_detach	Wi-Fi	k	lx_pci.c	

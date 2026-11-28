@@ -274,6 +274,11 @@ int hakios_p9_panel_auto_on(void) { return 0; }       /* no Samsung S9 runtime p
 void hakios_exynos_halt_off(__unused boolean_t reboot) {}  /* a halt hands the phone to the loader, as it always did */
 #endif
 #ifndef HAKIOS_EXYNOS_DPU
+#include "hakios.p1278_panel.h"
+bool hakios_p1278_dpu_capture(__unused struct p1278_dpu_state *s){return false;}
+bool hakios_p1278_dpu_hold_begin(void){return false;}
+bool hakios_p1278_dpu_hold_end(void){return false;}
+bool hakios_p1278_dpu_full_latched(__unused uint32_t gen,__unused uint32_t *frame){return false;}
 bool hakios_p545_disp_dpu_quiesce(void){return false;}
 bool hakios_p545_disp_dpu_restore(void){return false;}
 uint32_t hakios_p545_disp_frame_seq(void){return 0;}

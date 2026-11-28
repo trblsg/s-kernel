@@ -43,7 +43,13 @@ static unsigned gov_policy=2,big_cores=4,hakios_cpu_exit_mask,p1273_gate_phase;
 static int p1273_gate_lock,p12752_lock,temperature=61000,pmic_error;
 static unsigned p12752_idle_mode;
 static bool bad_table,wrong_rate;
-struct cluster{unsigned online,sum_now,cur;} clusters[2]={{4,0,1053000},{4,0,650000}};
+struct cluster{unsigned online,sum_now,cur,touch_khz,frame_khz,scion_touch;} clusters[2]={{4,0,1053000,1456000,0},{4,0,650000,1800000,1200000}};
+#define NSEC_PER_MSEC 1000000ull
+static void absolutetime_to_nanoseconds(uint64_t t,uint64_t *n){*n=t;}
+static uint64_t p1277_boost_span(void){return 150*NSEC_PER_MSEC;}
+static uint64_t p1277_burst_span(void){return 60*NSEC_PER_MSEC;}
+static bool p1277_active_now(void){return false;}
+static unsigned p1277_touch_floor(struct cluster *c,unsigned f){(void)c;return f;}
 static uint64_t mach_absolute_time(void){return tick;}
 static uint64_t p1274_ticks_ms(unsigned ms){return (uint64_t)ms*1024;}
 static bool hakios_p123_input_quiet(uint64_t n){(void)n;return quiet;}

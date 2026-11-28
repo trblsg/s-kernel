@@ -107,6 +107,7 @@
  */
 #include <kern/clock.h>
 #include "hakios.p127545_disp_access.h" /* staged by drivers/map into bsd/dev */
+#include "hakios.p1278_panel.h"
 #include <kern/locks.h>
 #include <kern/thread_call.h>
 #if __has_include(<kern/hakios_p125.h>)
@@ -124,6 +125,7 @@
 #include <sys/hakios.xnu.h>
 #include <dev/hakios.drivers.h>
 
+extern void IOSleep(unsigned milliseconds);
 extern int hakios_panel_register(const char *name, int (*set)(int level));     /* hakios.backlight.cpp */
 
 SYSCTL_DECL(_kern_hakios);
@@ -261,7 +263,7 @@ rx_pop(uint32_t *word, uint64_t us)
 
 /* a DCS read of `len' bytes (1-40) of register `reg' (dsim_read_data): true when exactly that many came */
 static bool
-dsim_read(uint8_t reg, uint8_t *buf, uint32_t len)
+dsim_read_bounded(uint8_t reg, uint8_t *buf, uint32_t len, uint32_t timeout_us)
 {
 	uint32_t word = 0, first = 0, got = 0, words = 0, stale = 0, intsrc;
 	const char *why = NULL;
@@ -277,7 +279,7 @@ dsim_read(uint8_t reg, uint8_t *buf, uint32_t len)
 		why = "the request was not sent";
 		goto out;
 	}
-	for (deadline = deadline_us(100000); !(rd(DSIM_INTSRC) & (RX_DATA_DONE | BTA_TIMEOUT | LPRX_TIMEOUT)) &&
+	for (deadline = deadline_us(timeout_us); !(rd(DSIM_INTSRC) & (RX_DATA_DONE | BTA_TIMEOUT | LPRX_TIMEOUT)) &&
 	    mach_absolute_time() < deadline;) {
 	}
 	/* (an answer in the FIFO is read even without RX data done: whether INTSRC shows that bit while it is masked is
@@ -343,7 +345,7 @@ static bool
 panel_read(uint8_t reg, uint8_t *buf, uint32_t len)
 {
 	for (int attempt = 0; attempt < 3; attempt++) {
-		if (dsim_read(reg, buf, len)) {
+		if (dsim_read_bounded(reg, buf, len,100000)) {
 			return true;
 		}
 	}
@@ -465,7 +467,7 @@ panel_gamma_init(uint32_t mode)
 /* brightness 0-255: Samsung's gamma row and AOR for the level, or (the fallback) the AOR alone, the light made to
  * follow the level's square (a dim end that is usable) */
 static int
-panel_set(int level)
+panel_set_impl(int level,bool locked)
 {
 	P545_DISP_GUARD(true,EBUSY);
 	static const uint8_t key_on[] = { 0xF0, 0x5A, 0x5A }, take[] = { 0xF7, 0x03 }, key_off[] = { 0xF0, 0xA5, 0xA5 };
@@ -505,7 +507,7 @@ panel_set(int level)
 	}
 	uint8_t aor_packet[] = { REG_AOR, (uint8_t)(aor >> 8), (uint8_t)aor };
 
-	lck_mtx_lock(panel_lock);
+	if(!locked)lck_mtx_lock(panel_lock);
 	ok = dsim_send(key_on, sizeof(key_on));
 	ok = ok && (!gamma_ready || dsim_send(gamma, sizeof(gamma)));
 	ok = ok && dsim_send(aor_packet, sizeof(aor_packet)) && dsim_send(take, sizeof(take));
@@ -515,7 +517,7 @@ panel_set(int level)
 	} else {
 		panel_failures++;
 	}
-	lck_mtx_unlock(panel_lock);
+	if(!locked)lck_mtx_unlock(panel_lock);
 	if (!ok && panel_failures <= 3) {
 		say("s6e3ha8: brightness %d (%s, AOR 0x%x) not sent: the DSIM's FIFO did not take it "
 		    "(FIFOCTRL %x, INTSRC %x)\n", level, gamma_ready ? "gamma row and AOR" : "AOR alone", aor,
@@ -538,6 +540,8 @@ panel_set(int level)
 	}
 	return ok ? 0 : EIO;
 }
+
+static int panel_set(int level){return panel_set_impl(level,false);}
 
 static int
 panel_sysctl_brightness(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
@@ -611,6 +615,7 @@ hakios_s6e3ha8_blank(int (*say_as)(const char *, ...))
 
 
 /*
+ * p1278=1          Permission for the guarded WQHD panel recovery pilots, disabled until runtime.
  * panel_sleep=1 (off by default; with panel=1): the screen's off and on from iOS (backboardd's power request to the
  * display service, MiniIOMobileFramebuffer.cpp, through hakios_display_power() in GenericARMPE.cpp) reach the panel:
  *   off  9F A5 A5, 28 (display off), 9F 5A 5A; a frame; 9F A5 A5, 10 (sleep-in), 9F 5A 5A; Samsung's wait after sleep-in
@@ -637,11 +642,18 @@ static uint32_t p1277_panel_permission,p1277_panel_request,p1277_panel_persisten
 /* Published only after successful DCS sleep. Wake uncertainty survives
  * the early panel_asleep=false transition until 11 + 29 are verified. */
 static uint32_t p1277_panel_sleep_verified,p1277_panel_wake_uncertain;
+static uint32_t p1278_permission,p1278_mode=1,p1278_off_mode,p1278_off_verified,p1278_off_count,p1278_replays,p1278_reviewed,p1278_review_cycle,p1278_clean_cycles,p1278_reason;
+static uint32_t p1278_first_frame,p1278_done_frame,p1278_diag_valid,p1278_diag_raw[4];
+static bool p1278_first_seen,p1278_pre_valid,p1278_replay_ok,p1278_wake_cmd_ok;
+static uint64_t p1278_not_before;
+static struct p1278_link_state p1278_pre_link;
+static struct p1278_dpu_state p1278_pre_dpu;
+#define P78_DSIM_FRAME_DONE (1u<<24)
 static uint32_t fresh_ok,fresh_fallback,fresh_fault,fresh_sleep;
 static bool fresh_off_ok;
 static uint64_t fresh_deadline,fresh_arm_until;
 /* Called with panel_lock held. Never disarm an asleep panel. */
-static void fresh_disarm(void){panel_sleep=panel_sleep_boot;__atomic_store_n(&p1277_panel_sleep_verified,0,__ATOMIC_RELEASE);__atomic_store_n(&p1277_panel_persistent,0,__ATOMIC_RELEASE);__atomic_store_n(&fresh_mode,0,__ATOMIC_RELEASE);}
+static void fresh_disarm(void){panel_sleep=panel_sleep_boot;__atomic_store_n(&p1278_off_verified,0,__ATOMIC_RELEASE);__atomic_store_n(&p1277_panel_sleep_verified,0,__ATOMIC_RELEASE);__atomic_store_n(&p1277_panel_persistent,0,__ATOMIC_RELEASE);__atomic_store_n(&fresh_mode,0,__ATOMIC_RELEASE);}
 static void p1277_panel_retire(void){
     __atomic_store_n(&p1277_panel_failed,1,__ATOMIC_RELEASE);
     __atomic_store_n(&p1277_panel_request,0,__ATOMIC_RELEASE);
@@ -652,7 +664,8 @@ bool hakios_p1277_panel_auto_compatible(void);
 bool hakios_p1277_panel_auto_compatible(void){
     return __atomic_load_n(&p1277_panel_persistent,__ATOMIC_ACQUIRE) &&
            __atomic_load_n(&p1277_panel_request,__ATOMIC_ACQUIRE) &&
-           __atomic_load_n(&p1277_panel_sleep_verified,__ATOMIC_ACQUIRE) &&
+           (__atomic_load_n(&p1277_panel_sleep_verified,__ATOMIC_ACQUIRE) ||
+            (p1278_permission && __atomic_load_n(&p1278_off_verified,__ATOMIC_ACQUIRE))) &&
            !__atomic_load_n(&p1277_panel_wake_uncertain,__ATOMIC_ACQUIRE) &&
            !__atomic_load_n(&fresh_ready,__ATOMIC_ACQUIRE);
 }
@@ -660,6 +673,77 @@ static thread_call_t fresh_call;
 uint32_t hakios_p127545_panel_generation(void);
 uint32_t hakios_p127545_panel_generation(void){return __atomic_load_n(&fresh_ready,__ATOMIC_ACQUIRE);}
 static void fresh_schedule(void){uint64_t t;clock_interval_to_deadline(10,NSEC_PER_MSEC,&t);thread_call_enter_delayed(fresh_call,t);}
+/* DSIM offsets/packet types from pinned Samsung dpu_9810 regs and
+ * mipi_display.h. FRAME_DONE is observed/cleared only with its IRQ masked;
+ * no IRQ routing changes and no writes to the encoder's host registers. */
+static void p1278_link_capture(struct p1278_link_state *s){
+    s->config=rd(DSIM_CONFIG);s->resol=rd(0x3c);s->cprs=rd(0x74);
+    s->slice01=rd(0x78);s->slice23=rd(0x7c);s->mask=rd(0x54);
+    s->irq=rd(DSIM_INTSRC);s->fifo=rd(DSIM_FIFOCTRL);s->phy=rd(0x1c);
+}
+static void p1278_snapshot(const char *where,const struct p1278_link_state *l,const struct p1278_dpu_state *d){
+    say("p1278-panel: %s id=%06x cfg=%x resol=%x cprs=%x slices=%x/%x mask=%x irq=%x fifo=%x phy=%x frame=%u trig=%x shadow=%x path=%x conn=%x windows=%x/%x win=%x..%x src=%x offset=%x img=%x scaled=%x format=%x/%x base=%x bg=%x/%x err=%x/%x\\n",
+        where,panel_id,l->config,l->resol,l->cprs,l->slice01,l->slice23,l->mask,l->irq,l->fifo,l->phy,d->frame,d->trigger,d->shadow,d->path,d->connection,d->path0,d->path1,d->start,d->end,d->src_size,d->src_offset,d->img_size,d->scaled_size,d->in_con,d->dpp_in,d->base,d->bg0,d->bg1,d->err_i,d->err_d);
+    for(unsigned i=0;i<2;i++)if(d->path&(1u<<(4+i))){
+        const uint32_t *v=d->enc[i];
+        say("p1278-panel: %s enc%u ctrl=%x/%x pps=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\\n",where,i,v[0],v[1],v[16],v[2],v[3],v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11],v[12],v[13],v[14],v[15]);
+    }
+}
+static bool p1278_fifo_idle(void){return (rd(DSIM_FIFOCTRL)&(EMPTY_PH|EMPTY_PL))==(EMPTY_PH|EMPTY_PL);}
+static bool p1278_clear_done(void){
+    if(!(rd(0x54)&P78_DSIM_FRAME_DONE))return false;
+    wr(DSIM_INTSRC,P78_DSIM_FRAME_DONE);__builtin_arm_dsb(15);
+    return !(rd(DSIM_INTSRC)&P78_DSIM_FRAME_DONE);
+}
+/* One short read each, once per first cycle/mode, on a drained masked
+ * link. Raw readback is diagnostic only, not TE pulse/DSC retention proof. */
+static void p1278_read_diag(unsigned base){
+    if(!p1278_fifo_idle())return;
+    for(unsigned i=0;i<2;i++){
+        uint8_t v=0;
+        if(dsim_read_bounded(i?0x0e:0x0a,&v,1,20000)){
+            p1278_diag_raw[base+i]=v;p1278_diag_valid|=1u<<(base+i);
+        }
+    }
+}
+static bool p1278_dsc_decoder(void){
+    static const uint8_t key[]={0x9f,0xa5,0xa5},close[]={0x9f,0x5a,0x5a};
+    /* Samsung init sends DSI packet types COMP=07, PPS=0a, not DCS 9e. */
+    bool ok=dsim_send(key,sizeof(key)) && dsim_packet(0x07u|(1u<<8),NULL,0) &&
+        dsim_packet(0x0au|(128u<<8),p1278_wqhd_pps,sizeof(p1278_wqhd_pps));
+    return dsim_send(close,sizeof(close)) && ok;
+}
+static bool p1278_full_area(void){
+    static const uint8_t key2[]={0xf0,0x5a,0x5a},close2[]={0xf0,0xa5,0xa5};
+    static const uint8_t key1[]={0x9f,0xa5,0xa5},close1[]={0x9f,0x5a,0x5a};
+    static const uint8_t scaler[]={0xba,0x01,0x26,0x08,0x08,0xf3};
+    static const uint8_t caset[]={0x2a,0,0,0x05,0x9f},paset[]={0x2b,0,0,0x0b,0x8f};
+    static const uint8_t area[]={0x1a,0x1f,0,0,0,0},te[]={0x35,0};
+    bool ok=dsim_send(key2,sizeof(key2)) && dsim_send(scaler,sizeof(scaler));
+    ok=dsim_send(close2,sizeof(close2)) && ok;
+    ok=ok && dsim_send(caset,sizeof(caset)) && dsim_send(paset,sizeof(paset));
+    bool k=dsim_send(key1,sizeof(key1));
+    bool set=k && ok && dsim_send(area,sizeof(area)) && dsim_send(te,sizeof(te));
+    return dsim_send(close1,sizeof(close1)) && set;
+}
+static bool p1278_completed(uint32_t gen,uint64_t now){
+    struct p1278_link_state l;
+    struct p1278_dpu_state d;
+    uint32_t frame=0;
+    if(p1277_panel_failed || !p1278_replay_ok || now<p1278_not_before || !(rd(0x54)&P78_DSIM_FRAME_DONE) ||
+       !p1278_fifo_idle() || !hakios_p1278_dpu_full_latched(gen,&frame))return false;
+    if(!p1278_first_seen){
+        /* Clear only our masked bit after a real, fresh full-window latch.
+         * Demand a subsequent physical completion, not a stale flag. */
+        if(!p1278_clear_done())return false;
+        p1278_first_seen=true;p1278_first_frame=frame;return false;
+    }
+    if(frame==p1278_first_frame || !(rd(DSIM_INTSRC)&P78_DSIM_FRAME_DONE))return false;
+    p1278_link_capture(&l);
+    if(!hakios_p1278_dpu_capture(&d) || d.frame!=frame || !p1278_link_same(&p1278_pre_link,&l) ||
+       !p1278_dpu_same(&p1278_pre_dpu,&d) || !p1278_dpu_wqhd(&d))return false;
+    p1278_done_frame=frame;p1278_snapshot("complete",&l,&d);return true;
+}
 /* A timeout is a compatibility wake, never success evidence. */
 static void fresh_worker(thread_call_param_t a __unused,thread_call_param_t b __unused){
     P545_DISP_GUARD_VOID(true);
@@ -668,22 +752,43 @@ static void fresh_worker(thread_call_param_t a __unused,thread_call_param_t b __
     uint32_t gen=hakios_p127545_panel_generation();
     if(!gen || hakios_display_requested_on()!=1 || panel_asleep){lck_mtx_unlock(panel_lock);return;}
     uint64_t now=mach_absolute_time();
-    bool latched=now<fresh_deadline && rd(DSIM_CONFIG)==fresh_dsim && hakios_p127545_frame_latched(gen);
+    bool rev8=p1278_permission && p1278_off_mode && p1277_panel_persistent;
+    bool latched=now<fresh_deadline && (rev8?p1278_completed(gen,now):
+        (rd(DSIM_CONFIG)==fresh_dsim && hakios_p127545_frame_latched(gen)));
     if(!latched && now<fresh_deadline){fresh_schedule();lck_mtx_unlock(panel_lock);return;}
+    bool held=false;
+    if(rev8 && latched){
+        /* Close the last race: drain and mask TE before 29. Never
+         * turn on while a subsequent transfer is still in progress. */
+        held=hakios_p1278_dpu_hold_begin();
+        struct p1278_link_state l;struct p1278_dpu_state d;
+        if(held)p1278_link_capture(&l);
+        latched=held && hakios_p1278_dpu_capture(&d) && p1278_dpu_wqhd(&d) &&
+            p1278_dpu_same(&p1278_pre_dpu,&d) && p1278_link_same(&p1278_pre_link,&l) &&
+            p1278_fifo_idle() && !p1277_panel_failed && hakios_display_requested_on()==1;
+        if(!latched && held){if(!hakios_p1278_dpu_hold_end())p1278_wake_cmd_ok=false;held=false;}
+        if(!latched && mach_absolute_time()<fresh_deadline && p1278_wake_cmd_ok){fresh_schedule();lck_mtx_unlock(panel_lock);return;}
+    }
     __atomic_store_n(&fresh_ready,0,__ATOMIC_RELEASE);
-    if(hakios_display_requested_on()!=1){lck_mtx_unlock(panel_lock);return;}
+    if(hakios_display_requested_on()!=1){if(held)(void)hakios_p1278_dpu_hold_end();if(rev8){p1277_panel_retire();p1278_reason=7;p1278_reviewed=0;panel_asleep=true;__atomic_store_n(&p1277_panel_wake_uncertain,1,__ATOMIC_RELEASE);}lck_mtx_unlock(panel_lock);return;}
     bool ok=dsim_send(key_on,sizeof(key_on)) && dsim_send(on,sizeof(on));
     ok=dsim_send(key_off,sizeof(key_off)) && ok;
+    if(held && !hakios_p1278_dpu_hold_end()){ok=false;p1278_wake_cmd_ok=false;}
     bool persistent=__atomic_load_n(&p1277_panel_persistent,__ATOMIC_ACQUIRE)!=0;
-    if(latched && ok)fresh_ok++;else{
+    if(latched && ok){fresh_ok++;if(rev8){p1278_clean_cycles++;p1278_reason=0;}}else{
+        if(rev8){p1278_reason=ok?5:6;p1278_reviewed=0;}
         fresh_fallback++;if(!ok)fresh_fault++;
         if(persistent)p1277_panel_retire();
     }
     /* A verified fresh frame keeps Rev7 armed across screen cycles.
      * Any timeout/failed DCS retires it, never certifies success. */
-    if(ok && persistent)__atomic_store_n(&p1277_panel_wake_uncertain,0,__ATOMIC_RELEASE);
-    if(ok && (!persistent || !latched))fresh_disarm();
+    if(ok && persistent && (!rev8 || (latched && p1278_replay_ok)))__atomic_store_n(&p1277_panel_wake_uncertain,0,__ATOMIC_RELEASE);
+    if(rev8 && ok && !latched && p1278_wake_cmd_ok){/* visible compatibility path is not qualified */
+        __atomic_store_n(&p1277_panel_wake_uncertain,0,__ATOMIC_RELEASE);
+    }
+    if(ok && (!rev8 || p1278_wake_cmd_ok) && (!persistent || !latched))fresh_disarm();
     say("p127545-panel: gen=%u latch=%u display29=%u fallback=%u\n",gen,latched,ok,!latched||!ok);
+    if(rev8)say("p1278-panel: mode=%u gen=%u first=%u done=%u replay=%u dcs29=%u clean=%u reason=%u diag=%x raw=%02x/%02x/%02x/%02x\n",p1278_off_mode,gen,p1278_first_frame,p1278_done_frame,p1278_replay_ok,ok,p1278_clean_cycles,p1278_reason,p1278_diag_valid,p1278_diag_raw[0],p1278_diag_raw[1],p1278_diag_raw[2],p1278_diag_raw[3]);
     lck_mtx_unlock(panel_lock);
 }
 
@@ -692,6 +797,112 @@ hakios_p9_panel_auto_on(void)
 {
     return (int)(__atomic_load_n(&p9_panel_auto, __ATOMIC_ACQUIRE) || __atomic_load_n(&fresh_mode,__ATOMIC_ACQUIRE) ||
         __atomic_load_n(&p1277_panel_request,__ATOMIC_ACQUIRE) || __atomic_load_n(&p1277_panel_wake_uncertain,__ATOMIC_ACQUIRE));
+}
+
+/* Rev8 persistent path. Caller holds panel_lock and stock DISP scope.
+ * The sleep/wake commands use a bounded TE mask owned by DPU, never
+ * change host DSC registers, and always release the mask before waiting
+ * for fresh presentation. A failed witness retires the pilot. */
+static int p1278_power_locked(bool on){
+    static const uint8_t key[]={0x9f,0xa5,0xa5},close[]={0x9f,0x5a,0x5a};
+    static const uint8_t off[]={0x28},in[]={0x10},out[]={0x11};
+    if(!on && fresh_ready && !panel_asleep){
+        __atomic_store_n(&fresh_ready,0,__ATOMIC_RELEASE);
+        p1277_panel_retire();p1278_reviewed=0;p1278_reason=7;
+        __atomic_store_n(&p1278_off_verified,0,__ATOMIC_RELEASE);
+        __atomic_store_n(&p1277_panel_sleep_verified,0,__ATOMIC_RELEASE);
+        __atomic_store_n(&p1277_panel_wake_uncertain,1,__ATOMIC_RELEASE);
+        panel_asleep=true; /* DCS29 was not sent: next ON recovers */
+        return EBUSY;
+    }
+    if(on && fresh_ready && !panel_asleep)return 0;
+    if(on==!panel_asleep && !(on && p1277_panel_wake_uncertain))return 0;
+    if(!on && p1277_panel_failed)return EIO;
+    if(++fresh_gen==0)++fresh_gen;
+    __atomic_store_n(&fresh_ready,0,__ATOMIC_RELEASE);
+    __atomic_store_n(&p1278_off_verified,0,__ATOMIC_RELEASE);
+    __atomic_store_n(&p1277_panel_sleep_verified,0,__ATOMIC_RELEASE);
+    if(!on){
+        if(!p1278_panel_id_ok(panel_id) || !panel_write || panel_level<0 ||
+           (p1278_mode==2 && !(p1278_reviewed&1u)) ||
+           !hakios_p1278_dpu_hold_begin()){
+            p1278_reason=1;p1277_panel_retire();fresh_disarm();return EBUSY;
+        }
+        p1278_link_capture(&p1278_pre_link);
+        p1278_pre_valid=hakios_p1278_dpu_capture(&p1278_pre_dpu);
+        if(p1278_pre_valid)p1278_snapshot("before-off",&p1278_pre_link,&p1278_pre_dpu);
+        if(!p1278_pre_valid || !p1278_link_wqhd(&p1278_pre_link) ||
+           !p1278_dpu_wqhd(&p1278_pre_dpu) || !(p1278_pre_link.mask&P78_DSIM_FRAME_DONE) ||
+           !p1278_fifo_idle()){
+            bool released=hakios_p1278_dpu_hold_end();
+            p1278_reason=released?2:8;p1277_panel_retire();fresh_disarm();return EIO;
+        }
+        if(!(p1278_diag_valid&3u))p1278_read_diag(0);
+        p1278_off_mode=p1278_mode;p1278_replay_ok=false;p1278_wake_cmd_ok=false;
+        bool first=dsim_send(key,sizeof(key)) && dsim_send(off,sizeof(off));
+        first=dsim_send(close,sizeof(close)) && first;
+        IOSleep(20);
+        bool second=true;
+        if(p1278_off_mode==2){
+            second=dsim_send(key,sizeof(key)) && dsim_send(in,sizeof(in));
+            second=dsim_send(close,sizeof(close)) && second;
+        }
+        bool released=hakios_p1278_dpu_hold_end();
+        if(p1278_off_mode==2)IOSleep(100);
+        panel_asleep=true;fresh_off_ok=first&&second&&released;
+        if(fresh_off_ok){
+            p1278_off_count++;
+            if(p1278_off_mode==2){fresh_sleep++;__atomic_store_n(&p1277_panel_sleep_verified,1,__ATOMIC_RELEASE);}
+            __atomic_store_n(&p1278_off_verified,1,__ATOMIC_RELEASE);
+            __atomic_store_n(&p1277_panel_wake_uncertain,0,__ATOMIC_RELEASE);
+        }else{
+            p1278_reason=3;fresh_fault++;p1277_panel_retire();p1278_reviewed=0;
+            __atomic_store_n(&p1277_panel_wake_uncertain,1,__ATOMIC_RELEASE);
+        }
+        say("p1278-panel: off mode=%u gen=%u dcs28=%u dcs10=%u released=%u verified=%u\\n",p1278_off_mode,fresh_gen,first,p1278_off_mode==2&&second,released,fresh_off_ok);
+        return fresh_off_ok?0:EIO;
+    }
+    __atomic_store_n(&p1277_panel_wake_uncertain,1,__ATOMIC_RELEASE);
+    struct p1278_link_state l;
+    struct p1278_dpu_state d;
+    bool held=hakios_p1278_dpu_hold_begin();
+    bool valid=false;
+    if(held){
+        p1278_link_capture(&l);
+        bool captured=hakios_p1278_dpu_capture(&d);
+        if(captured)p1278_snapshot("before-wake",&l,&d);
+        valid=captured && p1278_pre_valid && p1278_link_wqhd(&l) && p1278_dpu_wqhd(&d) &&
+            p1278_link_same(&p1278_pre_link,&l) && p1278_dpu_same(&p1278_pre_dpu,&d) &&
+            p1278_fifo_idle() && (l.mask&P78_DSIM_FRAME_DONE);
+    }
+    bool replay=valid && fresh_off_ok && !p1277_panel_failed;
+    bool sleepout=true;
+    if(p1278_off_mode==2){
+        if(replay)replay=p1278_dsc_decoder(); /* COMP + PPS before 11 */
+        sleepout=dsim_send(key,sizeof(key)) && dsim_send(out,sizeof(out));
+        sleepout=dsim_send(close,sizeof(close)) && sleepout;
+        p1278_not_before=deadline_us(120000);
+        IOSleep(30);
+        if(replay && sleepout){replay=p1278_full_area();if(replay)p1278_replays++;}
+    }else p1278_not_before=deadline_us(20000);
+    if(held && !(p1278_diag_valid&12u))p1278_read_diag(2);
+    int brightness_error=panel_level>=0?panel_set_impl(panel_level,true):EINVAL;
+    bool cleared=held && p1278_fifo_idle() && p1278_clear_done();
+    bool released=held && hakios_p1278_dpu_hold_end();
+    panel_asleep=false;
+    p1278_wake_cmd_ok=sleepout && !brightness_error && (!held || released);
+    p1278_replay_ok=replay && p1278_wake_cmd_ok && cleared && released;
+    if(!p1278_replay_ok){
+        p1278_reason=4;p1277_panel_retire();p1278_reviewed=0;
+    }
+    p1278_first_seen=false;p1278_first_frame=p1278_done_frame=0;
+    /* Still recover visibly if a diagnostic/refused replay occurs.
+     * It is never a qualified wake and the policy cannot repeat. */
+    clock_interval_to_deadline(650,NSEC_PER_MSEC,&fresh_deadline);
+    __atomic_store_n(&fresh_ready,fresh_gen,__ATOMIC_RELEASE);
+    fresh_schedule();
+    say("p1278-panel: wake mode=%u gen=%u held=%u match=%u sleepout=%u replay=%u brightness=%d cleared=%u released=%u\\n",p1278_off_mode,fresh_gen,held,valid,sleepout,p1278_replay_ok,brightness_error,cleared,released);
+    return p1278_replay_ok?0:EIO;
 }
 
 int hakios_s6e3ha8_power(bool on);
@@ -723,6 +934,7 @@ hakios_s6e3ha8_power(bool on)
 	     __atomic_store_n(&fresh_mode,1,__ATOMIC_RELEASE);}
 	}
 	if(!panel_sleep){lck_mtx_unlock(panel_lock);return ENODEV;}
+	if(p1278_permission && p1277_panel_persistent){int error=p1278_power_locked(on);lck_mtx_unlock(panel_lock);return error;}
 	/* Failed DCS wake: do not issue another sleep sequence until recovery. */
 	if(!on && !panel_asleep && p1277_panel_persistent && p1277_panel_failed){lck_mtx_unlock(panel_lock);return EIO;}
 	/* A failed DCS wake is not equivalent to a fully awake panel. An
@@ -812,6 +1024,7 @@ p9_panel_mode_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
     int err=sysctl_io_number(req,value,sizeof(value),&value,NULL);
     if(err || req->newptr==USER_ADDR_NULL)return err;
     if(value!=0 && value!=1)return EINVAL;
+    if(value && p1278_permission)return EPERM; /* old sleep path lacks Rev8 recovery */
     P545_DISP_GUARD(true,EBUSY);
     if(__atomic_load_n(&fresh_mode,__ATOMIC_ACQUIRE))return EBUSY;
     if(!dsim || !panel_lock)return ENODEV;
@@ -855,7 +1068,8 @@ SYSCTL_PROC(_kern_hakios,OID_AUTO,p9_panel_stats,
  * No panel DCS change is mixed into the DISP experiment. */
 bool hakios_p545_disp_panel_quiet(void);
 bool hakios_p545_disp_panel_quiet(void){
-    if(!dsim || !panel_lock || panel_sleep || panel_asleep || p9_panel_auto || fresh_mode || fresh_ready)return false;
+    if(!dsim || !panel_lock || panel_sleep || panel_asleep || p9_panel_auto || fresh_mode || fresh_ready ||
+       __atomic_load_n(&p1277_panel_request,__ATOMIC_ACQUIRE) || __atomic_load_n(&p1277_panel_wake_uncertain,__ATOMIC_ACQUIRE))return false;
     uint32_t f=rd(DSIM_FIFOCTRL);
     return (f&(EMPTY_PH|EMPTY_PL|EMPTY_RX|FULL_PH|FULL_PL))==(EMPTY_PH|EMPTY_PL|EMPTY_RX);
 }
@@ -866,6 +1080,7 @@ static int p127545_panel_sysctl(__unused struct sysctl_oid *oidp,__unused void *
     int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
     if(e || req->newptr==USER_ADDR_NULL)return e;
     if(v!=0 && v!=1)return EINVAL;
+    if(v && p1278_permission)return EPERM;
     P545_DISP_GUARD(true,EBUSY);
     if(!fresh_boot || !panel_lock || !dsim || !fresh_call)return ENODEV;
     lck_mtx_lock(panel_lock);
@@ -904,6 +1119,7 @@ static int p1277_panel_sysctl(__unused struct sysctl_oid *o,__unused void *a,__u
        (fresh_mode && !__atomic_load_n(&p1277_panel_persistent,__ATOMIC_ACQUIRE))){
         lck_mtx_unlock(panel_lock);return EBUSY;
     }
+    if(v && p1278_permission && (!p1278_panel_id_ok(panel_id) || (p1278_mode==2 && !(p1278_reviewed&1u)))){lck_mtx_unlock(panel_lock);return EPERM;}
     if(v && (__atomic_load_n(&p1277_panel_failed,__ATOMIC_ACQUIRE) || !panel_write || panel_level<0)){
         lck_mtx_unlock(panel_lock);return EPERM;
     }
@@ -925,6 +1141,51 @@ static int p1277_panel_stats_sysctl(__unused struct sysctl_oid *o,__unused void 
     lck_mtx_unlock(panel_lock);return SYSCTL_OUT(req,out,strlen(out)+1);
 }
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p1277_panel_stats,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1277_panel_stats_sysctl,"A","Rev7 panel state, DCS/temporal witness not rail power");
+static int p1278_panel_mode_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
+    int v=(int)p1278_mode;
+    int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(e || !req->newptr)return e;
+    if(v!=1 && v!=2)return EINVAL;
+    if(!p1278_permission || !panel_lock)return ENODEV;
+    lck_mtx_lock(panel_lock);
+    if(p1277_panel_request || p1277_panel_persistent || panel_asleep || fresh_ready ||
+       p1277_panel_wake_uncertain || p1277_panel_failed || hakios_display_requested_on()!=1 ||
+       (v==2 && !(p1278_reviewed&1u))){lck_mtx_unlock(panel_lock);return EPERM;}
+    p1278_mode=(uint32_t)v;p1278_diag_valid=0;
+    lck_mtx_unlock(panel_lock);return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1278_panel_mode,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1278_panel_mode_sysctl,"I","Rev8 1 DCS28 only; 2 full WQHD sleep with checked decoder restore (requires visual review)");
+static uint32_t p1278_review_command;
+static int p1278_panel_review_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
+    int v=(int)p1278_review_command;
+    int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(e || !req->newptr)return e;
+    if(v!=1 && v!=2)return EINVAL;
+    if(!p1278_permission || !panel_lock)return ENODEV;
+    lck_mtx_lock(panel_lock);
+    if(v==2){
+        p1277_panel_retire();p1278_reviewed=0;p1278_review_command=2;p1278_reason=9;
+        if(!panel_asleep && !fresh_ready && !p1277_panel_wake_uncertain)fresh_disarm();
+        lck_mtx_unlock(panel_lock);return 0;
+    }
+    if(hakios_display_requested_on()!=1 || panel_asleep || fresh_ready || p1277_panel_wake_uncertain ||
+       p1277_panel_failed || !p1277_panel_persistent || !p1278_replay_ok || p1278_reason ||
+       p1278_clean_cycles==p1278_review_cycle || !p1278_off_mode){
+        lck_mtx_unlock(panel_lock);return EPERM;
+    }
+    p1278_review_cycle=p1278_clean_cycles;p1278_reviewed|=1u<<(p1278_off_mode-1u);p1278_review_command=1;
+    lck_mtx_unlock(panel_lock);return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1278_panel_review,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1278_panel_review_sysctl,"I","Rev8 1 physical operator acceptance of new clean wake, 2 reject/retire");
+static int p1278_panel_stats_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
+    if(!panel_lock)return ENODEV;
+    lck_mtx_lock(panel_lock);
+    char out[352];
+    snprintf(out,sizeof(out),"version=1 permission=%u mode=%u off_mode=%u off_verified=%u off_count=%u replays=%u clean=%u reviewed=%u reason=%u first=%u done=%u diag=%u raw=%02x/%02x/%02x/%02x id=%06x pending=%u failed=%u",
+        p1278_permission,p1278_mode,p1278_off_mode,p1278_off_verified,p1278_off_count,p1278_replays,p1278_clean_cycles,p1278_reviewed,p1278_reason,p1278_first_frame,p1278_done_frame,p1278_diag_valid,p1278_diag_raw[0],p1278_diag_raw[1],p1278_diag_raw[2],p1278_diag_raw[3],panel_id,fresh_ready,p1277_panel_failed);
+    lck_mtx_unlock(panel_lock);return SYSCTL_OUT(req,out,strlen(out)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1278_panel_stats,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1278_panel_stats_sysctl,"A","Rev8 physical display recovery witnesses, visual review and input power are separate");
 void
 hakios_s6e3ha8_init(void)
 {
@@ -963,6 +1224,10 @@ hakios_s6e3ha8_init(void)
 	(void)PE_parse_boot_argn("p1277_panel",&p1277_panel_permission,sizeof(p1277_panel_permission));
 	bool rev7_panel_boot=p1277_panel_permission==1;
 	p1277_panel_permission=(rev7_panel_boot || rev7_profile==1) && fresh_boot && fresh_call && !panel_sleep_boot;
+	uint32_t rev8_profile=0;
+	(void)PE_parse_boot_argn("p1278",&rev8_profile,sizeof(rev8_profile));
+	p1278_permission=rev8_profile==1 && rev7_profile==1 && p1277_panel_permission && strcmp(HAKIOS_DEVICE,"starlte")==0;
+	if(p1278_permission)rev7_panel_boot=false;
 	__atomic_store_n(&p1277_panel_request,rev7_panel_boot && p1277_panel_permission,__ATOMIC_RELEASE);
 	if (panel_sleep) {
 		say("s6e3ha8: panel_sleep=%u: the screen's off from iOS puts the panel to sleep (28, 10), its on wakes it (11, 29)\n",

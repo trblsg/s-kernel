@@ -47,6 +47,9 @@ $script:P12752IdleAllowed=$false
 $script:P12753HostEnabled=$false
 $script:P12754HostEnabled=$false
 $script:P1277HostEnabled=$false
+$script:P1277SuiteAllowed=$false
+$script:P1278HostEnabled=$false
+$script:P1278SuiteAllowed=$false
 $script:P12753ArmAllowed=$false
 $script:P127544WarmAllowed=$false
 $script:P127544CompositeAllowed=$false
@@ -142,6 +145,13 @@ function P12-ReplyShape([string]$Name,[string]$Reply,[bool]$Mixed){
         '^p12752_revision$' {return ($Reply -ceq '1')}
         '^p12753_revision$' {return ($Reply -ceq '1')}
         '^p12754_revision$' {return ($Reply -cmatch '^[123456]$')}
+        '^p1277_layer2$' {return ($Reply -cmatch '^[0-4]$')}
+        '^p1278_revision$' {return ($Reply -ceq '8')}
+        '^p1278_panel_mode$' {return ($Reply -cmatch '^[12]$')}
+        '^p1278_panel_review$' {return ($Reply -cmatch '^[0-3]$')}
+        '^p1278_panel_stats$' {return ($Reply -cmatch "^version=1 permission=[01] mode=[12] off_mode=[0-2] off_verified=[01] off_count=$dec replays=$dec clean=$dec reviewed=[0-3] reason=$dec first=$dec done=$dec diag=$dec raw=[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{2} id=[0-9a-f]{6} pending=$dec failed=[01]$")}
+        '^p1278_irq_stats$' {return ($Reply -cmatch "^version=1 enabled=[01] attached=[01] waits=$dec late=$dec spins=$dec naps=$dec fallback=$dec arm_fail=$dec fault=$dec$")}
+        '^p1278_active_stats$' {return ($Reply -cmatch "^version=1 active=[01] boost_ms=$dec burst_ms=$dec lit_touch=$dec big_touch=$dec big_frame=$dec g2_request=[01] g2_effective=[01]$")}
         '^p1277_revision$' {return ($Reply -ceq '7')}
         '^p1277_auto_stats$' {return ($Reply -cmatch "^version=1 permission=[01] enabled=[01] state=[0-5] stage=[0-5] samples=$dec retries=$dec abox_driver_ok=[01] fault=$dec last_uv=$dec last_mhz=$dec last_reason=$dec own_lease=$dec live_mode=$dec ufs_safe=[01] interactive_qualification=0$")}
         '^p1277_layer2_stats$' {return ($Reply -cmatch "^version=1 request=[0-4] module=[0-4] state=[0-2] result=[0-4] samples=$dec restored=[01] power_qualified=0$")}
@@ -149,7 +159,7 @@ function P12-ReplyShape([string]$Name,[string]$Reply,[bool]$Mixed){
         '^p1277_panel_stats$' {return ($Reply -cmatch "^version=1 permission=[01] request=[01] persistent=[01] failed=[01] asleep=[01] pending=$dec sleep=$dec latch29=$dec fallback=$dec fault=$dec sleep_verified=[01] wake_uncertain=[01]$")}
         '^p1277_gpu_dvs_stats$' {return ($Reply -cmatch "^version=1 permission=[01] active=[01] failed=[01] high=$dec rebase=$dec last_configured_vsel=$dec fault=$dec$")}
         '^p1277_psci_stats$' {return ($Reply -cmatch '^version=1 permission=[01] done=[01] raw_version=0x[0-9a-f]{8} raw_features=0x[0-9a-f]{8} signed_features=-?[0-9]{1,10} osi=[01] extended=[01] conduit=SMC_EL2_possible suspend_called=0$')}
-        '^(mali_irq|p127542_g2|p127545_panel)$' {return ($Reply -cmatch '^[01]$')}
+        '^(mali_irq|p127542_g2|p127545_panel|p1277_auto_idle|p1277_panel|p1277_active|p1277_gpu_dvs|p1277_g2|p1277_burst_trace)$' {return ($Reply -cmatch '^[01]$')}
         '^p127545_panel_stats$' {return ($Reply -cmatch "^version=1 mode=[01] gen=$dec pending=$dec sleep=$dec latch29=$dec fallback=$dec fault=$dec$")}
         '^p127545_disp_review$' {return ($Reply -cmatch '^(0|200000|134000)$')}
         '^p127545_disp_stats$' {return ($Reply -cmatch "^version=1 enabled=[01] transport_ok=[01] closed=[01] active=[01] target=$dec seen=$dec restored=$dec qual=[0-3] pending=$dec attempts=$dec sets=$dec restores=$dec preempt=$dec fault=$dec reviews=$dec live_n=$dec live_min=$dec live_max=$dec start=$dec end=$dec$")}
@@ -334,6 +344,9 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup,[ValidateRan
     if($script:P12753HostEnabled){$allowed+=@('p12753_revision','p12753_guard','p12753_status','p12753_arm','p12753_select','p12753_page')}
     if($script:P12754HostEnabled){$allowed+=@('p12754_revision','p12754_wait','p12754_rate','p127541_stats','p1231_ufs_stats','p127542_audio','p127542_audio_result','mali_irq','p127542_g2','p127543_wait','p127543_rail','p127543_assist','p127544_window','p127545_cmu','p127545_ect_mif','p127545_ect_int','p127545_int_bounds','p127545_panel','p127545_panel_stats','p127545_hci','p127545_mfc_stats','p127545_cam_stats','p127545_disp_stats','p127545_disp_review')}
     if($script:P1277HostEnabled){$allowed+=@('p1277_revision','p1277_auto_stats','p1277_layer2_stats','p1277_burst_stats','p1277_panel_stats','p1277_gpu_dvs_stats','p1277_psci_stats')}
+    if($script:P1277SuiteAllowed){$allowed+=@('p1277_auto_idle','p1277_panel','p1277_active','p1277_gpu_dvs','p1277_g2','p1277_layer2','p1277_burst_trace')}
+    if($script:P1278HostEnabled){$allowed+=@('p1278_revision','p1278_panel_stats','p1278_irq_stats','p1278_active_stats')}
+    if($script:P1278SuiteAllowed){$allowed+=@('p1278_panel_mode','p1278_panel_review')}
     if($Name -notin $allowed){throw "P12 sysctl disallowed $Name"}
     if($script:P124HostEnabled -and $Name -eq 'p1231_hash_mode' -and $Value -eq '1'){throw 'P12.4 rejects scalar thermal trial'}
     if($Value -ne '' -and -not (
@@ -365,6 +378,9 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup,[ValidateRan
         ($script:P1273HostEnabled -and $script:P1273GateAllowed -and $Name -eq 'p1273_gate_begin' -and $Value -in @('3','5','17','129','257','513','903','919')) -or
         ($script:P12754HostEnabled -and $script:P1273GateAllowed -and $Name -eq 'p1273_gate_begin' -and $Value -in @('33','49','65')) -or
         ($script:P12754HostEnabled -and $script:P127543AssistAllowed -and $Name -eq 'p127543_assist' -and $Value -in @('0','1','5','17','33','49','65','129','257','513')) -or
+        ($script:P1277SuiteAllowed -and $Name -in @('p1277_auto_idle','p1277_panel','p1277_active','p1277_gpu_dvs','p1277_g2','p1277_burst_trace') -and $Value -in @('0','1')) -or
+        ($script:P1278SuiteAllowed -and $Name -in @('p1278_panel_mode','p1278_panel_review') -and $Value -in @('1','2')) -or
+        ($script:P1277SuiteAllowed -and $Name -eq 'p1277_layer2' -and $Value -in @('0','1','2','3','4')) -or
         ($script:P12754HostEnabled -and $script:P127542GpuAllowed -and $Name -in @('mali_irq','p127542_g2') -and $Value -in @('0','1')) -or
         ($script:P12754HostEnabled -and $script:P127545PanelAllowed -and $Name -eq 'p127545_panel' -and $Value -in @('0','1')) -or
         ($script:P12754HostEnabled -and $script:P1273GateAllowed -and $Name -eq 'p127542_audio' -and $Value -match '^[1-9]\d{0,7}$') -or
@@ -393,6 +409,7 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup,[ValidateRan
     if($script:P1272HostEnabled){$restore+='p1272_probe_request'}
     if($script:P1273HostEnabled){$restore+=@('p1273_trace_mode','p1273_cap_mode','p1273_offline_s','p1273_gate_begin')}
     if($script:P127542GpuAllowed){$restore+=@('mali_irq','p127542_g2')}
+    if($script:P1277SuiteAllowed){$restore+=@('p1277_auto_idle','p1277_panel','p1277_active','p1277_gpu_dvs','p1277_g2','p1277_layer2','p1277_burst_trace')}
     if($script:P127545PanelAllowed){$restore+='p127545_panel'}
     if($script:P127545DispProbeAllowed){$restore+='p127545_disp_review'}
     if($script:P127543AssistAllowed){$restore+=@('p127543_assist')}
@@ -401,7 +418,11 @@ function P12-Query([string]$Name,[string]$Value='',[switch]$Cleanup,[ValidateRan
     if($script:P12752IdleAllowed){$restore+='p12752_idle_mode'}
     if($script:P12753HostEnabled -and $script:P12753ArmAllowed){$restore+='p12753_arm'}
     $clockStop=(($script:P123ClockAllowed -or $script:P124ClockAllowed) -and $script:P123HostEnabled -and $Name -eq 'hi_cmd' -and $Value -eq '201')
-    if($Cleanup -and -not $clockStop -and ($Name -notin $restore -or $Value -ne '0')){
+    # Rev7 cleanup can read only identity and the exact rollback witnesses
+    # without masking the zero-write ACK with an earlier thermal abort.
+    $rev7CleanupRead=$script:P1277SuiteAllowed -and $Cleanup -and $Value -eq '' -and $Name -in @('p1273_boot_identity','p1277_panel_stats','p1277_auto_stats','p1277_gpu_dvs_stats','p1277_active','p1277_g2','mali_irq','p127_status','p1277_layer2_stats','p1277_burst_stats')
+    $rev8CleanupRead=$script:P1278SuiteAllowed -and $Cleanup -and $Value -eq '' -and $Name -in @('p1278_panel_stats','p1278_irq_stats','p1278_active_stats')
+    if($Cleanup -and -not $clockStop -and -not $rev7CleanupRead -and -not $rev8CleanupRead -and ($Name -notin $restore -or $Value -ne '0')){
         throw 'P12.1/P12.2 Cleanup bypass is reserved for bounded restore-to-zero writes only'
     }
     $cmd='sysctl kern.hakios.'+$Name
