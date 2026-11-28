@@ -296,6 +296,9 @@ static void g3d_lab_restore_after_job_error(void);
 #define MALI_IRQ_SPIN_US        20u             /* (two delays of 10 us before the first sleep) */
 #define MALI_IRQ_WATCH_US       200u            /* (a lost interrupt is found by this timer, not a 50 us nap) */
 #define MALI_IRQ_MISSES         64u             /* (jobs in a row done with no interrupt: poll again) */
+static uint32_t p1279_irq_auto,p1279_irq_state; /* 0 manual/off,1 probation,2 observed,3 retired */
+static uint64_t p1279_wait0,p1279_late0;
+static uint32_t p1279_hash_mode; /* 0 legacy,2 full-range hash4 */
 static uint32_t mali_irq;                       /* boot-arg mali_irq=1 */
 static bool mali_irq_attached;
 static uint32_t mali_irq_armed;                 /* (a job is in flight and waits on mali_wait_event) */
@@ -1774,15 +1777,18 @@ mali_job_interrupt(__unused void *context, uint32_t intid)
 static bool
 mali_irq_arm(void)
 {
-	if (!mali_irq || !p1272_require_mmio()) {
-		return false;
-	}
+	if (!mali_irq)return false;
+    if((p1279_irq_auto && g3d_lab_fault) || !p1272_require_mmio()){
+        if(p1279_irq_auto){p1278_irq_arm_fail++;p1279_irq_state=3;mali_irq=0;mali_irq_detach();}
+        return false;
+    }
 	wr(mali, JOB_INT_CLEAR, 0xffffffffu);
 	wr(mali, JOB_INT_MASK, MALI_JOB_MASK); /* (1 opens a slot; 0 is a mask, which is what the last run wrote) */
 	if (!mali_irq_attached) {
 		if (gic_v3_spi_attach(MALI_JOB_INTID, false, mali_job_interrupt, NULL) != KERN_SUCCESS) {
 			say("mali: job irq: SPI %u (GIC INTID %u) did not attach; polling\n", MALI_JOB_SPI, MALI_JOB_INTID);
 			mali_irq = 0;
+            if(p1279_irq_auto){p1278_irq_arm_fail++;p1279_irq_state=3;}
 			return false;
 		}
 		mali_irq_attached = true;
@@ -1821,6 +1827,7 @@ mali_irq_fallback(void)
 	mali_irq = 0;
 	mali_irq_missing = 0;
 	mali_irq_fallbacks++;p1278_irq_fallback_total++;
+    if(p1279_irq_auto)p1279_irq_state=3;
 	/*
 	 * Detach only: the completed job's bit is what its caller reads next, and clearing it here would make the job
 	 * that just finished look hung, for a reset. The worker clears the bits itself once it has read them.
@@ -1828,6 +1835,22 @@ mali_irq_fallback(void)
 	mali_irq_detach();
 }
 
+/* Called under the job lock only, after the raw completion bit was read.
+ * Do not clear it here; existing completion path still owns the bit.
+ * A quick poll completion is not an IRQ miss. */
+static void p1279_irq_observe(void){
+    if(!p1279_irq_auto || !mali_irq)return;
+    if(g3d_lab_fault){p1279_irq_state=3;mali_irq=0;p1278_irq_fallback_total++;mali_irq_detach();return;}
+    if(p1279_irq_state!=1)return;
+    uint64_t good=mali_irq_waits-p1279_wait0,late=mali_irq_late-p1279_late0;
+    if(good+late>=128 && late>(good+late)/10){
+        p1279_irq_state=3;mali_irq=0;p1278_irq_fallback_total++;mali_irq_detach();
+        say("p1279-irq: probation retired waits=%llu late=%llu\n",(unsigned long long)good,(unsigned long long)late);
+    }else if(good>=1024){
+        p1279_irq_state=2;
+        say("p1279-irq: probation observed waits=%llu late=%llu; not power qualification\n",(unsigned long long)good,(unsigned long long)late);
+    }
+}
 static bool
 wait_job(uint32_t at, uint32_t mask, uint32_t want, uint32_t ms)
 {
@@ -1859,6 +1882,7 @@ wait_job(uint32_t at, uint32_t mask, uint32_t want, uint32_t ms)
 					mali_irq_missing = 0;
 					mali_irq_waits++;
 				}
+                p1279_irq_observe();
 				return true;
 			}
 			uint64_t nap;
@@ -1870,7 +1894,9 @@ wait_job(uint32_t at, uint32_t mask, uint32_t want, uint32_t ms)
 			lck_mtx_unlock(&mali_wait_lock);
 			mali_naps++;p1278_naps_total++;
 		}
-		return job_bits(rd(mali, at), mask, want);
+        bool done=job_bits(rd(mali,at),mask,want);
+        if(!done && p1279_irq_auto){p1279_irq_state=3;mali_irq=0;p1278_irq_fallback_total++;mali_irq_detach();}
+        return done;
 	}
 	for (int i = 0; i < 20; i++) {
 		if (job_bits(rd(mali, at), mask, want)) {
@@ -3524,7 +3550,10 @@ mali_irq_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused 
 	if (reached < STEPS) {
 		return ENODEV;
 	}
-	lck_mtx_lock(&mali_job_lock);
+    lck_mtx_lock(&mali_job_lock);
+    /* Manual zero independently retires the automatic policy for this boot. */
+    if(p1279_irq_auto && value==0){p1279_irq_auto=0;p1279_irq_state=0;}
+    if(p1279_irq_auto && value==1 && p1279_irq_state==3){lck_mtx_unlock(&mali_job_lock);return EPERM;}
 	if (value == 0) {
 		if (mali_irq) {
 			mali_irq = 0;
@@ -3538,7 +3567,8 @@ mali_irq_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused 
 		mali_irq_fallbacks = 0;
 		if (g3d_awake || !g3d_sleep) {
 			if (!mali_irq_arm()) {
-				p1278_irq_arm_fail++;mali_irq=0;mali_irq_off();
+				if(!p1279_irq_auto)p1278_irq_arm_fail++;
+                mali_irq=0;mali_irq_off();
 				lck_mtx_unlock(&mali_job_lock);
 				return ENODEV;
 			}
@@ -3552,6 +3582,22 @@ mali_irq_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused 
 SYSCTL_PROC(_kern_hakios, OID_AUTO, mali_irq, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
     mali_irq_sysctl, "I", "the JOB interrupt (SPI 282) instead of polling for a job's done bit (mali_irq=; 0 or 1)");
 
+/* Rev9 hash request independent of diagnostic mode and G2. No clock writes. */
+static int p1279_hash_mode_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
+    int v=(int)__atomic_load_n(&p1279_hash_mode,__ATOMIC_ACQUIRE);
+    int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
+    if(e || !req->newptr)return e;
+    if(v!=0 && v!=2)return EINVAL;
+    uint32_t grant=0;
+    if(v && (!p122_enabled || !PE_parse_boot_argn("p1279",&grant,sizeof(grant)) || grant!=1))return EPERM;
+    __atomic_store_n(&p1279_hash_mode,(uint32_t)v,__ATOMIC_RELEASE);return 0;
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1279_hash_mode,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1279_hash_mode_sysctl,"I","Rev9 independent hash4 mode 0 legacy 2 fast, context-local verified fallback");
+static int p1279_irq_state_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
+    if(reached<STEPS || !lck_mtx_try_lock(&mali_job_lock))return EBUSY;
+    int v=(int)p1279_irq_state;lck_mtx_unlock(&mali_job_lock);return SYSCTL_OUT(req,&v,sizeof(v));
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1279_irq_state,CTLTYPE_INT|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1279_irq_state_sysctl,"I","0 manual/off 1 probation 2 observed 3 retired");
 /* Read monotonic evidence, independent of the existing 5s log resets. */
 static int p1278_irq_stats_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
     if(reached<STEPS || !lck_mtx_try_lock(&mali_job_lock))return EBUSY;
@@ -3972,7 +4018,15 @@ hakios_mali_init(void)
 	uint32_t rev7_active=0;
 	if(PE_parse_boot_argn("p1277_active",&rev7_active,sizeof(rev7_active)) && rev7_active==1)mali_irq=1;
 	(void)PE_parse_boot_argn("mali_irq", &mali_irq, sizeof(mali_irq));
-	mali_irq = mali_irq != 0;
+    mali_irq = mali_irq != 0;
+    uint32_t rev9=0,rev8=0,rev7=0;
+    if(p122_enabled && PE_parse_boot_argn("p1279",&rev9,sizeof(rev9)) && rev9==1 &&
+        PE_parse_boot_argn("p1278",&rev8,sizeof(rev8)) && rev8==1 &&
+        PE_parse_boot_argn("p1277",&rev7,sizeof(rev7)) && rev7==1){
+        p1279_hash_mode=2;
+        p1279_irq_auto=1;p1279_irq_state=1;mali_irq=1;
+        p1279_wait0=mali_irq_waits;p1279_late0=mali_irq_late;
+    }
 	if (!PE_parse_boot_argn("mali", &last_step, sizeof(last_step)) || last_step == 0) {
 		return;
 	}

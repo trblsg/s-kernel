@@ -94,6 +94,8 @@ bool hakios_p123_input_quiet(__unused uint64_t now) { return false; }
 #endif
 
 #ifndef HAKIOS_EXYNOS_TMU
+uint32_t hakios_p1279_tmu_snapshot(int32_t out[8],uint64_t *at);
+uint32_t hakios_p1279_tmu_snapshot(int32_t out[8],uint64_t *at){for(unsigned i=0;i<8;i++)out[i]=-273000;*at=0;return 0;}
 int32_t hakios_exynos_tmu_zone_mc(unsigned zone);
 uint64_t hakios_exynos_tmu_age_ms(void);
 int32_t hakios_exynos_tmu_zone_now_mc(unsigned zone);

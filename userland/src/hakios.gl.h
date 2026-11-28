@@ -19,6 +19,11 @@ const char *hakios_gl_library(void);                           /* for the log */
  * done; the texture is to be filled and read back with OpenGL ES calls.
  */
 int hakios_gl_surface_texture(struct hakios_gl *gl, uint32_t surface);
+/* Last import outcome on this thread; no extra GL query. Codes 0..7
+ * are generic; native GL error is encoded as 0x10000|error. */
+enum { HGL_IMPORT_OK,HGL_IMPORT_DISABLED,HGL_IMPORT_LOOKUP,HGL_IMPORT_LAYOUT,
+       HGL_IMPORT_LOCK,HGL_IMPORT_BASE,HGL_IMPORT_BACKEND,HGL_IMPORT_ERROR_QUEUE };
+unsigned hakios_gl_import_status(void);
 /*
  * The frame just drawn into the surface's texture (hakios_gl_surface_texture) is shown by the host
  * itself, in a window of its own: 1 when it is (nothing to copy back for the display), 0 when the

@@ -125,6 +125,8 @@ which_driver(void)
  * panfrost-darwin.patch: the kernel's GPU driver makes a buffer of the surface's memory). Only
  * the GPU drivers are asked: the others refuse every time.
  */
+static __thread unsigned import_status;
+unsigned hakios_gl_import_status(void){return import_status;}
 int
 hakios_gl_surface_texture(struct hakios_gl *gl, uint32_t surface)
 {
@@ -139,13 +141,17 @@ hakios_gl_surface_texture(struct hakios_gl *gl, uint32_t surface)
 		image_target = (void (*)(unsigned, void *))OSMesaGetProcAddress("glEGLImageTargetTexture2DOES");
 		shares = driver == DRIVER_FREEDRENO || driver == DRIVER_PANFROST;
 	}
-	if (image_target == NULL || !shares) {
-		return 0;
-	}
-	while (glGetError() != 0) {
-	}
-	image_target(GL_TEXTURE_2D, (void *)(uintptr_t)surface);
-	return glGetError() == 0;
+	import_status=HGL_IMPORT_OK;
+    if (image_target == NULL || !shares) {
+        import_status=HGL_IMPORT_DISABLED;return 0;
+    }
+    unsigned pending=0;
+    for(unsigned i=0;i<32;i++){pending=glGetError();if(!pending)break;}
+    if(pending){import_status=HGL_IMPORT_ERROR_QUEUE;return 0;}
+    image_target(GL_TEXTURE_2D,(void *)(uintptr_t)surface);
+    unsigned error=glGetError();
+    if(error)import_status=0x10000u|error;
+    return error==0;
 }
 
 /* Mesa draws in this process: there is no host to show anything. */

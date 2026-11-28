@@ -138,6 +138,22 @@ SYSCTL_INT(_kern_hakios_temp, OID_AUTO, battery_c, CTLFLAG_RD | CTLFLAG_LOCKED, 
  */
 static volatile int32_t last_zone_mc[TMU_NZONES] = { NOT_READ_MC, NOT_READ_MC, NOT_READ_MC, NOT_READ_MC };
 static volatile uint64_t last_zone_at;
+/* Single look() writer; coherent cached sample, no new MMIO or worker. */
+static uint32_t p1279_tmu_seq;
+static uint64_t p1279_tmu_at;
+static int32_t p1279_tmu_values[8];
+uint32_t hakios_p1279_tmu_snapshot(int32_t out[8],uint64_t *at);
+uint32_t hakios_p1279_tmu_snapshot(int32_t out[8],uint64_t *at){
+    for(unsigned retry=0;retry<2;retry++){
+        uint32_t seq=__atomic_load_n(&p1279_tmu_seq,__ATOMIC_SEQ_CST);
+        if(!seq || (seq&1u))continue;
+        for(unsigned i=0;i<8;i++)out[i]=__atomic_load_n(&p1279_tmu_values[i],__ATOMIC_SEQ_CST);
+        *at=__atomic_load_n(&p1279_tmu_at,__ATOMIC_SEQ_CST);
+        if(seq==__atomic_load_n(&p1279_tmu_seq,__ATOMIC_SEQ_CST))return 1;
+    }
+    for(unsigned i=0;i<8;i++)out[i]=NOT_READ_MC;
+    *at=0;return 0;
+}
 
 int32_t hakios_exynos_tmu_zone_mc(unsigned zone);
 
@@ -285,6 +301,8 @@ look(void)
 {
 	int32_t zone_mc[TMU_NZONES], hottest = INT32_MIN;
 	unsigned hot = 0, good = 0;
+    int32_t p9_values[8];unsigned p9_n=0;
+    for(unsigned i=0;i<8;i++)p9_values[i]=NOT_READ_MC;
 	char list[sizeof(temp_sensors)], one[16], item[32];
 
 	list[0] = 0;
@@ -299,7 +317,8 @@ look(void)
 			uint32_t code = code_of(zone->block, s);
 			int32_t mc = tmu_code_to_mc(&cal[zone->block][s], code);
 
-			if (!tmu_reading_ok(code, mc)) {
+			if(p9_n<8)p9_values[p9_n++]=tmu_reading_ok(code,mc)?mc:NOT_READ_MC;
+            if (!tmu_reading_ok(code, mc)) {
 				snprintf(item, sizeof(item), "%s%u=? ", zone->name, s);
 			} else {
 				text_of(one, sizeof(one), mc);
@@ -325,6 +344,12 @@ look(void)
 		strlcat(list, item, sizeof(list));
 	}
 	reads++;
+    if(p9_n==8){
+        __atomic_add_fetch(&p1279_tmu_seq,1,__ATOMIC_SEQ_CST);
+        for(unsigned i=0;i<8;i++)__atomic_store_n(&p1279_tmu_values[i],p9_values[i],__ATOMIC_SEQ_CST);
+        __atomic_store_n(&p1279_tmu_at,mach_absolute_time(),__ATOMIC_SEQ_CST);
+        __atomic_add_fetch(&p1279_tmu_seq,1,__ATOMIC_SEQ_CST);
+    }
 	for (unsigned z = 0; z < TMU_NZONES; z++) {
 		last_zone_mc[z] = zone_mc[z] == INT32_MIN ? NOT_READ_MC : zone_mc[z];
 		last_zone_at = mach_absolute_time();

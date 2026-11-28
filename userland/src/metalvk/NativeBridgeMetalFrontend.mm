@@ -2361,16 +2361,17 @@ static void p1273LayoutPlan(MTLTextureDescriptor *d,unsigned selector,bool backe
 - (id)newTextureLayoutWithDescriptor:(MTLTextureDescriptor *)d isHeapOrBufferBacked:(BOOL)backed {
  /* P-Layout probe: keep the same Metal return value, but summarize repeated
   * unsupported layout requests to reduce serial log overload. */
- static std::atomic<uint64_t> pLayoutCalls{0};
+ static std::atomic<uint64_t> pLayoutCalls{0},pLayoutNext{0};
  static const bool pLayoutProbe=[] {
   char args[4096]={};size_t len=sizeof(args)-1;
   if(sysctlbyname("kern.bootargs",args,&len,nullptr,0)!=0)return false;
   args[std::min(len,sizeof(args)-1)]=0;
-  return s9_has_boot_flag(args,"p_layout_probe=1")!=0;
+  return s9_has_boot_flag(args,"p_layout_probe=1")!=0 || s9_has_boot_flag(args,"p1279=1")!=0;
  }();
  if(pLayoutProbe) {
   const uint64_t n=++pLayoutCalls;
-  if(n==1 || n%64==0) {
+  uint64_t now=nowUs(),next=pLayoutNext.load(std::memory_order_relaxed);
+  if(now>=next && pLayoutNext.compare_exchange_strong(next,now+5000000,std::memory_order_relaxed)) {
    NBSAY(@"native-metal-playout: calls=%llu enabled=%d width=%lu height=%lu depth=%lu fmt=%lu type=%lu mips=%lu backing=%d storage=%lu",
     (unsigned long long)n,s9LayoutOn()?1:0,(unsigned long)d.width,(unsigned long)d.height,
     (unsigned long)d.depth,(unsigned long)d.pixelFormat,(unsigned long)d.textureType,

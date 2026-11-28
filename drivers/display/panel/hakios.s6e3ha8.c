@@ -646,6 +646,7 @@ static uint32_t p1278_permission,p1278_mode=1,p1278_off_mode,p1278_off_verified,
 static uint32_t p1278_first_frame,p1278_done_frame,p1278_diag_valid,p1278_diag_raw[4];
 static bool p1278_pre_valid,p1278_replay_ok,p1278_wake_cmd_ok;
 static uint32_t p1278_refusal,p1278_drain_samples,p1278_frame_irq_raw;
+static bool p1279_panel;
 static uint64_t p1278_not_before;
 static struct p1278_link_state p1278_pre_link;
 static struct p1278_dpu_state p1278_pre_dpu;
@@ -698,8 +699,11 @@ static bool p1278_fifo_idle(void){return p1278_fifo_drained(rd(DSIM_FIFOCTRL));}
 static bool p1278_drain_held(uint32_t frame){
     p1278_drain_samples=0;
     for(unsigned i=0;i<3;i++){
-        if(!hakios_p1278_dpu_held_idle(frame) || !p1278_fifo_idle() ||
-           !p1278_phy_drained(rd(0x1c)))return false;
+        unsigned fail=0;
+        if(!hakios_p1278_dpu_held_idle(frame))fail|=1;
+        if(!p1278_fifo_idle())fail|=2;
+        if(!p1278_phy_drained(rd(0x1c)))fail|=4;
+        if(fail){if(p1279_panel){say("p1279-panel: drain refused submask=%u frame=%u fifo=%x phy=%x\n",fail,frame,rd(DSIM_FIFOCTRL),rd(0x1c));}return false;}
         p1278_drain_samples++;
         if(i!=2)IOSleep(1);
     }
@@ -858,7 +862,10 @@ static int p1278_power_locked(bool on){
             say("p12781-panel: pre-off refused mask=%x released=%u (no DCS)\n",p1278_refusal,released);
             return EIO;
         }
-        if(!(p1278_diag_valid&3u))p1278_read_diag(0);
+        /* BTA diagnostic reads perturb the transport after the initial
+         * drain (observed refusal128). Rev9 does NOT execute optional BTA
+         * in either critical DCS transition. Mandatory drain unchanged. */
+        if(!p1279_panel && !(p1278_diag_valid&3u))p1278_read_diag(0);
         if(!p1278_drain_held(p1278_pre_dpu.frame)){
             bool released=hakios_p1278_dpu_hold_end();
             p1278_refusal|=P78_DRAIN;
@@ -915,7 +922,7 @@ static int p1278_power_locked(bool on){
         IOSleep(30);
         if(replay && sleepout){replay=p1278_full_area();if(replay)p1278_replays++;}
     }else p1278_not_before=deadline_us(20000);
-    if(held && !(p1278_diag_valid&12u))p1278_read_diag(2);
+    if(!p1279_panel && held && !(p1278_diag_valid&12u))p1278_read_diag(2);
     int brightness_error=panel_level>=0?panel_set_impl(panel_level,true):EINVAL;
     bool drained=held && p1278_fifo_idle();
     /* Publish the new generation before releasing TE: a normal renderer
@@ -1264,7 +1271,9 @@ hakios_s6e3ha8_init(void)
 	uint32_t rev8_profile=0;
 	(void)PE_parse_boot_argn("p1278",&rev8_profile,sizeof(rev8_profile));
 	p1278_permission=rev8_profile==1 && rev7_profile==1 && p1277_panel_permission && strcmp(HAKIOS_DEVICE,"starlte")==0;
-	if(p1278_permission)rev7_panel_boot=false;
+	uint32_t rev9_panel=0;
+    p1279_panel=p1278_permission && PE_parse_boot_argn("p1279",&rev9_panel,sizeof(rev9_panel)) && rev9_panel==1;
+    if(p1278_permission)rev7_panel_boot=false;
 	__atomic_store_n(&p1277_panel_request,rev7_panel_boot && p1277_panel_permission,__ATOMIC_RELEASE);
 	if (panel_sleep) {
 		say("s6e3ha8: panel_sleep=%u: the screen's off from iOS puts the panel to sleep (28, 10), its on wakes it (11, 29)\n",

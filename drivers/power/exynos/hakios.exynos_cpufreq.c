@@ -301,7 +301,7 @@ static void p1277_admission_exit(bool *held){if(*held)lck_mtx_unlock(&p1277_admi
         if((legacy) && p1277_auto_blocks())return EBUSY; \
     }
 static uint64_t p1277_short_boost,p1277_short_burst;
-static bool p12781_profile;
+static bool p12781_profile,p1279_profile;
 static uint64_t p12781_tail_hits,p12781_tail_bypass;
 static bool p1277_active_now(void){
     return __atomic_load_n(&p1277_active_enabled,__ATOMIC_ACQUIRE)!=0;
@@ -1972,7 +1972,8 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 		p1274_tick(now); /* bounded direct TMU, recorder and lower-only OFF policy */
 		p12753_audit_tick(now); /* delayed battery audit; bounded legacy policy leases */
 		p12752_idle_tick(now); /* explicit independent quiet-window evidence */
-		p1277_auto_tick(now); /* independent same-boot automatic qualification */
+		p1279_auto_admit(); /* one autonomous owner; same admission locks */
+        p1277_auto_tick(now); /* independent same-boot automatic qualification */
 		if(!__atomic_load_n(&hakios_p1274_trace_late,__ATOMIC_ACQUIRE))
 			p1273_trace_tick(now); /* existing legacy governor window */
 		p1273_cap_tick(now); /* lower-only, bounded, explicit OFF experiment */
@@ -2062,6 +2063,8 @@ hakios_exynos_cpufreq_gov_start(void)
 	bool rev7_grant=rev7_profile==1 && p124_enabled && p12754_optin();
 	uint32_t rev8_profile=0;
 	p12781_profile=rev7_grant && PE_parse_boot_argn("p1278",&rev8_profile,sizeof(rev8_profile)) && rev8_profile==1;
+    uint32_t rev9=0;
+    p1279_profile=p12781_profile && PE_parse_boot_argn("p1279",&rev9,sizeof(rev9)) && rev9==1;
 	(void)PE_parse_boot_argn("p1277_active",&p1277_active_permission,sizeof(p1277_active_permission));
 	bool rev7_active_boot=p1277_active_permission==1;
 	p1277_active_permission=rev7_active_boot || rev7_grant;
@@ -2117,7 +2120,9 @@ hakios_exynos_cpufreq_gov_start(void)
 	nanoseconds_to_absolutetime((uint64_t)BURST_MS * NSEC_PER_MSEC, &burst_span);
 	nanoseconds_to_absolutetime((uint64_t)MIN(boost_ms,150u)*NSEC_PER_MSEC,&p1277_short_boost);
 	nanoseconds_to_absolutetime((uint64_t)MIN(BURST_MS,60u)*NSEC_PER_MSEC,&p1277_short_burst);
-	__atomic_store_n(&p1277_active_enabled,rev7_active_boot && p1277_active_permission,__ATOMIC_RELEASE);
+	__atomic_store_n(&p1277_active_enabled,(rev7_active_boot || (p1279_profile && gov_policy==2)) && p1277_active_permission,__ATOMIC_RELEASE);
+    if(p1279_profile && p1277_g2_permission)__atomic_store_n(&p1277_g2_request,1,__ATOMIC_RELEASE);
+    if(p1279_profile && p1277_auto_permission)p1279_auto_pending=true;
 	nanoseconds_to_absolutetime((uint64_t)LATE_MS * NSEC_PER_MSEC, &late_span);
 	nanoseconds_to_absolutetime((uint64_t)MOVING_MS * NSEC_PER_MSEC, &moving_span);
 	nanoseconds_to_absolutetime((uint64_t)HOLD_MS * NSEC_PER_MSEC, &hold_span);

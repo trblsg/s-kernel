@@ -85,6 +85,8 @@ hakios_gl_pace(struct hakios_gl *gl)
 	return gfx_pace(gl->gfx);
 }
 
+static __thread unsigned import_status;
+unsigned hakios_gl_import_status(void){return import_status;}
 int
 hakios_gl_surface_texture(struct hakios_gl *gl, uint32_t id)
 {
@@ -96,10 +98,11 @@ hakios_gl_surface_texture(struct hakios_gl *gl, uint32_t id)
 		const char *e = getenv("GFX_SHARE");
 		share = e == NULL || strcmp(e, "0") != 0;
 	}
-	if (!share || (surface = IOSurfaceLookup(id)) == NULL) {
-		return 0;
-	}
+	import_status=HGL_IMPORT_OK;
+    if(!share){import_status=HGL_IMPORT_DISABLED;return 0;}
+    if((surface=IOSurfaceLookup(id))==NULL){import_status=HGL_IMPORT_LOOKUP;return 0;}
 	if (IOSurfaceGetPlaneCount(surface) > 0 || IOSurfaceGetBytesPerElement(surface) != 4) {
+        import_status=HGL_IMPORT_LAYOUT;
 		CFRelease(surface);
 		return 0;
 	}
@@ -107,12 +110,14 @@ hakios_gl_surface_texture(struct hakios_gl *gl, uint32_t id)
 	 * The base address stays valid while the surface lives: eagl.c holds it for as long as the
 	 * texture is the surface. The lock is for reading it now.
 	 */
-	IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL);
+	if(IOSurfaceLock(surface,kIOSurfaceLockReadOnly,NULL)!=0){import_status=HGL_IMPORT_LOCK;CFRelease(surface);return 0;}
+    if(!IOSurfaceGetBaseAddress(surface)){import_status=HGL_IMPORT_BASE;IOSurfaceUnlock(surface,kIOSurfaceLockReadOnly,NULL);CFRelease(surface);return 0;}
 	/* the reference stays with the shared texture: its seed says when the memory has changed */
 	ok = gfx_share_texture(gl->gfx, id, IOSurfaceGetBaseAddress(surface), (uint32_t)IOSurfaceGetWidth(surface),
 	    (uint32_t)IOSurfaceGetHeight(surface), (uint32_t)IOSurfaceGetBytesPerRow(surface), 1, (void *)surface);
 	IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
 	if (!ok) {
+        import_status=HGL_IMPORT_BACKEND;
 		CFRelease(surface);
 	}
 	return ok;

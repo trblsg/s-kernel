@@ -18,6 +18,7 @@ static uint64_t p1277_auto_quiet,p1277_auto_started,p1277_auto_sample_at;
 static uint64_t p1277_auto_restore_until,p1277_auto_fault_mark;
 static uint64_t p1277_auto_stop0,p1277_auto_resume0,p1277_auto_wait0;
 static bool p1277_auto_table_ok,p1277_auto_stage_pass,p1277_auto_was_active;
+static bool p1279_auto_pending;
 static const unsigned p1277_auto_modes[]={17u,33u,49u,65u,5u};
 static const uint32_t p1277_auto_rates[]={949000u,832000u,715000u,598000u};
 static const uint32_t p1277_auto_uv[]={731250u,700000u,668750u,637500u};
@@ -460,6 +461,21 @@ static void p1277_auto_tick(uint64_t now){
     p1277_auto_tick_locked(now);
     lck_mtx_unlock(&p1277_auto_lock);
 }
+/* Governor context only; preserve admission -> auto -> gate ordering.
+ * No fabricated qualification and no auto-rearm after operator disable. */
+static void p1279_auto_admit(void){
+    if(!p1279_profile || !__atomic_load_n(&p1279_auto_pending,__ATOMIC_ACQUIRE))return;
+    if(!lck_mtx_try_lock(&p1277_admission_lock))return;
+    if(!lck_mtx_try_lock(&p1277_auto_lock)){lck_mtx_unlock(&p1277_admission_lock);return;}
+    if(__atomic_load_n(&p1279_auto_pending,__ATOMIC_ACQUIRE) && p1277_auto_permission && !p1277_auto_fault && p12754_optin() && p1273_gate_enabled() &&
+        !__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE) && p1277_auto_legacy_idle() &&
+        !__atomic_load_n(&p1277_auto_lease,__ATOMIC_ACQUIRE)){
+        __atomic_store_n(&p1279_auto_pending,false,__ATOMIC_RELEASE);
+        __atomic_store_n(&p1277_auto_enabled,1,__ATOMIC_RELEASE);
+        say("p1279-auto: admitted existing same-boot qualification\n");
+    }
+    lck_mtx_unlock(&p1277_auto_lock);lck_mtx_unlock(&p1277_admission_lock);
+}
 static int p1277_auto_idle_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
     int v=(int)__atomic_load_n(&p1277_auto_enabled,__ATOMIC_ACQUIRE);
     int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
@@ -468,6 +484,7 @@ static int p1277_auto_idle_sysctl(__unused struct sysctl_oid *o,__unused void *a
     if(!p1277_auto_permission)return ENODEV;
     P1277_ADMISSION(true,false);
     if(!lck_mtx_try_lock(&p1277_auto_lock))return EBUSY;
+    __atomic_store_n(&p1279_auto_pending,false,__ATOMIC_RELEASE);
     if(v){
         if(p1277_auto_fault || !p12754_optin() || !p1273_gate_enabled() ||
            __atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE)){
@@ -586,6 +603,10 @@ static int p1278_active_stats_sysctl(__unused struct sysctl_oid *o,__unused void
     return SYSCTL_OUT(req,out,strlen(out)+1);
 }
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p1278_active_stats,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1278_active_stats_sysctl,"A","Rev8 active control and raw G2 rollback witness, not context skip proof");
+static int p1279_revision_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
+    int v=9;return SYSCTL_OUT(req,&v,sizeof(v));
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p1279_revision,CTLTYPE_INT|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1279_revision_sysctl,"I","Rev9 autonomous profile ABI");
 static int p1278_revision_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
     int v=81;return SYSCTL_OUT(req,&v,sizeof(v));
 }

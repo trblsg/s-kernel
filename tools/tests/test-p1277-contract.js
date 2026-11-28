@@ -39,7 +39,7 @@ assert(idle.includes('p1277_l2_samples>=20') && idle.includes('p1277_l2_result=4
 assert(idle.includes('p1277_l2_qualified(m)') && idle.includes('m>=P77_L2_DISP200 && hakios_p9_panel_auto_on()'));
 assert(idle.includes('hakios_p1273_trace_arm(now,now+p1274_ticks_ms(10000),p1274_ticks_ms(250))'));
 assert(idle.includes('pretrigger=0') && idle.includes('p1277_burst_cancel'));
-assert(cpu.includes('rev7_auto_boot && p1277_auto_permission') && cpu.includes('rev7_active_boot && p1277_active_permission'));
+assert(cpu.includes('rev7_auto_boot && p1277_auto_permission') && cpu.includes('(rev7_active_boot || (p1279_profile && gov_policy==2)) && p1277_active_permission'));
 assert(panel.includes('rev7_panel_boot && p1277_panel_permission'));
 assert(host.includes('Rev7Status boot changed') && host.includes('power_qualified=$false'));
 console.log('P1277 source contracts PASS (not native compile, concurrency proof or device qualification)');

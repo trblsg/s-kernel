@@ -131,6 +131,81 @@ static unsigned p12753_temp_mask(int32_t b,int32_t l,int32_t g,int32_t bat,unsig
     if(bat>=batt)m|=P53_BAT;
     return m;
 }
+/* Rev9: use existing 200ms guard cadence, cache sensor values and
+ * actual clock/load observations. Freeze pre/post wake ring in RAM.
+ * No new PMIC/MMIO requests, no extra governor wakeups. */
+#define P9_RING_N 128u
+#define P9_PRE 25u
+#define P9_POST 50u
+extern uint32_t hakios_p1279_tmu_snapshot(int32_t out[8],uint64_t *at);
+struct p1279_row {
+    uint64_t at,tmu_at;
+    uint32_t seq,on,valid,age,mask,bkhz,lkhz,bmeas,lmeas,bs,ls,bcap,lcap;
+    int32_t b,l,g,bat,slope,tmu[8];
+};
+static struct p1279_row p1279_ring[P9_RING_N],p1279_frozen[P9_PRE+P9_POST];
+static unsigned p1279_head,p1279_count,p1279_seq,p1279_n,p1279_post,p1279_event;
+static unsigned p1279_frozen_n,p1279_frozen_event;
+static int p1279_last_on=-1;
+static uint64_t p1279_last_log,p1279_trigger_at;
+static void p1279_record(uint64_t now,bool off,int32_t b,int32_t l,int32_t g,int32_t bat,
+    unsigned age,unsigned mask,int32_t slope,uint32_t bc,uint32_t lc){
+    if(!p1279_profile)return;
+    struct p1279_row r={0};
+    r.at=now;r.on=!off;r.age=age;r.mask=mask;r.b=b;r.l=l;r.g=g;r.bat=bat;r.slope=slope;r.bcap=bc;r.lcap=lc;
+    r.bkhz=clusters[1].cur;r.lkhz=clusters[0].cur;r.bmeas=clusters[1].measured;r.lmeas=clusters[0].measured;
+    r.bs=clusters[1].sum_now;r.ls=clusters[0].sum_now;
+    r.valid=hakios_p1279_tmu_snapshot(r.tmu,&r.tmu_at);
+    bool frozen=false;unsigned event=0,n=0;
+    lck_spin_lock(&p12753_lock);
+    r.seq=++p1279_seq;
+    /* Preserve a full pre/post window, including a fast rise with no
+     * display transition. Don't restart a capture on every hot sample. */
+    if(!p1279_post && ((p1279_last_on==0 && r.on) ||
+        (slope>=2000 && b>=63000 && (!p1279_event || now-p1279_trigger_at>=p1274_ticks_ms(30000))))){
+        p1279_trigger_at=now;p1279_event++;p1279_n=MIN(p1279_count,P9_PRE);p1279_post=P9_POST;
+        p1279_frozen_n=0;p1279_frozen_event=p1279_event;
+        for(unsigned i=0;i<p1279_n;i++)p1279_frozen[i]=p1279_ring[(p1279_head+P9_RING_N-p1279_n+i)%P9_RING_N];
+    }
+    p1279_last_on=r.on;
+    p1279_ring[p1279_head]=r;p1279_head=(p1279_head+1)%P9_RING_N;
+    if(p1279_count<P9_RING_N)p1279_count++;
+    if(p1279_post){
+        p1279_frozen[p1279_n++]=r;p1279_post--;
+        if(!p1279_post){p1279_frozen_n=p1279_n;frozen=true;event=p1279_frozen_event;n=p1279_frozen_n;}
+    }
+    lck_spin_unlock(&p12753_lock);
+    if(frozen)say("p1279-wake-frozen: event=%u rows=%u at=%llu read kern.hakios.p1279_wake0..24\n",event,n,(unsigned long long)now);
+    if(!p1279_last_log || now-p1279_last_log>=p1274_ticks_ms(off?30000:5000)){
+        p1279_last_log=now;
+        say("p1279-thermal: at=%llu seq=%u on=%u big=%d lit=%d gpu=%d bat=%d age=%u slope=%d mask=%u bkhz=%u lkhz=%u bs=%u ls=%u tmu_at=%llu valid=%u sensors=%d,%d,%d,%d,%d,%d,%d,%d\n",
+            (unsigned long long)now,r.seq,r.on,b,l,g,bat,age,slope,mask,r.bkhz,r.lkhz,r.bs,r.ls,
+            (unsigned long long)r.tmu_at,r.valid,r.tmu[0],r.tmu[1],r.tmu[2],r.tmu[3],r.tmu[4],r.tmu[5],r.tmu[6],r.tmu[7]);
+    }
+}
+/* Three rows per read-only page, no shared writable selector. Pages
+ * include event/sequence so collectors can detect replacement. */
+static int p1279_wake_page(__unused struct sysctl_oid *o,__unused void *a,int page,struct sysctl_req *req){
+    struct p1279_row rows[3];unsigned n=0,event,total;
+    if(page<0 || page>=25)return EINVAL;
+    lck_spin_lock(&p12753_lock);
+    total=p1279_frozen_n;event=p1279_frozen_event;
+    for(unsigned i=0;i<3 && (unsigned)page*3+i<total;i++)rows[n++]=p1279_frozen[(unsigned)page*3+i];
+    lck_spin_unlock(&p12753_lock);
+    char buf[1024];size_t used=(size_t)snprintf(buf,sizeof(buf),"version=1 event=%u page=%d rows=%u total=%u",event,page,n,total);
+    for(unsigned i=0;i<n && used<sizeof(buf);i++){
+        struct p1279_row *r=&rows[i];
+        int added=snprintf(buf+used,sizeof(buf)-used," row=%u,%llu,%u,%d,%d,%d,%d,%u,%d,%u,%u,%u,%u,%u,%u,%u,%u,%u,%llu,%u,%d,%d,%d,%d,%d,%d,%d,%d",
+            r->seq,(unsigned long long)r->at,r->on,r->b,r->l,r->g,r->bat,r->age,r->slope,r->mask,r->bkhz,r->lkhz,
+            r->bmeas,r->lmeas,r->bs,r->ls,r->bcap,r->lcap,(unsigned long long)r->tmu_at,r->valid,r->tmu[0],r->tmu[1],r->tmu[2],r->tmu[3],r->tmu[4],r->tmu[5],r->tmu[6],r->tmu[7]);
+        if(added<0 || (size_t)added>=sizeof(buf)-used)return EOVERFLOW;
+        used+=(size_t)added;
+    }
+    return SYSCTL_OUT(req,buf,used+1);
+}
+#define P9_PAGE(n) SYSCTL_PROC(_kern_hakios,OID_AUTO,p1279_wake##n,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,n,p1279_wake_page,"A","Rev9 frozen wake page");
+P9_PAGE(0) P9_PAGE(1) P9_PAGE(2) P9_PAGE(3) P9_PAGE(4) P9_PAGE(5) P9_PAGE(6) P9_PAGE(7) P9_PAGE(8) P9_PAGE(9) P9_PAGE(10) P9_PAGE(11) P9_PAGE(12) P9_PAGE(13) P9_PAGE(14) P9_PAGE(15) P9_PAGE(16) P9_PAGE(17) P9_PAGE(18) P9_PAGE(19) P9_PAGE(20) P9_PAGE(21) P9_PAGE(22) P9_PAGE(23) P9_PAGE(24)
+#undef P9_PAGE
 /* This cap is independent of experiment ownership. Never modifies OCP,
  * recommended masks, floor, voltage or physical CPU states. */
 static void p12753_guard_tick(uint64_t now){
@@ -178,6 +253,7 @@ static void p12753_guard_tick(uint64_t now){
     __atomic_store_n(&p12753_lcap,lc,__ATOMIC_RELEASE);
     lck_spin_unlock(&p12753_lock);
     if(bc!=oldb || lc!=oldl)say("p12753-guard: at=%llu mask=%u big=%d lit=%d gpu=%d bat=%d slope=%d bcap=%u lcap=%u\n",(unsigned long long)now,m,b,l,g,bat,slope,bc,lc);
+    p1279_record(now,off,b,l,g,bat,age,m,slope,bc,lc);
     p127543_floor_rail_tick(now);
 }
 static uint32_t p12753_ceiling(struct cluster *c,uint32_t stock){

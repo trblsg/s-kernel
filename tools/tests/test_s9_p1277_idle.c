@@ -45,7 +45,8 @@ static unsigned p12752_idle_mode;
 static bool bad_table,wrong_rate;
 struct cluster{unsigned online,sum_now,cur,touch_khz,frame_khz,scion_touch,boost_floor;} clusters[2]={{4,0,1053000,1456000,0},{4,0,650000,1800000,1200000}};
 #include "../../drivers/power/exynos/hakios.p12781_active.h"
-static bool p12781_profile=true;
+static bool p12781_profile=true,p1279_profile=true;
+static int p1277_admission_lock;
 static uint64_t p12781_tail_hits,p12781_tail_bypass;
 #define NSEC_PER_MSEC 1000000ull
 static void absolutetime_to_nanoseconds(uint64_t t,uint64_t *n){*n=t;}
@@ -124,7 +125,7 @@ static void reset(void){
     p1277_auto_state=P77_WAIT;p1277_auto_stage=p1277_auto_fault=p1277_auto_samples=p1277_auto_retries=p1277_auto_abox_ok=0;
     p1277_auto_quiet=p1277_auto_started=p1277_auto_sample_at=p1277_auto_restore_until=0;
     p1277_auto_table_ok=p1277_auto_stage_pass=p1277_auto_was_active=false;
-    p1277_auto_enabled=1;p1277_auto_lease=hakios_p127_lease=0;
+    p1279_auto_pending=false;p1277_auto_enabled=1;p1277_auto_lease=hakios_p127_lease=0;
     p1277_l2_request=p1277_l2_module=p1277_l2_state=p1277_l2_result=p1277_l2_samples=0;
     driver_owner=0;driver_qualified=driver_live=true;driver_fail_begin=driver_fail_end=false;
     panel_owner=panel_compatible=false;
@@ -136,6 +137,7 @@ static void reset(void){
 }
 static void start_trial(void){advance(1);advance(3000);assert(p1277_auto_state==P77_TRIAL);}
 int main(void){
+    reset();p1277_auto_enabled=0;p1279_auto_pending=true;hakios_p12753_busy=1;p1279_auto_admit();assert(p1279_auto_pending&&!p1277_auto_enabled);hakios_p12753_busy=0;p1279_auto_admit();assert(!p1279_auto_pending&&p1277_auto_enabled);p1277_auto_enabled=0;p1279_auto_admit();assert(!p1277_auto_enabled);puts("Rev9 admission: busy refusal, one-shot enable, no rearm PASS");
     reset();display_on=true;advance(6000);assert(!hakios_p127_lease);
     display_on=false;ufs_safe=false;advance(6000);assert(!hakios_p127_lease);
     ufs_safe=true;ufs_busy=true;advance(6000);assert(!hakios_p127_lease);

@@ -90,6 +90,7 @@
 #include "s9_p612_output_diag.h" /* P6.12 EAGL vs display fps telemetry */
 #include "s9_gl_cost.h"       /* opt-in glcost=1: time/count EAGL slot calls, no GL changes */
 #include "s9_p122_frame_diag.h" /* P12.2 runtime profile histograms, 60-frame bounded */
+#include "s9_p1279_gl.h"
 #include "s9_g2_bind.h"       /* opt-in g2_bind=1: skip proven redundant native texture binds */
 #include "s9_gl_diag.h"       /* opt-in glpath=1/glhash=1: sampled CPU path timings */
 #include "s9_ioshash4.h"      /* P0: four independent hash lanes, exact scalar reference */
@@ -351,6 +352,10 @@ struct eagl {
 	uint64_t p4_last_frame_end_us;
 	struct s9_gl_cost glcost;               /* grouped GL slot timings; reset every 60 frames */
 	struct s9_p122_frame_window p122_window;
+    struct s9_p1279_gl p1279;
+    uint64_t p1279_delete_seen,p1279_cpu_wall_start,p1279_cpu_thread;
+    bool p1279_sample;
+    unsigned p1279_native_unit;
 	uint64_t p122_cpu_began_us;
 	uint64_t p123_first_ticks;
 	bool p122_cpu_sample_valid;
@@ -386,6 +391,8 @@ static uint32_t p6_ca_cached,p6_phase_cached; /* P6.5 independent observer; 60-f
 static uint32_t p66_mode_cached,p67_mode_cached,p611_mode_cached,p612_mode_cached; /* runtime read-only; 60-frame refresh */
 static int glstage_on;                       /* boot-arg glstage=1: 60-frame timing aggregates */
 static int glcost_on;                        /* boot-arg glcost=1: per-slot CPU wall timing */
+static bool p1279_gl_on;
+static uint64_t p1279_delete_epoch;
 static int p122_enabled;                      /* boot-arg p122=1; runtime mode controls ONLY diagnostics */
 static bool p127542_g2_available,p1277_g2_available;
 static int g2_bind_on;                        /* boot-arg g2_bind=1, otherwise legacy code path */
@@ -428,19 +435,29 @@ p122_thread_cpu_us(uint64_t *value)
 {
 #if defined(CLOCK_THREAD_CPUTIME_ID)
     struct timespec ts;
-    if(clock_gettime(CLOCK_THREAD_CPUTIME_ID,&ts)!=0)return 0;
-    *value=(uint64_t)ts.tv_sec*1000000ull+(uint64_t)ts.tv_nsec/1000ull;
-    return 1;
-#else
-    (void)value;
-    return 0;
+    if(!p1279_gl_on && clock_gettime(CLOCK_THREAD_CPUTIME_ID,&ts)==0){
+        *value=(uint64_t)ts.tv_sec*1000000ull+(uint64_t)ts.tv_nsec/1000ull;
+        return 1;
+    }
 #endif
+    if(!p1279_gl_on)return 0;
+    /* Same render thread; no suspend, no stack sampling. */
+    thread_t self=mach_thread_self();
+    if(self==MACH_PORT_NULL)return 0;
+    thread_basic_info_data_t basic;
+    mach_msg_type_number_t n=THREAD_BASIC_INFO_COUNT;
+    kern_return_t kr=thread_info(self,THREAD_BASIC_INFO,(thread_info_t)&basic,&n);
+    mach_port_deallocate(mach_task_self(),self);
+    if(kr!=KERN_SUCCESS || n<THREAD_BASIC_INFO_COUNT || basic.user_time.seconds<0 || basic.system_time.seconds<0)return 0;
+    *value=((uint64_t)basic.user_time.seconds+(uint64_t)basic.system_time.seconds)*1000000ull+
+        (uint64_t)basic.user_time.microseconds+(uint64_t)basic.system_time.microseconds;
+    return 1;
 }
 static void s9_g2_internal_bind(GLenum target, GLuint name) {
 	if (g2_track_on && current) {
-		s9_g2_invalidate(&current->g2);
-		if (g2_forwarding) current->g2.forwarded_binds++;
-		else current->g2.raw_binds++;
+		/* A validated forwarded bind changes just its own unit. Internal
+         * binds may temporarily select an untracked native unit. */
+        s9_g2_forward(&current->g2,p1279_gl_on,g2_forwarding,current->p1279_native_unit,current->unit);
 	}
 	glBindTexture(target, name);
 }
@@ -448,11 +465,24 @@ static void s9_g2_internal_delete(GLsizei count, const GLuint *names) {
 	if (g2_track_on && current) {
 		s9_g2_invalidate(&current->g2);
 		current->g2.raw_deletes++;
+        if(p1279_gl_on)__atomic_add_fetch(&p1279_delete_epoch,1,__ATOMIC_RELEASE);
 	}
 	glDeleteTextures(count, names);
 }
+static void p1279_active_texture(GLenum unit){
+    glActiveTexture(unit);
+    if(p1279_gl_on && current){
+        current->p1279_native_unit=unit>=GL_TEXTURE0 && unit<GL_TEXTURE0+S9_G2_UNITS?(unsigned)(unit-GL_TEXTURE0):UINT_MAX;
+        if(current->p1279_native_unit==UINT_MAX)s9_g2_invalidate(&current->g2);
+    }
+}
+#define glActiveTexture p1279_active_texture
 #define glBindTexture s9_g2_internal_bind
 #define glDeleteTextures s9_g2_internal_delete
+static void p1279_flush(void){if(p1279_gl_on && current)current->p1279.flush_n++;glFlush();}
+static void p1279_finish(void){if(p1279_gl_on && current)current->p1279.finish_n++;glFinish();}
+#define glFlush p1279_flush
+#define glFinish p1279_finish
 static struct eagl *contexts[8];
 static uint32_t slot_calls[SLOTS];
 /*
@@ -518,12 +548,19 @@ static void
 eagl_enter(struct eagl *e, unsigned offset)
 {
 	if (current != e) {
-		if (!hakios_gl_make_current(e->gl)) {
-			say("hakios-gl: the context cannot be made this thread's\n");
-		}
-		current = e;
+        bool ok=hakios_gl_make_current(e->gl);
+        if (!ok) {
+            say("hakios-gl: the context cannot be made this thread's\n");
+            if(p1279_gl_on)e->g2_fault=true;
+        }
+        if(p1279_gl_on){
+            s9_g2_invalidate(&e->g2);
+            GLint unit=-1;if(ok)glGetIntegerv(GL_ACTIVE_TEXTURE,&unit);
+            e->p1279_native_unit=unit>=(GLint)GL_TEXTURE0 && unit<(GLint)(GL_TEXTURE0+S9_G2_UNITS)?(unsigned)(unit-GL_TEXTURE0):UINT_MAX;
+        }
+        current = e;
 	}
-	if (glcost_on || __atomic_load_n(&p67_mode_cached,__ATOMIC_RELAXED)) {
+	if (glcost_on || (p1279_gl_on && e->p1279_sample) || __atomic_load_n(&p67_mode_cached,__ATOMIC_RELAXED)) {
 		unsigned depth = glcost_depth++;
 		if (depth < sizeof(glcost_begun) / sizeof(glcost_begun[0]))
 			glcost_begun[depth] = now_us();
@@ -573,7 +610,7 @@ eagl_missing(void *context, unsigned offset)
 	if (slot_calls[offset / 8] == 1) {
 		say("hakios-gl: CALLED AND NOT THERE: entry %#x, %s\n", offset, eagl_slot_name(offset));
 	}
-	if (glcost_on) eagl_leave(e, offset);  /* balance the diagnostic timer stack */
+	if (glcost_depth) eagl_leave(e, offset);  /* balance the diagnostic timer stack */
 	return 0;
 }
 
@@ -1018,11 +1055,11 @@ surface_mirrored(struct eagl *e, struct image *image)
 	IOSurfaceRef surface = image->surface;
 	GLint bound = 0;
 
-	if (!blit_targets || !share_surfaces || !image->target || image->alpha_first ||
-	    image->format != GL_BGRA || image->type != GL_UNSIGNED_BYTE || image->plane != 0 ||
-	    (size_t)image->width != IOSurfaceGetWidth(surface) || (size_t)image->height != IOSurfaceGetHeight(surface)) {
-		return false;
-	}
+	uint64_t t=p1279_gl_on?now_us():0;
+    unsigned why=!blit_targets||!share_surfaces?P9_MIRROR_DISABLED:!image->target?P9_MIRROR_NOT_TARGET:image->alpha_first?P9_ALPHA:
+        image->format!=GL_BGRA||image->type!=GL_UNSIGNED_BYTE?P9_FORMAT:image->plane!=0?P9_PLANE:
+        (size_t)image->width!=IOSurfaceGetWidth(surface)||(size_t)image->height!=IOSurfaceGetHeight(surface)?P9_DIMENSIONS:0;
+    if(why){if(p1279_gl_on)s9_p1279_share(&e->p1279,why,image->bytes,now_us()-t);return false;}
 	glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
 	glGenTextures(1, &image->mirror);
 	glBindTexture(GL_TEXTURE_2D, image->mirror);
@@ -1030,9 +1067,11 @@ surface_mirrored(struct eagl *e, struct image *image)
 		glBindTexture(GL_TEXTURE_2D, (GLuint)bound);
 		glDeleteTextures(1, &image->mirror);
 		image->mirror = 0;
+        if(p1279_gl_on){s9_p1279_share(&e->p1279,P9_MIRROR_BACKEND,image->bytes,now_us()-t);s9_p1279_backend(&e->p1279,hakios_gl_import_status(),image->bytes);}
 		return false;
 	}
 	glBindTexture(GL_TEXTURE_2D, (GLuint)bound);
+    if(p1279_gl_on)s9_p1279_share(&e->p1279,P9_MIRROR_OK,image->bytes,now_us()-t);
 	e->shared++;
 	return true;
 }
@@ -1046,10 +1085,13 @@ surface_shared(struct eagl *e, struct image *image)
 {
 	IOSurfaceRef surface = image->surface;
 
-	if (!share_surfaces || image->invert || image->alpha_first || image->format != GL_BGRA || image->type != GL_UNSIGNED_BYTE ||
-	    image->plane != 0 || (size_t)image->width != IOSurfaceGetWidth(surface) ||
-	    (size_t)image->height != IOSurfaceGetHeight(surface) ||
-	    !hakios_gl_surface_texture(e->gl, IOSurfaceGetID(surface))) {
+	uint64_t t=p1279_gl_on?now_us():0;
+    unsigned why=!share_surfaces?P9_SHARE_DISABLED:image->invert?P9_INVERT:image->alpha_first?P9_ALPHA:
+        image->format!=GL_BGRA||image->type!=GL_UNSIGNED_BYTE?P9_FORMAT:image->plane!=0?P9_PLANE:
+        (size_t)image->width!=IOSurfaceGetWidth(surface)||(size_t)image->height!=IOSurfaceGetHeight(surface)?P9_DIMENSIONS:0;
+    if(!why && !hakios_gl_surface_texture(e->gl, IOSurfaceGetID(surface))){why=P9_SHARE_BACKEND;if(p1279_gl_on)s9_p1279_backend(&e->p1279,hakios_gl_import_status(),image->bytes);}
+    if(p1279_gl_on)s9_p1279_share(&e->p1279,why,image->bytes,now_us()-t);
+    if (why) {
 		/* why a surface is copied rather than its memory used: the first ones of a run, for the copies to be made fewer */
 		if (e->refused < 40) {
 			say("hakios-gl: surface %u ('%.4s' %zu x %zu) copied, not shared: %s%s%s%s%s%s\n", IOSurfaceGetID(surface),
@@ -1094,7 +1136,7 @@ surface_changed(struct eagl *e, struct image *image)
 	    (size_t)image->width * bytes_a_pixel(image->format, image->type);
 	const uint8_t *base = IOSurfaceGetBaseAddress(surface);
 	uint64_t sum = size, word;
-	bool hash4=p0hash_on || (e->p1231_hash_mode==2 && !__atomic_load_n(&p0hash_disabled,__ATOMIC_RELAXED));
+	bool hash4=p0hash_on || (e->p1231_hash_mode==2 && (p1279_gl_on || !__atomic_load_n(&p0hash_disabled,__ATOMIC_RELAXED)));
 	bool p0_force_dirty = image->p1231_hash4_sum!=hash4;
 
 	if (image->looked == e->frames + 1 || base == NULL || IOSurfaceGetPlaneCount(surface) > 0) {
@@ -1120,7 +1162,8 @@ surface_changed(struct eagl *e, struct image *image)
 	    (e->p122_mode_seen==3?s9_gl_diag_sample16_rotating(&e->diag.hash_serial):s9_gl_diag_sample16(&e->diag.hash_serial));
 	bool p611_sample = __atomic_load_n(&p611_mode_cached,__ATOMIC_RELAXED) &&
 	    s9_gl_diag_sample16(&e->p611_hash_serial);
-	uint64_t hash_began = (hash_sample || p611_sample) ? now_us() : 0;
+	uint64_t hash_began = (hash_sample || p611_sample || p1279_gl_on) ? now_us() : 0;
+    size_t hash_bytes=hash4?size:size&~(size_t)7;
 	if (hash4) {
 		/* Both fast and fallback reference use the same digest for the full
 		 * byte range. Switching after a CPU verification failure does not
@@ -1142,6 +1185,7 @@ surface_changed(struct eagl *e, struct image *image)
 			}
 			if (verify) {
 				const uint64_t scalar=s9_ioshash4_reference(base,size);
+                hash_bytes+=size;
 				e->p0_verified++;
 				if (sum != scalar) {
 					/* A concurrent writer can change memory between passes.
@@ -1163,7 +1207,8 @@ surface_changed(struct eagl *e, struct image *image)
 			sum ^= sum >> 29;
 		}
 	}
-	uint64_t elapsed_hash_us = (hash_sample || p611_sample) ? now_us()-hash_began : 0;
+	uint64_t elapsed_hash_us = (hash_sample || p611_sample || p1279_gl_on) ? now_us()-hash_began : 0;
+    if(p1279_gl_on)s9_p1279_hash(&e->p1279,hash_bytes,elapsed_hash_us,sum==image->sum && !p0_force_dirty);
 	if (__atomic_load_n(&p611_mode_cached,__ATOMIC_RELAXED)) {
 		const bool changed=sum!=image->sum || p0_force_dirty;
 		s9_p611_check(&e->p611,p611_sample?IOSurfaceGetID(surface):0,
@@ -1211,6 +1256,7 @@ surface_to_texture(struct eagl *e, struct image *image)
 	if (image->shared) {
 		return;
 	}
+    uint64_t p9at=p1279_gl_on?now_us():0;
 	/*
 	 * The seed is the one the lock sees, before the pixels are read: taken after the copy, as it was,
 	 * a write between the two (a label's text drawn into its layer while it was being copied) moved
@@ -1220,7 +1266,9 @@ surface_to_texture(struct eagl *e, struct image *image)
 		say("hakios-gl: an IOSurface cannot be locked\n");
 		return;
 	}
-	base = planar ? IOSurfaceGetBaseAddressOfPlane(surface, image->plane) : IOSurfaceGetBaseAddress(surface);
+	if(p1279_gl_on)e->p1279.lock_us+=now_us()-p9at;
+    p9at=p1279_gl_on?now_us():0;
+    base = planar ? IOSurfaceGetBaseAddressOfPlane(surface, image->plane) : IOSurfaceGetBaseAddress(surface);
 	if ((image->invert || alpha_first) && (flipped = calloc(row, (size_t)image->height)) != NULL) {
 		for (GLsizei y = 0; y < image->height; y++) {
 			const uint8_t *from = base + row * (size_t)(image->invert ? image->height - 1 - y : y);
@@ -1241,12 +1289,15 @@ surface_to_texture(struct eagl *e, struct image *image)
 		}
 		base = flipped;
 	}
+    if(p1279_gl_on)e->p1279.convert_us+=now_us()-p9at;
 	glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row_length);
 	glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
 	glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)(row / pixel));
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    p9at=p1279_gl_on?now_us():0;
 	glTexImage2D(image->to, 0, (GLint)internal_format(image->internal, image->format), image->width, image->height, 0,
 	    image->format, image->type, base);
+    if(p1279_gl_on){e->p1279.teximage_us+=now_us()-p9at;e->p1279.upload_n++;e->p1279.upload_bytes+=row*(size_t)image->height;}
 	glPixelStorei(GL_UNPACK_ROW_LENGTH, row_length);
 	glPixelStorei(GL_UNPACK_ALIGNMENT, alignment);
 	if (trace_placing) {
@@ -1306,6 +1357,7 @@ target_to_surface(struct eagl *e, struct image *image)
 		glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->texture, 0);
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, e->writer);
 		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->mirror, 0);
+	        if(p1279_gl_on)e->p1279.blit_n++;
 		glBlitFramebuffer(0, 0, image->width, image->height, 0, image->invert ? image->height : 0, image->width,
 		    image->invert ? 0 : image->height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 		glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
@@ -1706,7 +1758,7 @@ frame_begin(struct eagl *e)
 		e->p1231_poll_us=e->began;
 		int hashmode=0;
 		size_t hsize=sizeof(hashmode);
-		if(sysctlbyname("kern.hakios.p1231_hash_mode",&hashmode,&hsize,NULL,0)!=0 ||
+		if(sysctlbyname(p1279_gl_on?"kern.hakios.p1279_hash_mode":"kern.hakios.p1231_hash_mode",&hashmode,&hsize,NULL,0)!=0 ||
 		    hsize!=sizeof(hashmode) || hashmode<0 || hashmode>2)hashmode=0;
 		if(e->p1231_hash_mode!=(unsigned)hashmode){
 			e->p1231_hash_mode=(unsigned)hashmode;
@@ -1730,7 +1782,7 @@ frame_begin(struct eagl *e)
 		bool trial_on=p127542_g2_available && mode_ok && value==0 && hashmode==0 && !e->g2_fault &&
 		    sysctlbyname("kern.hakios.p127542_g2",&trial,&trial_size,NULL,0)==0 && trial_size==sizeof(trial) && trial==1;
 		/* Rev7 uses the verified context path, never the global bypass. */
-		if(!trial_on && p1277_g2_available && mode_ok && value==0 && hashmode==0 && !e->g2_fault){
+		if(!trial_on && p1277_g2_available && mode_ok && (p1279_gl_on || (value==0 && hashmode==0)) && !e->g2_fault){
 		    trial=0;trial_size=sizeof(trial);
 		    trial_on=sysctlbyname("kern.hakios.p1277_g2",&trial,&trial_size,NULL,0)==0 && trial_size==sizeof(trial) && trial==1;
 		}
@@ -1755,9 +1807,13 @@ frame_begin(struct eagl *e)
 		}
 	}
 	e->p122_cpu_sample_valid=false;
+    e->p1279_sample=p1279_gl_on && s9_p123_sample_frame(e->frames);
+    if(p1279_gl_on)s9_p1279_begin(&e->p1279,e->began);
 	if(p122_enabled && !e->p122_window.frames)e->p123_first_ticks=mach_absolute_time();
-	if(p122_enabled && e->p122_mode_seen>1 && s9_p123_sample_frame(e->frames)){
-		e->p122_cpu_sample_valid=p122_thread_cpu_us(&e->p122_cpu_began_us)!=0;
+	if(p122_enabled && (p1279_gl_on || e->p122_mode_seen>1) && s9_p123_sample_frame(e->frames)){
+		e->p1279_cpu_wall_start=now_us();
+        e->p1279_cpu_thread=(uint64_t)(uintptr_t)pthread_self();
+        e->p122_cpu_sample_valid=p122_thread_cpu_us(&e->p122_cpu_began_us)!=0;
 	}
 	if (prof_us != 0 && prof_thread == MACH_PORT_NULL) {
 		pthread_t sampler;
@@ -2205,7 +2261,8 @@ frame_end(struct eagl *e, bool finished, enum s9_p4_end_reason end_reason)
 		 * the cause of frames with parts missing; that was drawing into the surface itself, see
 		 * blit_targets.)
 		 */
-		GLsync sync = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+		if(p1279_gl_on)e->p1279.fence_n++;
+        GLsync sync = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
 
 		if (sync != NULL) {
 			(void)glClientWaitSync(sync, GL_SYNC_FLUSH_COMMANDS_BIT, 0);
@@ -2226,6 +2283,11 @@ frame_end(struct eagl *e, bool finished, enum s9_p4_end_reason end_reason)
 		return;
 	}
 	after = now_us();
+    uint64_t p9_cpu_end=0,p9_wall_end=after;
+    bool p9_cpu_ok=p1279_gl_on && e->p122_cpu_sample_valid &&
+        e->p1279_cpu_thread==(uint64_t)(uintptr_t)pthread_self() &&
+        p122_thread_cpu_us(&p9_cpu_end) && p9_cpu_end>=e->p122_cpu_began_us;
+    if(p9_cpu_ok)p9_wall_end=now_us();
 	e->in_frame = false;
 	e->frames++;
 	p5_frame_observe(e,after,end_reason); /* before P4 clears sampled IOSurface deltas */
@@ -2271,9 +2333,37 @@ frame_end(struct eagl *e, bool finished, enum s9_p4_end_reason end_reason)
 	bool p122_completed_window=false;
 	if(p122_enabled){
 		uint64_t cpu_now=0;
-		int cpu_valid=e->p122_cpu_sample_valid && p122_thread_cpu_us(&cpu_now) &&
-		    cpu_now>=e->p122_cpu_began_us;
+		int cpu_valid=p1279_gl_on?p9_cpu_ok:(e->p122_cpu_sample_valid && p122_thread_cpu_us(&cpu_now) && cpu_now>=e->p122_cpu_began_us);
+        if(p1279_gl_on)cpu_now=p9_cpu_end;
 		uint64_t wall=after>=e->began?after-e->began:0;
+        if(p1279_gl_on){
+            uint64_t paired_wall=p9_wall_end>=e->p1279_cpu_wall_start?p9_wall_end-e->p1279_cpu_wall_start:0;
+            uint64_t cpu=cpu_valid?cpu_now-e->p122_cpu_began_us:0;
+            if(e->p1279.last && e->began>e->p1279.last && e->began-e->p1279.last>500000u)
+                say("p1279-resumed-gl: ctx=%p frame=%u gap_us=%llu wall_us=%llu attach_us=%llu uploads=%u hash_bytes=%llu hash_us=%llu\n",
+                    (void*)e,e->frames,(unsigned long long)(e->began-e->p1279.last),(unsigned long long)wall,(unsigned long long)e->attaching,e->uploads,
+                    (unsigned long long)e->p1279.frame_hash_bytes,(unsigned long long)e->p1279.frame_hash_us);
+            s9_p1279_frame(&e->p1279,after,wall,e->attaching,e->uploads,
+                cpu_valid && cpu<=paired_wall, cpu,paired_wall);
+            if(s9_p1279_report_due(&e->p1279,after)){
+                struct s9_p1279_gl *p=&e->p1279;
+                say("p1279-gl: ctx=%p first_us=%llu last_us=%llu frames=%u wall_us=%llu max_us=%llu attach_us=%llu zero_refill_frames=%u zero_wall_us=%llu zero_hash_bytes=%llu zero_hash_us=%llu hash_bytes=%llu hash_us=%llu hash_same=%u hash_dirty=%u cpu_samples=%u cpu_us=%llu paired_wall_us=%llu sampled_frame_slots=1in16\n",
+                    (void*)e,(unsigned long long)p->first,(unsigned long long)after,p->frames,
+                    (unsigned long long)p->wall,(unsigned long long)p->max_wall,(unsigned long long)p->attach,
+                    p->zero_frames,(unsigned long long)p->zero_wall,(unsigned long long)p->zero_hash_bytes,(unsigned long long)p->zero_hash_us,
+                    (unsigned long long)p->hash_bytes,(unsigned long long)p->hash_us,p->hash_same,p->hash_dirty,
+                    p->cpu_n,(unsigned long long)p->cpu,(unsigned long long)p->paired_wall);
+                for(unsigned k=0;k<P9_SHARE_REASONS;k++)if(p->share_n[k])
+                    say("p1279-import: ctx=%p reason=%u count=%u bytes=%llu wall_us=%llu\n",(void*)e,k,p->share_n[k],
+                        (unsigned long long)p->share_bytes[k],(unsigned long long)p->share_us[k]);
+                for(unsigned k=0;k<9;k++)if(p->backend_n[k])say("p1279-backend: ctx=%p reason=%u count=%u bytes=%llu last_error=%x\n",(void*)e,k,p->backend_n[k],(unsigned long long)p->backend_bytes[k],p->backend_last_error);
+                say("p1279-upload: ctx=%p n=%u bytes=%llu lock_us=%llu convert_us=%llu teximage_us=%llu flush_n=%u finish_n=%u fence_n=%u blit_n=%u\n",
+                    (void*)e,p->upload_n,(unsigned long long)p->upload_bytes,(unsigned long long)p->lock_us,
+                    (unsigned long long)p->convert_us,(unsigned long long)p->teximage_us,p->flush_n,p->finish_n,p->fence_n,p->blit_n);
+                s9_p1279_reset(p,after);
+            }
+            e->p1279_sample=false;
+        }
 		s9_p122_frame_add(&e->p122_window,wall,e->draws,e->uploads,e->calls,
 		    cpu_valid,cpu_valid?cpu_now-e->p122_cpu_began_us:0);
 		if(e->p122_window.frames==60){
@@ -2329,7 +2419,7 @@ frame_end(struct eagl *e, bool finished, enum s9_p4_end_reason end_reason)
 			s9_gl_stage_reset(s);
 		}
 	}
-	if ((glcost_on || __atomic_load_n(&p67_mode_cached,__ATOMIC_RELAXED)) &&
+	if ((glcost_on || p1279_gl_on || __atomic_load_n(&p67_mode_cached,__ATOMIC_RELAXED)) &&
 	    (p122_enabled ? p122_completed_window : e->frames % 60 == 0)) {
 		uint64_t us[S9_GL_GROUPS];uint32_t count[S9_GL_GROUPS];unsigned top[3];
 		s9_gl_cost_summary(&e->glcost, us, count, top);
@@ -2380,7 +2470,7 @@ frame_end(struct eagl *e, bool finished, enum s9_p4_end_reason end_reason)
 		    e->g2.other_target_or_unit);
 	}
 	if (g2_track_on && (p122_enabled ? p122_completed_window : e->frames % 60 == 0)) s9_g2_reset_counters(&e->g2);
-	if ((p0hash_on && e->frames % 60 == 0) || (p122_enabled && e->p122_mode_seen==3 && p122_completed_window)) {
+	if ((p0hash_on && e->frames % 60 == 0) || (p122_enabled && (e->p122_mode_seen==3 || p1279_gl_on) && p122_completed_window)) {
 		say("hakios-gl-p0: up=%llu.%03llus frames=%u..%u fast=%u scalar=%u verified=%u mismatch=%u fallback=%d\n",
 		    after/1000000,(after/1000)%1000,e->frames-59,e->frames,
 		    e->p0_hashes,e->p0_scalar,e->p0_verified,e->p0_mismatch,
@@ -2532,7 +2622,11 @@ my_glBindTexture(void *context, GLenum target, GLuint texture)
 	if (eagl_tracing) {
 		eagl_trace("glBindTexture(%#x, %u)\n", target, texture);
 	}
-	if (g2_track_on) {
+	if (p1279_gl_on){
+        uint64_t epoch=__atomic_load_n(&p1279_delete_epoch,__ATOMIC_ACQUIRE);
+        if(epoch!=e->p1279_delete_seen){s9_g2_invalidate(&e->g2);e->p1279_delete_seen=epoch;}
+    }
+    if (g2_track_on) {
 		if (target == GL_TEXTURE_2D && e->unit < S9_G2_UNITS) {
 			e->g2.attempts++;
 			if (e->bound[e->unit] == texture) e->g2.client_same++;
@@ -2543,17 +2637,21 @@ my_glBindTexture(void *context, GLenum target, GLuint texture)
 		} else e->g2.other_target_or_unit++;
 	}
 	bool skip = (g2_bind_on || e->p127542_g2) && !e->g2_fault &&
-	    s9_g2_redundant(&e->g2,e->unit,target,texture,GL_TEXTURE_2D);
-	if (skip && (g2_verify_on || e->p127542_g2) && ((++e->g2.verify_serial % 128u) == 0 || (e->p127542_g2 && e->g2.verify_serial==1))) {
+	    s9_g2_redundant(&e->g2,e->unit,target,texture,GL_TEXTURE_2D) &&
+        (!p1279_gl_on || e->p1279_native_unit==e->unit);
+	if (skip && (g2_verify_on || e->p127542_g2) && ((++e->g2.verify_serial % 128u) == 0 || (e->p127542_g2 && e->g2.verify_serial==1) ||
+        (p1279_gl_on && !e->g2.verified[e->unit]))) {
 		GLint actual = -1;
 		glGetIntegerv(GL_TEXTURE_BINDING_2D,&actual);
-		if (actual < 0 || (GLuint)actual != texture) {
+		GLint active=0;
+        if(p1279_gl_on)glGetIntegerv(GL_ACTIVE_TEXTURE,&active);
+        if (actual < 0 || (GLuint)actual != texture || (p1279_gl_on && active!=(GLint)(GL_TEXTURE0+e->unit))) {
 			e->g2_fault = true;
 			s9_g2_invalidate(&e->g2);
 			say("hakios-gl-g2: BINDING MISMATCH unit=%u expected=%u actual=%d; disabled optimization for context\n",
 			    e->unit,texture,actual);
 			skip = false;
-		}
+		}else if(p1279_gl_on)e->g2.verified[e->unit]=1;
 	}
 	if (skip) e->g2.skipped++;
 	else {
@@ -2564,7 +2662,8 @@ my_glBindTexture(void *context, GLenum target, GLuint texture)
 		if (path_sample) e->diag.bind_native_us += now_us() - native_began;
 		if (g2_track_on) {
 			e->g2.executed++;
-			if (!e->g2_fault) s9_g2_record(&e->g2,e->unit,target,texture,GL_TEXTURE_2D);
+			if (!e->g2_fault && (!p1279_gl_on || e->p1279_native_unit==e->unit))s9_g2_record(&e->g2,e->unit,target,texture,GL_TEXTURE_2D);
+            else if(p1279_gl_on)s9_g2_invalidate(&e->g2);
 		}
 	}
 	if (target == GL_TEXTURE_2D && e->unit < 8) {
@@ -5238,6 +5337,7 @@ my_initWithAPI(id self, SEL selector, unsigned long api, id properties)
 		return nil;
 	}
 	current = e;
+    e->p1279_native_unit=0; /* freshly created GL context starts at TEXTURE0 */
 	e->object = self;
 	e->api = api;
 	e->table[0] = e;
@@ -5571,6 +5671,7 @@ install(void)
 		glstage_on = strstr(arguments, "glstage=1") != NULL;
 		glcost_on = s9_has_boot_flag(arguments, "glcost=1");
 		p122_enabled = s9_has_boot_flag(arguments, "p122=1");
+        p1279_gl_on=p122_enabled && s9_has_boot_flag(arguments,"p1279=1");
 		if(p122_enabled){
 			/* Diagnostic mode0 is light regardless of old glstage/glcost.
 			 * Keep p0hash/p0verify disabled in paired build: they are
@@ -5595,6 +5696,7 @@ install(void)
 		glhash_on = s9_has_boot_flag(arguments, "glhash=1");
 		p0hash_on = s9_has_boot_flag(arguments, "p0hash=1");
 		p0verify_on = s9_has_boot_flag(arguments, "p0verify=1");
+        if(p1279_gl_on){glpath_on=1;glhash_on=1;say("p1279-gl: independent sampled profile, per-unit binding, hash sysctl\n");}
 		if (p0hash_on) say("hakios-gl-p0: enabled 4-lane full-byte IOSurface checksum, scalar verification=%d, no seed/refresh changes\n",p0verify_on);
 		if(g21_diag_on) say("hakios-gl-g21: enabled; per-context texture bind reasons; g2_skip=%d\n",g2_bind_on);
 		if(glpath_on || glhash_on) say("hakios-gl-path: enabled; bind+draw 1/16=%d hash 1/16=%d no GL changes\n",glpath_on,glhash_on);

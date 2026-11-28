@@ -11,7 +11,7 @@
 #define S9_G2_UNITS 8u
 struct s9_g2_state {
     uint32_t name[S9_G2_UNITS];
-    uint8_t valid[S9_G2_UNITS];
+    uint8_t valid[S9_G2_UNITS],verified[S9_G2_UNITS];
     uint32_t attempts, skipped, executed, invalidations;
     /* G2.1: read-only reason histogram; do not conflate normal forwarded
      * driver bindings with raw/internal GLES binding invalidations. */
@@ -23,7 +23,13 @@ struct s9_g2_state {
 static inline void s9_g2_invalidate(struct s9_g2_state *s) {
     if (!s) return;
     memset(s->valid, 0, sizeof(s->valid));
+    memset(s->verified,0,sizeof(s->verified));
     ++s->invalidations;
+}
+/* Rev9: a known forwarded bind only affects the selected unit. */
+static inline void s9_g2_forward(struct s9_g2_state *s,int rev9,int forwarded,unsigned native,unsigned client){
+    if(!rev9 || !forwarded || native!=client || native>=S9_G2_UNITS)s9_g2_invalidate(s);
+    if(forwarded)s->forwarded_binds++;else s->raw_binds++;
 }
 static inline int s9_g2_redundant(const struct s9_g2_state *s,
                                   unsigned unit, unsigned target,
@@ -36,6 +42,7 @@ static inline void s9_g2_record(struct s9_g2_state *s,
                                 unsigned name, unsigned tex2d) {
     if (!s) return;
     if (unit < S9_G2_UNITS && target == tex2d) {
+        s->verified[unit] = 0;
         s->valid[unit] = 1;
         s->name[unit] = name;
     } else {

@@ -1,0 +1,10 @@
+const fs=require('fs'),assert=require('assert');
+const read=p=>fs.readFileSync(require('path').join(__dirname,'../..',p),'utf8');
+const e=read('userland/src/eagl.c'), m=read('drivers/gpu/mali/hakios.mali.c'),g=read('drivers/power/exynos/hakios.exynos_cpufreq.c'),a=read('drivers/power/exynos/hakios.p1277_idle.h'),r=read('drivers/power/exynos/hakios.p12753.h'),p=read('drivers/display/panel/hakios.s6e3ha8.c');
+for(const s of ['s9_g2_forward(&current->g2,p1279_gl_on','GL_ACTIVE_TEXTURE','p1279_delete_epoch','p1279_native_unit==e->unit','(p1279_gl_on || (value==0 && hashmode==0))','kern.hakios.p1279_hash_mode','s9_ioshash4_reference(base,size)','p1279-resumed-gl:','zero_hash_bytes','glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0)','glClientWaitSync(sync, GL_SYNC_FLUSH_COMMANDS_BIT, 0)'])assert(e.includes(s),s);
+assert(m.includes('p1279_irq_observe();')&&m.includes('good>=1024')&&m.includes('p1279_irq_state=3')&&m.includes('p1279_hash_mode=2'));
+assert(g.includes('p1279_auto_admit();')&&g.includes('MIN(boost_ms,150u)')&&g.includes('MIN(BURST_MS,60u)'));
+assert(a.includes('p1279_auto_pending,false')&&a.includes('p1279_revision'));
+assert(r.includes('P9_PRE 25u')&&r.includes('P9_POST 50u')&&r.includes('hakios_p1279_tmu_snapshot')&&r.includes('P9_PAGE(24)'));
+assert(p.includes('p1279-panel: drain refused')&&p.includes('p1279_panel'));
+console.log('Rev9 source integration contracts: PASS');
