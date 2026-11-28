@@ -9,6 +9,7 @@
  * its contexts gets another file like this one.
  */
 #include <stddef.h>
+#include <dlfcn.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -148,9 +149,13 @@ hakios_gl_surface_texture(struct hakios_gl *gl, uint32_t surface)
     unsigned pending=0;
     for(unsigned i=0;i<32;i++){pending=glGetError();if(!pending)break;}
     if(pending){import_status=HGL_IMPORT_ERROR_QUEUE;return 0;}
+    /* Optional Mesa diagnostic symbol; no additional GL calls or import attempts. */
+    unsigned (*trace)(int)=(unsigned (*)(int))dlsym(RTLD_DEFAULT,"OSMesaHakiosImportStatus");
+    if(trace)(void)trace(1);
     image_target(GL_TEXTURE_2D,(void *)(uintptr_t)surface);
     unsigned error=glGetError();
-    if(error)import_status=0x10000u|error;
+    unsigned detail=trace?trace(1):0;
+    if(error)import_status=0x10000u|error|((detail&0x7ffu)<<17);
     return error==0;
 }
 

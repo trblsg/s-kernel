@@ -438,11 +438,20 @@ forget_surface_handle(uint32_t handle)
 	pthread_mutex_unlock(&surface_handles_lock);
 }
 
+static __thread unsigned import_prime_status;
+unsigned hakios_drm_import_prime_status(int reset)
+{
+	unsigned v = import_prime_status;
+	if (reset) import_prime_status = 0;
+	return v;
+}
+
 int
 drmPrimeFDToHandle(int fd, int surface, uint32_t *handle)
 {
 	struct hakios_drm_surface request = { .surface = (uint32_t)surface };
 	int error = call(HAKIOS_GPU_SURFACE, &request, sizeof(request));
+	import_prime_status = error ? (2u | ((unsigned)error & 255u) << 2) : 1u;
 
 	(void)fd;
 	if (error != 0) {

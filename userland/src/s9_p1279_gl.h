@@ -13,6 +13,9 @@ struct s9_p1279_gl {
     uint32_t frames,zero_frames,hash_same,hash_dirty,cpu_n,share_n[P9_SHARE_REASONS];
     uint32_t upload_n,flush_n,finish_n,fence_n,blit_n;
     uint32_t backend_n[9],backend_last_error;
+    uint32_t seed_changed_refill,same_seed_hash_same,same_seed_hash_dirty,hash_initial,hash_other;
+    uint32_t import_stage_n[8];
+    uint64_t seed_hash_bytes[4],seed_hash_us[4];
     uint64_t backend_bytes[9];
 };
 static inline void s9_p1279_begin(struct s9_p1279_gl *p,uint64_t now){if(!p->first)p->first=now;}
@@ -25,6 +28,9 @@ static inline void s9_p1279_share(struct s9_p1279_gl *p,unsigned reason,uint64_t
     p->share_n[reason]++;p->share_bytes[reason]+=bytes;p->share_us[reason]+=us;
 }
 static inline void s9_p1279_backend(struct s9_p1279_gl *p,unsigned status,uint64_t bytes){
+    unsigned stage=(status>>17)&7u;
+    p->import_stage_n[stage]++;
+    status&=0x1ffffu;
     unsigned bucket=status<8?status:8;p->backend_n[bucket]++;p->backend_bytes[bucket]+=bytes;p->backend_last_error=status;
 }
 static inline void s9_p1279_frame(struct s9_p1279_gl *p,uint64_t now,uint64_t wall,uint64_t attach,unsigned uploads,int valid,uint64_t cpu,uint64_t paired){

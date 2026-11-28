@@ -206,6 +206,29 @@ static int p1279_wake_page(__unused struct sysctl_oid *o,__unused void *a,int pa
 #define P9_PAGE(n) SYSCTL_PROC(_kern_hakios,OID_AUTO,p1279_wake##n,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,n,p1279_wake_page,"A","Rev9 frozen wake page");
 P9_PAGE(0) P9_PAGE(1) P9_PAGE(2) P9_PAGE(3) P9_PAGE(4) P9_PAGE(5) P9_PAGE(6) P9_PAGE(7) P9_PAGE(8) P9_PAGE(9) P9_PAGE(10) P9_PAGE(11) P9_PAGE(12) P9_PAGE(13) P9_PAGE(14) P9_PAGE(15) P9_PAGE(16) P9_PAGE(17) P9_PAGE(18) P9_PAGE(19) P9_PAGE(20) P9_PAGE(21) P9_PAGE(22) P9_PAGE(23) P9_PAGE(24)
 #undef P9_PAGE
+/* Rev10 single-row pages: worst-case decimal row + header <480 bytes. */
+static int p12710_wake_page(__unused struct sysctl_oid *o,__unused void *a,int page,struct sysctl_req *req){
+    struct p1279_row rows[1];unsigned n=0,event,total;
+    if(page<0 || page>=75)return EINVAL;
+    lck_spin_lock(&p12753_lock);
+    total=p1279_frozen_n;event=p1279_frozen_event;
+    for(unsigned i=0;i<1 && (unsigned)page+i<total;i++)rows[n++]=p1279_frozen[(unsigned)page+i];
+    lck_spin_unlock(&p12753_lock);
+    char buf[480];size_t used=(size_t)snprintf(buf,sizeof(buf),"version=2 event=%u page=%d rows=%u total=%u",event,page,n,total);
+    for(unsigned i=0;i<n && used<sizeof(buf);i++){
+        struct p1279_row *r=&rows[i];
+        int added=snprintf(buf+used,sizeof(buf)-used," row=%u,%llu,%u,%d,%d,%d,%d,%u,%d,%u,%u,%u,%u,%u,%u,%u,%u,%u,%llu,%u,%d,%d,%d,%d,%d,%d,%d,%d",
+            r->seq,(unsigned long long)r->at,r->on,r->b,r->l,r->g,r->bat,r->age,r->slope,r->mask,r->bkhz,r->lkhz,
+            r->bmeas,r->lmeas,r->bs,r->ls,r->bcap,r->lcap,(unsigned long long)r->tmu_at,r->valid,r->tmu[0],r->tmu[1],r->tmu[2],r->tmu[3],r->tmu[4],r->tmu[5],r->tmu[6],r->tmu[7]);
+        if(added<0 || (size_t)added>=sizeof(buf)-used)return EOVERFLOW;
+        used+=(size_t)added;
+    }
+    return SYSCTL_OUT(req,buf,used+1);
+}
+
+#define P10_PAGE(n) SYSCTL_PROC(_kern_hakios,OID_AUTO,p12710_wake##n,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,n,p12710_wake_page,"A","Rev10 frozen wake row");
+P10_PAGE(0) P10_PAGE(1) P10_PAGE(2) P10_PAGE(3) P10_PAGE(4) P10_PAGE(5) P10_PAGE(6) P10_PAGE(7) P10_PAGE(8) P10_PAGE(9) P10_PAGE(10) P10_PAGE(11) P10_PAGE(12) P10_PAGE(13) P10_PAGE(14) P10_PAGE(15) P10_PAGE(16) P10_PAGE(17) P10_PAGE(18) P10_PAGE(19) P10_PAGE(20) P10_PAGE(21) P10_PAGE(22) P10_PAGE(23) P10_PAGE(24) P10_PAGE(25) P10_PAGE(26) P10_PAGE(27) P10_PAGE(28) P10_PAGE(29) P10_PAGE(30) P10_PAGE(31) P10_PAGE(32) P10_PAGE(33) P10_PAGE(34) P10_PAGE(35) P10_PAGE(36) P10_PAGE(37) P10_PAGE(38) P10_PAGE(39) P10_PAGE(40) P10_PAGE(41) P10_PAGE(42) P10_PAGE(43) P10_PAGE(44) P10_PAGE(45) P10_PAGE(46) P10_PAGE(47) P10_PAGE(48) P10_PAGE(49) P10_PAGE(50) P10_PAGE(51) P10_PAGE(52) P10_PAGE(53) P10_PAGE(54) P10_PAGE(55) P10_PAGE(56) P10_PAGE(57) P10_PAGE(58) P10_PAGE(59) P10_PAGE(60) P10_PAGE(61) P10_PAGE(62) P10_PAGE(63) P10_PAGE(64) P10_PAGE(65) P10_PAGE(66) P10_PAGE(67) P10_PAGE(68) P10_PAGE(69) P10_PAGE(70) P10_PAGE(71) P10_PAGE(72) P10_PAGE(73) P10_PAGE(74)
+#undef P10_PAGE
 /* This cap is independent of experiment ownership. Never modifies OCP,
  * recommended masks, floor, voltage or physical CPU states. */
 static void p12753_guard_tick(uint64_t now){

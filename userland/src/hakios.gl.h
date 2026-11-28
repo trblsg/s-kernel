@@ -20,7 +20,8 @@ const char *hakios_gl_library(void);                           /* for the log */
  */
 int hakios_gl_surface_texture(struct hakios_gl *gl, uint32_t surface);
 /* Last import outcome on this thread; no extra GL query. Codes 0..7
- * are generic; native GL error is encoded as 0x10000|error. */
+ * are generic; low 17 bits of native GL error are 0x10000|error.
+ * Rev10 Mesa failure detail: stage bits 17..19, errno bits 20..27. */
 enum { HGL_IMPORT_OK,HGL_IMPORT_DISABLED,HGL_IMPORT_LOOKUP,HGL_IMPORT_LAYOUT,
        HGL_IMPORT_LOCK,HGL_IMPORT_BASE,HGL_IMPORT_BACKEND,HGL_IMPORT_ERROR_QUEUE };
 unsigned hakios_gl_import_status(void);

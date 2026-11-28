@@ -19,6 +19,8 @@ static uint64_t p1277_auto_restore_until,p1277_auto_fault_mark;
 static uint64_t p1277_auto_stop0,p1277_auto_resume0,p1277_auto_wait0;
 static bool p1277_auto_table_ok,p1277_auto_stage_pass,p1277_auto_was_active;
 static bool p1279_auto_pending;
+static unsigned p12710_backoff_s,p12710_transient_aborts,p12710_last_subreason,p12710_active_samples;
+static uint64_t p12710_backoff_until;
 static const unsigned p1277_auto_modes[]={17u,33u,49u,65u,5u};
 static const uint32_t p1277_auto_rates[]={949000u,832000u,715000u,598000u};
 static const uint32_t p1277_auto_uv[]={731250u,700000u,668750u,637500u};
@@ -27,7 +29,8 @@ extern bool hakios_p1277_panel_auto_compatible(void);
 /* Cached thermal/ownership evidence only. Called with gate spin lock held
  * by p127_guard or from the governor. The old audit admission (60/59/60)
  * is NOT the idle admission. Retain its active safety ceiling. */
-static unsigned p1277_auto_guard_reason(uint64_t lease){
+static unsigned p12710_auto_guard_detail(uint64_t lease,unsigned *subreason){
+    if(subreason)*subreason=0;
     if(!__atomic_load_n(&p1277_auto_enabled,__ATOMIC_ACQUIRE))return 12;
     uint64_t now=mach_absolute_time();
     if(now>=(lease&~(uint64_t)P127_MASK))return 1;
@@ -53,11 +56,21 @@ static unsigned p1277_auto_guard_reason(uint64_t lease){
     int g=hakios_exynos_tmu_zone_mc(2),bat=hakios_battery_temperature();
     if(b<0 || l<0 || g<0 || bat<=0 || hakios_exynos_tmu_age_ms()>2000)return 3;
     if(b>=67000 || l>=66000 || g>=68000 || bat>=45)return 2;
-    if(hakios_p124_ufs_busy())return 8;
-    if(clusters[0].sum_now+clusters[1].sum_now>=200u)return 8;
+    unsigned mask=(hakios_p124_ufs_busy()?1u:0u) | (clusters[0].sum_now+clusters[1].sum_now>=200u?2u:0u);
+    if(mask){if(subreason)*subreason=mask;return 8;}
     if(hakios_p9_panel_auto_on() && !hakios_p1277_panel_auto_compatible())return 6;
     return 0;
 }
+static unsigned p1277_auto_guard_reason(uint64_t lease){return p12710_auto_guard_detail(lease,NULL);}
+static bool p12710_transient(unsigned reason,unsigned subreason){
+    return reason==2 || reason==4 || reason==7 || (reason==8 && subreason && !(subreason&~3u));
+}
+static void p12710_backoff(uint64_t now){
+    p12710_backoff_s=p12710_backoff_s==0?15u:p12710_backoff_s==15?30u:60u;
+    p12710_backoff_until=now+p1274_ticks_ms(p12710_backoff_s*1000u);
+    p12710_transient_aborts++;
+}
+static void p12710_backoff_reset(void){p12710_backoff_s=0;p12710_backoff_until=0;}
 /* Admission mutex is held by callers enabling automatic ownership.
  * Observe legacy recorder/gate state before allowing an automatic owner.
  * The worker never holds these spin locks across MMIO or PMIC requests. */
@@ -259,8 +272,9 @@ static bool p1277_auto_start(uint64_t now,unsigned mode,bool active){
     p1277_auto_samples=0;p1277_auto_stage_pass=false;p1277_auto_was_active=active;
     p1277_auto_state=active?P77_ACTIVE:P77_TRIAL;
     p1277_auto_quiet=0;
-    unsigned why=p1277_auto_guard_reason(lease);
-    if(why)(void)hakios_p127_stop_owned(lease,why);
+    p12710_active_samples=0;
+    unsigned subreason=0,why=p12710_auto_guard_detail(lease,&subreason);
+    if(why)(void)hakios_p12710_stop_owned(lease,why,subreason);
     say("p1277-auto: %s stage=%u mode=%u lease=%llu\n",active?"active":"trial",
         p1277_auto_stage,mode,(unsigned long long)lease);
     return true;
@@ -299,7 +313,7 @@ static bool p1277_burst_tick(uint64_t now,uint64_t lease){
     if(!p1277_burst_since)p1277_burst_since=now;
     if(now-p1277_burst_since<p1274_ticks_ms(250))return false;
     if(lease){
-        (void)hakios_p127_stop_owned(lease,8);
+        (void)hakios_p12710_stop_owned(lease,8,2);
         return false; /* run normal restore proof, never block it */
     }
     if(p1277_l2_state || !p1277_l2_restored() || !p1277_auto_legacy_idle())return true;
@@ -361,10 +375,17 @@ static void p1277_auto_tick_locked(uint64_t now){
                p1277_auto_rate(0,true) && p1277_auto_abox_resumed()){
                 __atomic_store_n(&p1277_auto_lease,0,__ATOMIC_RELEASE);
                 if(p1277_auto_fault){p1277_auto_state=P77_FAULT;return;}
-                if(!p1277_auto_was_active){
+                /* Read stop metadata only after the exact stop lease is published. */
+                p1277_auto_last_reason=__atomic_load_n(&hakios_p1273_last_stop_reason,__ATOMIC_RELAXED);
+                p12710_last_subreason=__atomic_load_n(&hakios_p12710_last_stop_subreason,__ATOMIC_RELAXED);
+                bool transient=p1279_profile && enabled && p12710_transient(p1277_auto_last_reason,p12710_last_subreason);
+                if(transient){p12710_backoff(now);p1277_auto_samples=0;p1277_auto_stage_pass=false;
+                    say("p12710-auto: transient=%u subreason=%u backoff_s=%u stage=%u\n",p1277_auto_last_reason,p12710_last_subreason,p12710_backoff_s,p1277_auto_stage);
+                }
+                if(!transient && !p1277_auto_was_active){
                     if(p1277_auto_stage_pass && __atomic_load_n(&hakios_p1273_last_stop_reason,__ATOMIC_ACQUIRE)==0){
                         if(p1277_auto_stage==4)p1277_auto_abox_ok=1;
-                        p1277_auto_stage++;p1277_auto_retries=0;
+                        p1277_auto_stage++;p1277_auto_retries=0;p12710_backoff_reset();
                     }else if(enabled && ++p1277_auto_retries>=3){
                         if(p1277_auto_stage==4){p1277_auto_stage=5;p1277_auto_abox_ok=0;}
                         else{p1277_auto_fail(3);return;}
@@ -387,6 +408,7 @@ static void p1277_auto_tick_locked(uint64_t now){
             /* A revoked trial cannot qualify, even if samples matched. */
             if(__atomic_load_n(&hakios_p1273_last_stop_lease,__ATOMIC_ACQUIRE)!=lease)p1277_auto_stage_pass=false;
             p1277_auto_last_reason=__atomic_load_n(&hakios_p1273_last_stop_reason,__ATOMIC_ACQUIRE);
+            p12710_last_subreason=__atomic_load_n(&hakios_p12710_last_stop_subreason,__ATOMIC_RELAXED);
             if(p1277_auto_last_reason!=0)p1277_auto_stage_pass=false;
             p1277_auto_state=P77_RESTORE;
             p1277_auto_sample_at=now+p1274_ticks_ms(2000);
@@ -396,9 +418,20 @@ static void p1277_auto_tick_locked(uint64_t now){
         if(p1273_gate_faults()!=p1277_auto_fault_mark || !hakios_p124_ufs_safe()){
             p1277_auto_fail(2);return;
         }
-        unsigned why=p1277_auto_guard_reason(lease);
-        if(why){(void)hakios_p127_stop_owned(lease,why);return;}
+        unsigned subreason=0,why=p12710_auto_guard_detail(lease,&subreason);
+        if(why){(void)hakios_p12710_stop_owned(lease,why,subreason);return;}
         if(p1277_auto_state==P77_ACTIVE){
+            if(p1279_profile && p12710_active_samples<2 && now>=p1277_auto_sample_at){
+                p1277_auto_sample_at=now+p1274_ticks_ms(3000);
+                if(p1277_auto_rate(598000u,false)){
+                    uint8_t v=0;int err=hakios_acpm_pmic_read(HAKIOS_ACPM_PMIC_PMIC,0x23,&v);
+                    if(__atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE)!=lease || p1277_auto_guard_reason(lease) || clusters[0].cur!=598000u)return;
+                    p1277_auto_last_uv=err?0:300000u+6250u*v;
+                    if(err || p1277_auto_last_uv!=637500u){p1277_auto_fail(1);return;}
+                    if(++p12710_active_samples==2)p12710_backoff_reset();
+                    say("p12710-active: lease=%llu mhz=%u uv=%u samples=%u abox_driver_ok=%u\n",(unsigned long long)lease,p1277_auto_last_mhz,p1277_auto_last_uv,p12710_active_samples,p1277_auto_abox_ok);
+                }
+            }
             /* Refresh only the exact automatic lease after live checks.
              * Legacy trials remain non-renewable. */
             if((lease&~(uint64_t)P127_MASK)-now<p1274_ticks_ms(30000)){
@@ -438,6 +471,7 @@ static void p1277_auto_tick_locked(uint64_t now){
     if(p1277_auto_table_ok && (p1273_gate_faults()!=p1277_auto_fault_mark || !hakios_p124_ufs_safe())){
         p1277_auto_fail(2);return;
     }
+    if(p1279_profile && now<p12710_backoff_until){p1277_auto_quiet=0;return;}
     unsigned mode=p1277_auto_stage<5?p1277_auto_modes[p1277_auto_stage]:
         (p1277_auto_abox_ok?P127545_COMPOSITE:65u);
     uint64_t hypothetical=((now+p1274_ticks_ms(20000))&~(uint64_t)P127_MASK)|mode;
@@ -536,13 +570,17 @@ SYSCTL_PROC(_kern_hakios,OID_AUTO,p1277_active,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LO
 /* Permission only at boot; persistent G2 is separate from the short
  * P127542 trial. The renderer retains its context-local fault latch. */
 static uint32_t p1277_g2_request;
+static bool p12710_g2_allowed(void){
+    if(!p1279_profile)return p127542_g2_safe();
+    return p12754_optin() && p1277_g2_permission && hakios_display_requested_on()!=0 && !__atomic_load_n(&hakios_p12753_busy,__ATOMIC_ACQUIRE);
+}
 static int p1277_g2_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
-    int v=__atomic_load_n(&p1277_g2_request,__ATOMIC_ACQUIRE) && p127542_g2_safe();
+    int v=__atomic_load_n(&p1277_g2_request,__ATOMIC_ACQUIRE) && p12710_g2_allowed();
     int e=sysctl_io_number(req,v,sizeof(v),&v,NULL);
     if(e || !req->newptr)return e;
     if(v!=0 && v!=1)return EINVAL;
     P1277_ADMISSION(true,false);
-    if(v && (!p1277_g2_permission || !p127542_g2_safe()))return EPERM;
+    if(v && (!p1277_g2_permission || !p12710_g2_allowed()))return EPERM;
     __atomic_store_n(&p1277_g2_request,(unsigned)v,__ATOMIC_RELEASE);
     return 0;
 }
@@ -594,7 +632,7 @@ static int p1278_active_stats_sysctl(__unused struct sysctl_oid *o,__unused void
         p1277_active_now()?1u:0u,(unsigned long long)(boost_ns/NSEC_PER_MSEC),(unsigned long long)(burst_ns/NSEC_PER_MSEC),
         lit,big,clusters[1].frame_khz,
         __atomic_load_n(&p1277_g2_request,__ATOMIC_ACQUIRE),
-        (__atomic_load_n(&p1277_g2_request,__ATOMIC_ACQUIRE) && p127542_g2_safe())?1u:0u,
+        (__atomic_load_n(&p1277_g2_request,__ATOMIC_ACQUIRE) && p12710_g2_allowed())?1u:0u,
         policy,tail?1u:0u,p12781_tail_target(lit,false,tail,policy,0,0,false,false,false),
         p12781_tail_target(big,true,tail,policy,0,0,false,false,false),
         clusters[0].boost_floor,clusters[1].boost_floor,
@@ -603,6 +641,15 @@ static int p1278_active_stats_sysctl(__unused struct sysctl_oid *o,__unused void
     return SYSCTL_OUT(req,out,strlen(out)+1);
 }
 SYSCTL_PROC(_kern_hakios,OID_AUTO,p1278_active_stats,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p1278_active_stats_sysctl,"A","Rev8 active control and raw G2 rollback witness, not context skip proof");
+static int p12710_auto_stats_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
+    if(!lck_mtx_try_lock(&p1277_auto_lock))return EBUSY;
+    char out[220];
+    snprintf(out,sizeof(out),"version=1 transient_aborts=%u subreason=%u backoff_s=%u active_samples=%u retries=%u fault=%u",p12710_transient_aborts,p12710_last_subreason,p12710_backoff_s,p12710_active_samples,p1277_auto_retries,p1277_auto_fault);
+    lck_mtx_unlock(&p1277_auto_lock);return SYSCTL_OUT(req,out,strlen(out)+1);
+}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p12710_auto_stats,CTLTYPE_STRING|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p12710_auto_stats_sysctl,"A","Rev10 transient and active witness");
+static int p12710_revision_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){int v=10;return SYSCTL_OUT(req,&v,sizeof(v));}
+SYSCTL_PROC(_kern_hakios,OID_AUTO,p12710_revision,CTLTYPE_INT|CTLFLAG_RD|CTLFLAG_LOCKED|CTLFLAG_KERN,NULL,0,p12710_revision_sysctl,"I","Rev10 draft ABI");
 static int p1279_revision_sysctl(__unused struct sysctl_oid *o,__unused void *a,__unused int b,struct sysctl_req *req){
     int v=9;return SYSCTL_OUT(req,&v,sizeof(v));
 }

@@ -7,6 +7,7 @@ static bool p1277_auto_blocks(void){
     return __atomic_load_n(&p1277_auto_enabled,__ATOMIC_ACQUIRE) || __atomic_load_n(&p1277_auto_lease,__ATOMIC_ACQUIRE);
 }
 static unsigned p1277_auto_guard_reason(uint64_t lease);
+static unsigned p12710_auto_guard_detail(uint64_t lease,unsigned *subreason);
 /* P12.6 policy is separate from the observation probe. All waits are bounded
  * so removal/expiry never depends on host USB or a producer wake. */
 static unsigned
@@ -988,9 +989,10 @@ p127_guard(void)
         lck_spin_lock(&p1273_gate_lock);
         lease=__atomic_load_n(&hakios_p127_lease,__ATOMIC_ACQUIRE);
         if(lease && lease==__atomic_load_n(&p1277_auto_lease,__ATOMIC_ACQUIRE)){
-            unsigned reason=p1277_auto_guard_reason(lease);
+            unsigned subreason=0;
+            unsigned reason=p12710_auto_guard_detail(lease,&subreason);
             lck_spin_unlock(&p1273_gate_lock);
-            if(reason)(void)hakios_p127_stop_owned(lease,reason);
+            if(reason)(void)hakios_p12710_stop_owned(lease,reason,subreason);
             return;
         }
         lck_spin_unlock(&p1273_gate_lock);

@@ -1,0 +1,64 @@
+--- a/src/gallium/targets/osmesa/osmesa_target.c
++++ b/src/gallium/targets/osmesa/osmesa_target.c
+@@ -105,5 +105,22 @@
+ struct pipe_resource *
+ osmesa_surface_resource(struct pipe_screen *screen, uint32_t surface);
+-
++
++#ifdef __APPLE__
++#include <errno.h>
++/* Stage is diagnostic only; thread-local and cleared before the GL call. */
++static __thread unsigned p12710_import_status;
++__attribute__((visibility("default"))) unsigned OSMesaHakiosImportStatus(int reset);
++__attribute__((visibility("default"))) unsigned
++OSMesaHakiosImportStatus(int reset)
++{
++   unsigned v = p12710_import_status;
++   if (reset) p12710_import_status = 0;
++   return v;
++}
++#define P10_IMPORT(stage, err) (p12710_import_status = (stage) | (((unsigned)(err) & 255u) << 3))
++#else
++#define P10_IMPORT(stage, err) ((void)0)
++#endif
++
+ /*
+  * The memory of an IOSurface as a texture, to draw into and to draw with (Darwin on redwood):
+@@ -129,7 +146,15 @@
+    struct winsys_handle handle = { .type = WINSYS_HANDLE_TYPE_FD };
+-
+-   if (gpu_fd < 0 || hakios_drm_surface(gpu_fd, &s) != 0)
++
++   if (gpu_fd < 0) {
++      P10_IMPORT(1, 0);
+       return NULL;
+-   if (s.pixel_format != 0x42475241 /* 'BGRA' */ || s.planes != 0)
++   }
++   if (hakios_drm_surface(gpu_fd, &s) != 0) {
++      P10_IMPORT(2, errno);
++      return NULL;
++   }
++   if (s.pixel_format != 0x42475241 /* 'BGRA' */ || s.planes != 0) {
++      P10_IMPORT(3, 0);
+       return NULL;
++   }
+    /* (the surface comes in as Linux's buffers come in by file descriptor: see hakios-drm) */
+@@ -140,6 +165,17 @@
+    handle.offset = s.offset;
+    handle.size = s.size;
+-   return screen->resource_from_handle(screen, &templ, &handle, 0);
++#ifdef __APPLE__
++   (void)hakios_drm_import_prime_status(1);
++#endif
++   struct pipe_resource *res = screen->resource_from_handle(screen, &templ, &handle, 0);
++#ifdef __APPLE__
++   unsigned prime = hakios_drm_import_prime_status(1);
++   if (res) P10_IMPORT(7, 0);
++   else if ((prime & 3u) == 2u) P10_IMPORT(5, prime >> 2);
++   else if ((prime & 3u) == 1u) P10_IMPORT(6, 0);
++   else P10_IMPORT(4, 0);
++#endif
++   return res;
+ #else
+    return NULL;
+ #endif

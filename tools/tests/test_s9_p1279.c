@@ -23,6 +23,8 @@ int main(void){
     assert(p.cpu_n==1&&p.cpu==200&&p.paired_wall==300&&p.max_wall==500&&p.attach==30);
     s9_p1279_share(&p,P9_FORMAT,1000,20);s9_p1279_backend(&p,0x10502,1000);
     assert(p.share_n[P9_FORMAT]==1&&p.share_bytes[P9_FORMAT]==1000&&p.backend_n[8]==1);
+    s9_p1279_backend(&p,0x10501u|((5u|(12u<<3))<<17),2000);
+    assert(p.import_stage_n[5]==1&&p.backend_last_error==0x10501u&&p.backend_n[8]==2&&p.backend_bytes[8]==3000);
     assert(!s9_p1279_report_due(&p,5000099)&&s9_p1279_report_due(&p,5000100));
     s9_p1279_reset(&p,5000100);assert(!p.frames&&!p.hash_bytes&&p.first==5000100);
     size_t n=11*1024*1024+7;unsigned char *b=malloc(n);assert(b);

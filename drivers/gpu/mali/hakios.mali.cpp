@@ -524,6 +524,18 @@ HakiosMaliUserClient::createBO(struct drm_panfrost_create_bo * request)
  * a buffer of this client's already is that buffer again. Asked only to describe (kMaliDescribe), no buffer is made. As
  * HakiosGPU's.
  */
+/* Bounded failure evidence, not an import-policy override. */
+static void p12710SurfaceReject(struct mali_surface *request, MiniIOSurface *s, unsigned reason)
+{
+	static volatile SInt32 counts[4];
+	if (reason >= 4 || counts[reason] >= 16 || OSIncrementAtomic(&counts[reason]) >= 16)
+		return;
+	if (s != NULL)
+		IOLog("p12710-mali-import: id=%u describe=%u reason=%u w=%u h=%u stride=%u format=%08x planes=%u\n", request->surface, request->handle == kMaliDescribe, reason, s->info.width, s->info.height, s->info.bytesPerRow, s->info.pixelFormat, s->info.planeCount);
+	else
+		IOLog("p12710-mali-import: id=%u describe=%u reason=%u\n", request->surface, request->handle == kMaliDescribe, reason);
+}
+
 IOReturn
 HakiosMaliUserClient::surfaceBuffer(struct mali_surface * request)
 {
@@ -533,9 +545,11 @@ HakiosMaliUserClient::surfaceBuffer(struct mali_surface * request)
 	uint64_t size;
 
 	if (s == NULL) {
+		p12710SurfaceReject(request, s, 0);
 		return kIOReturnNotFound;
 	}
 	if (s->client != NULL) {                /* a program's own memory with a surface around it: not whole pages */
+		p12710SurfaceReject(request, s, 1);
 		MiniIOSurfaceDrop(s);
 		return kIOReturnUnsupported;
 	}
@@ -544,6 +558,7 @@ HakiosMaliUserClient::surfaceBuffer(struct mali_surface * request)
 	memory = s->scan != NULL ? IOSubMemoryDescriptor::withSubRange(s->scan, 0, size, kIODirectionInOut) :
 	    IOSubMemoryDescriptor::withSubRange(s->memory, PAGE_SIZE, size, kIODirectionInOut);
 	if (memory == NULL || size == 0 || size > MALI_BUFFER_MAX) {
+		p12710SurfaceReject(request, s, 2);
 		OSSafeReleaseNULL(memory);
 		MiniIOSurfaceDrop(s);
 		return kIOReturnNoMemory;
@@ -576,6 +591,7 @@ HakiosMaliUserClient::surfaceBuffer(struct mali_surface * request)
 	b = s->scan != NULL ? newBuffer(s->scan, 0, size, &request->handle, PANFROST_BO_NOEXEC) :
 	    newBuffer(s->memory, PAGE_SIZE, size, &request->handle, PANFROST_BO_NOEXEC);
 	if (b == NULL) {
+		p12710SurfaceReject(request, s, 3);
 		memory->release();
 		MiniIOSurfaceDrop(s);
 		return kIOReturnNoMemory;

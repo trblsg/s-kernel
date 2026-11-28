@@ -1324,7 +1324,7 @@ errno_name(int error)
 	case EINVAL: return "EINVAL: the value was refused";
 	case EIO: return "EIO: the hardware did not take it";
 	case ENODEV: return "ENODEV: no driver behind it";
-	case ENOMEM: return "ENOMEM: longer than 256 bytes";
+	case ENOMEM: return "ENOMEM: sysctl output exceeds buffer";
 	default: return "error";
 	}
 }

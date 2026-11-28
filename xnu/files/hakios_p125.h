@@ -96,7 +96,7 @@ enum p1273_event {
 extern uint32_t hakios_p1273_gate_watch;
 extern uint64_t hakios_p1273_events[2][P1273_EVENT_COUNT];
 extern uint64_t hakios_p1273_last_stop_lease,hakios_p1273_fault_seq,hakios_p127543_stop_at;
-extern uint32_t hakios_p1273_last_stop_reason;
+extern uint32_t hakios_p1273_last_stop_reason, hakios_p12710_last_stop_subreason;
 #define P127_FG_SLOTS 64u
 struct p127_fg_row {uint64_t seq,ticks; int32_t ua,avg_ua; uint32_t uv,external,charger,qh;};
 extern struct p127_fg_row hakios_p127_fg_rows[P127_FG_SLOTS];
@@ -161,6 +161,7 @@ unsigned hakios_p127_mode(void);
 void hakios_p127_stop(unsigned reason);
 /* Exact lease cancellation: never revoke a newer owner's policy. */
 bool hakios_p127_stop_owned(uint64_t lease,unsigned reason);
+bool hakios_p12710_stop_owned(uint64_t lease,unsigned reason,unsigned subreason);
 void hakios_p127_wfi(unsigned cpu,uint64_t ticks);
 void hakios_p127_metric(unsigned group,unsigned index,uint64_t value);
 void hakios_p127_audio_wake(void);

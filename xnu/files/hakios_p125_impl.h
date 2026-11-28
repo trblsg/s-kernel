@@ -240,7 +240,7 @@ unsigned hakios_p127_mode(void)
     }
     return now<(v&~(uint64_t)P127_MASK)?(unsigned)(v&P127_MASK):0;
 }
-uint32_t hakios_p1273_gate_watch,hakios_p1273_last_stop_reason;
+uint32_t hakios_p1273_gate_watch,hakios_p1273_last_stop_reason,hakios_p12710_last_stop_subreason;
 uint64_t hakios_p1273_events[2][P1273_EVENT_COUNT],hakios_p1273_last_stop_lease,hakios_p1273_fault_seq,hakios_p127543_stop_at;
 void hakios_p1273_event(unsigned event,uint64_t count)
 {
@@ -251,11 +251,12 @@ void hakios_p1273_event(unsigned event,uint64_t count)
     unsigned active=hakios_p127_mode()==watch?0:1;
     __atomic_fetch_add(&hakios_p1273_events[active][event],count,__ATOMIC_RELAXED);
 }
-static void p127_stop_publish(uint64_t v,unsigned reason)
+static void p127_stop_publish(uint64_t v,unsigned reason,unsigned subreason)
 {
     if(v){
         __atomic_store_n(&hakios_p127_reason,reason,__ATOMIC_RELEASE);
         __atomic_store_n(&hakios_p1273_last_stop_reason,reason,__ATOMIC_RELAXED);
+        __atomic_store_n(&hakios_p12710_last_stop_subreason,subreason,__ATOMIC_RELAXED);
         __atomic_store_n(&hakios_p127543_stop_at,mach_absolute_time(),__ATOMIC_RELAXED);
         __atomic_store_n(&hakios_p1273_last_stop_lease,v,__ATOMIC_RELEASE);
         /* Policy removal must wake even after mode becomes zero. */
@@ -268,14 +269,18 @@ static void p127_stop_publish(uint64_t v,unsigned reason)
 void hakios_p127_stop(unsigned reason)
 {
     uint64_t v=__atomic_exchange_n(&hakios_p127_lease,0,__ATOMIC_ACQ_REL);
-    p127_stop_publish(v,reason);
+    p127_stop_publish(v,reason,0);
 }
 bool hakios_p127_stop_owned(uint64_t lease,unsigned reason)
+{
+    return hakios_p12710_stop_owned(lease,reason,0);
+}
+bool hakios_p12710_stop_owned(uint64_t lease,unsigned reason,unsigned subreason)
 {
     if(!lease)return false;
     uint64_t expected=lease;
     if(!__atomic_compare_exchange_n(&hakios_p127_lease,&expected,0,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return false;
-    p127_stop_publish(lease,reason);return true;
+    p127_stop_publish(lease,reason,subreason);return true;
 }
 void hakios_p127_wfi(unsigned cpu,uint64_t ticks)
 {

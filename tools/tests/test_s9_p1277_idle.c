@@ -29,7 +29,7 @@ static uint64_t tick=100000, fault_seq;
 static uint64_t p1277_auto_lease,hakios_p127_lease,hakios_p125_lease,hakios_p126_lease,hakios_p1274_deadline,p124_cpu_until,hakios_p1273_offline_duration;
 static uint32_t p1277_auto_permission=1,p1277_auto_enabled=1,p1277_active_enabled,p1277_active_permission,p1277_g2_permission,p1277_psci_permission;
 static uint32_t hakios_p12753_busy,p12_cpu_mode,p8_big_cap_khz,hakios_p1273_offline_fixed,hakios_p1273_trace_state,p1273_cap_state,hakios_p1273_gate_watch;
-static uint32_t hakios_p127_reason,hakios_p1273_last_stop_reason,hakios_p1274_trace_late;
+static uint32_t hakios_p127_reason,hakios_p1273_last_stop_reason,hakios_p1274_trace_late,hakios_p12710_last_stop_subreason;
 static uint64_t hakios_p1273_trace_generation,hakios_p1273_trace_trigger;
 static bool hakios_p1273_trace_arm(uint64_t now,uint64_t until,uint64_t span){
     assert(until>now && span);if(hakios_p1273_trace_state)return false;
@@ -96,7 +96,12 @@ static bool p1277_auto_blocks(void){return p1277_auto_enabled || p1277_auto_leas
 static bool hakios_p127_stop_owned(uint64_t v,unsigned reason){
     if(!v || hakios_p127_lease!=v)return false;
     hakios_p127_lease=0;hakios_p1273_last_stop_lease=v;hakios_p127_reason=hakios_p1273_last_stop_reason=reason;
+    hakios_p12710_last_stop_subreason=0;
     return true;
+}
+static bool hakios_p12710_stop_owned(uint64_t v,unsigned reason,unsigned subreason){
+    if(!hakios_p127_stop_owned(v,reason))return false;
+    hakios_p12710_last_stop_subreason=subreason;return true;
 }
 static int say(const char*f,...){(void)f;return 0;}
 static unsigned hakios_acpm_dvfs_table(unsigned i,uint32_t*k,uint32_t*v,unsigned n,int(*log)(const char*,...)){
@@ -125,6 +130,7 @@ static void reset(void){
     p1277_auto_state=P77_WAIT;p1277_auto_stage=p1277_auto_fault=p1277_auto_samples=p1277_auto_retries=p1277_auto_abox_ok=0;
     p1277_auto_quiet=p1277_auto_started=p1277_auto_sample_at=p1277_auto_restore_until=0;
     p1277_auto_table_ok=p1277_auto_stage_pass=p1277_auto_was_active=false;
+    p12710_backoff_reset();p12710_transient_aborts=p12710_last_subreason=p12710_active_samples=0;
     p1279_auto_pending=false;p1277_auto_enabled=1;p1277_auto_lease=hakios_p127_lease=0;
     p1277_l2_request=p1277_l2_module=p1277_l2_state=p1277_l2_result=p1277_l2_samples=0;
     driver_owner=0;driver_qualified=driver_live=true;driver_fail_begin=driver_fail_end=false;
@@ -158,6 +164,16 @@ int main(void){
     display_on=true;advance(1);assert(!hakios_p127_lease);advance(1);advance(2000);assert(!p1277_auto_lease);
     reset();p12752_idle_mode=1;advance(1);advance(3000);assert(!hakios_p127_lease);p12752_idle_mode=0;
     reset();start_trial();ufs_busy=true;advance(1);assert(!hakios_p127_lease);ufs_busy=false;advance(1);advance(2000);assert(!p1277_auto_lease && p1277_auto_stage==0);
+    assert(p12710_last_subreason==1 && p12710_backoff_s==15 && p1277_auto_retries==0);
+    advance(14000);assert(!hakios_p127_lease);advance(1000);advance(3000);assert(p1277_auto_state==P77_TRIAL);
+    clusters[0].sum_now=200;advance(1);assert(!hakios_p127_lease);clusters[0].sum_now=0;advance(1);advance(2000);
+    assert(p12710_last_subreason==2 && p12710_backoff_s==30 && p1277_auto_retries==0);
+    advance(30000);advance(3000);assert(p1277_auto_state==P77_TRIAL);
+    ufs_busy=true;clusters[0].sum_now=200;advance(1);ufs_busy=false;clusters[0].sum_now=0;advance(1);advance(2000);
+    assert(p12710_last_subreason==3 && p12710_backoff_s==60 && p1277_auto_retries==0 && p12710_transient_aborts==3);
+    advance(60000);advance(3000);assert(p1277_auto_state==P77_TRIAL);
+    advance(3000);advance(3000);advance(1);advance(2000);assert(p1277_auto_stage==1 && p12710_backoff_s==0);
+    puts("Rev10 transient backoff 15/30/60, lease subreason, successful stage reset PASS (mock)");
     reset();start_trial();uint64_t stale=p1277_auto_lease;hakios_p127_lease=0;hakios_p1273_last_stop_lease=stale-1024;advance(1);advance(2000);assert(p1277_auto_lease==stale);advance(16000);assert(p1277_auto_fault==4 && p1277_auto_lease==stale && !p1277_auto_enabled);
     reset();bad_table=true;advance(1);advance(3000);assert(p1277_auto_fault && !hakios_p127_lease);
     reset();start_trial();pmic_error=1;advance(3000);assert(p1277_auto_fault && !hakios_p127_lease);

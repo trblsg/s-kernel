@@ -258,6 +258,10 @@ struct image {
 	unsigned looked;                /* ... the frame in which that memory was last looked at, */
 	uint64_t sum;                   /* ... and what it added up to */
 	bool p1231_hash4_sum;           /* digest scheme; change forces conservative refresh */
+    bool p12710_hash_seen,p12710_baseline_stale;
+    unsigned p12710_import_status,p12710_import_reason;
+    uint64_t p12710_hash_bytes,p12710_hash_us;
+    unsigned p12710_hash_n;
 	unsigned unchanged;             /* ... and how many looks in a row found it the same (surface_changed()) */
 	GLenum to, internal, format, type;
 	uint32_t plane, seed;
@@ -1069,7 +1073,10 @@ surface_mirrored(struct eagl *e, struct image *image)
 		glBindTexture(GL_TEXTURE_2D, (GLuint)bound);
 		glDeleteTextures(1, &image->mirror);
 		image->mirror = 0;
-        if(p1279_gl_on){s9_p1279_share(&e->p1279,P9_MIRROR_BACKEND,image->bytes,now_us()-t);s9_p1279_backend(&e->p1279,hakios_gl_import_status(),image->bytes);}
+        if(p1279_gl_on){s9_p1279_share(&e->p1279,P9_MIRROR_BACKEND,image->bytes,now_us()-t);image->p12710_import_status=hakios_gl_import_status();s9_p1279_backend(&e->p1279,image->p12710_import_status,image->bytes);
+            unsigned status=image->p12710_import_status,stage=(status>>17)&7u;
+            if(e->p1279.import_stage_n[stage]<=2)say("p12710-import: ctx=%p id=%u tex=%u mirror=1 gl=%x mesa_stage=%u errno=%u w=%d h=%d stride=%zu alloc=%zu\n",(void*)e,IOSurfaceGetID(image->surface),image->texture,status&0x1ffffu,stage,(status>>20)&255u,image->width,image->height,IOSurfaceGetBytesPerRow(image->surface),image->bytes);
+        }
 		return false;
 	}
 	glBindTexture(GL_TEXTURE_2D, (GLuint)bound);
@@ -1091,8 +1098,14 @@ surface_shared(struct eagl *e, struct image *image)
     unsigned why=!share_surfaces?P9_SHARE_DISABLED:image->invert?P9_INVERT:image->alpha_first?P9_ALPHA:
         image->format!=GL_BGRA||image->type!=GL_UNSIGNED_BYTE?P9_FORMAT:image->plane!=0?P9_PLANE:
         (size_t)image->width!=IOSurfaceGetWidth(surface)||(size_t)image->height!=IOSurfaceGetHeight(surface)?P9_DIMENSIONS:0;
-    if(!why && !hakios_gl_surface_texture(e->gl, IOSurfaceGetID(surface))){why=P9_SHARE_BACKEND;if(p1279_gl_on)s9_p1279_backend(&e->p1279,hakios_gl_import_status(),image->bytes);}
-    if(p1279_gl_on)s9_p1279_share(&e->p1279,why,image->bytes,now_us()-t);
+    if(!why && !hakios_gl_surface_texture(e->gl, IOSurfaceGetID(surface))){
+        why=P9_SHARE_BACKEND;
+        if(p1279_gl_on){image->p12710_import_status=hakios_gl_import_status();s9_p1279_backend(&e->p1279,image->p12710_import_status,image->bytes);
+            unsigned status=image->p12710_import_status,stage=(status>>17)&7u;
+            if(e->p1279.import_stage_n[stage]<=2)say("p12710-import: ctx=%p id=%u tex=%u mirror=0 gl=%x mesa_stage=%u errno=%u w=%d h=%d stride=%zu alloc=%zu\n",(void*)e,IOSurfaceGetID(surface),image->texture,status&0x1ffffu,stage,(status>>20)&255u,image->width,image->height,IOSurfaceGetBytesPerRow(surface),image->bytes);
+        }
+    }
+    if(p1279_gl_on){image->p12710_import_reason=why;s9_p1279_share(&e->p1279,why,image->bytes,now_us()-t);}
     if (why) {
 		/* why a surface is copied rather than its memory used: the first ones of a run, for the copies to be made fewer */
 		if (e->refused < 40) {
@@ -1165,6 +1178,7 @@ surface_changed(struct eagl *e, struct image *image)
 	bool p611_sample = __atomic_load_n(&p611_mode_cached,__ATOMIC_RELAXED) &&
 	    s9_gl_diag_sample16(&e->p611_hash_serial);
 	uint64_t hash_began = (hash_sample || p611_sample || p1279_gl_on) ? now_us() : 0;
+    uint32_t p10_seed_before=p1279_gl_on?IOSurfaceGetSeed(surface):0;
     size_t hash_bytes=hash4?size:size&~(size_t)7;
 	if (hash4) {
 		/* Both fast and fallback reference use the same digest for the full
@@ -1210,7 +1224,17 @@ surface_changed(struct eagl *e, struct image *image)
 		}
 	}
 	uint64_t elapsed_hash_us = (hash_sample || p611_sample || p1279_gl_on) ? now_us()-hash_began : 0;
-    if(p1279_gl_on)s9_p1279_hash(&e->p1279,hash_bytes,elapsed_hash_us,sum==image->sum && !p0_force_dirty);
+    if(p1279_gl_on){
+        s9_p1279_hash(&e->p1279,hash_bytes,elapsed_hash_us,sum==image->sum && !p0_force_dirty);
+        image->p12710_hash_bytes+=hash_bytes;image->p12710_hash_us+=elapsed_hash_us;image->p12710_hash_n++;
+        unsigned group;
+        if(!image->p12710_hash_seen){e->p1279.hash_initial++;group=2;}
+        else if(p0_force_dirty || image->p12710_baseline_stale || image->target || p10_seed_before!=image->seed || IOSurfaceGetSeed(surface)!=p10_seed_before){e->p1279.hash_other++;group=3;}
+        else if(sum==image->sum){e->p1279.same_seed_hash_same++;group=0;}
+        else{e->p1279.same_seed_hash_dirty++;group=1;}
+        e->p1279.seed_hash_bytes[group]+=hash_bytes;e->p1279.seed_hash_us[group]+=elapsed_hash_us;
+        image->p12710_hash_seen=true;image->p12710_baseline_stale=false;
+    }
 	if (__atomic_load_n(&p611_mode_cached,__ATOMIC_RELAXED)) {
 		const bool changed=sum!=image->sum || p0_force_dirty;
 		s9_p611_check(&e->p611,p611_sample?IOSurfaceGetID(surface):0,
@@ -1329,6 +1353,7 @@ surface_to_texture(struct eagl *e, struct image *image)
 	}
 	IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
 	free(flipped);
+    if(p1279_gl_on && image->seed!=seed)image->p12710_baseline_stale=true;
 	image->seed = seed;
 	e->uploads++;
 	e->upload_bytes += row * (size_t)image->height;
@@ -2362,6 +2387,18 @@ frame_end(struct eagl *e, bool finished, enum s9_p4_end_reason end_reason)
                 say("p1279-upload: ctx=%p n=%u bytes=%llu lock_us=%llu convert_us=%llu teximage_us=%llu flush_n=%u finish_n=%u fence_n=%u blit_n=%u\n",
                     (void*)e,p->upload_n,(unsigned long long)p->upload_bytes,(unsigned long long)p->lock_us,
                     (unsigned long long)p->convert_us,(unsigned long long)p->teximage_us,p->flush_n,p->finish_n,p->fence_n,p->blit_n);
+                say("p12710-seed: ctx=%p seed_changed_refill=%u same_seed_hash_same=%u same_seed_hash_dirty=%u hash_initial=%u hash_other=%u extra_hash_bytes=0\n",(void*)e,p->seed_changed_refill,p->same_seed_hash_same,p->same_seed_hash_dirty,p->hash_initial,p->hash_other);
+                for(unsigned k=0;k<4;k++)say("p12710-seed-cost: ctx=%p group=%u bytes=%llu us=%llu\n",(void*)e,k,(unsigned long long)p->seed_hash_bytes[k],(unsigned long long)p->seed_hash_us[k]);
+                for(unsigned k=0;k<8;k++)if(p->import_stage_n[k])say("p12710-import-stage: ctx=%p stage=%u count=%u\n",(void*)e,k,p->import_stage_n[k]);
+                /* Report up to four largest surviving copied textures per window; no per-bind logs or allocations. */
+                for(unsigned rank=0;rank<4;rank++){
+                    struct image *top=NULL;
+                    for(unsigned j=0;j<e->image_count;j++)if(e->images[j].p12710_hash_bytes && (!top || e->images[j].p12710_hash_bytes>top->p12710_hash_bytes))top=&e->images[j];
+                    if(!top)break;
+                    say("p12710-surface: ctx=%p id=%u tex=%u w=%d h=%d stride=%zu alloc=%zu format=%x planes=%zu reason=%u gl=%x mesa_stage=%u errno=%u wrapped=%u target=%u seed=%u hash_bytes=%llu hash_us=%llu hash_n=%u\n",(void*)e,IOSurfaceGetID(top->surface),top->texture,top->width,top->height,IOSurfaceGetBytesPerRow(top->surface),top->bytes,(unsigned)IOSurfaceGetPixelFormat(top->surface),IOSurfaceGetPlaneCount(top->surface),top->p12710_import_reason,top->p12710_import_status&0x1ffffu,(top->p12710_import_status>>17)&7u,(top->p12710_import_status>>20)&255u,top->wrapped,top->target,top->seed,(unsigned long long)top->p12710_hash_bytes,(unsigned long long)top->p12710_hash_us,top->p12710_hash_n);
+                    top->p12710_hash_bytes=0;
+                }
+                for(unsigned j=0;j<e->image_count;j++){e->images[j].p12710_hash_bytes=0;e->images[j].p12710_hash_us=0;e->images[j].p12710_hash_n=0;}
                 s9_p1279_reset(p,after);
             }
             e->p1279_sample=false;
@@ -2680,8 +2717,15 @@ my_glBindTexture(void *context, GLenum target, GLuint texture)
 			image->used = e->frames + 1;
 			uint64_t checked_at = path_sample ? now_us() : 0;
 			/* Identical short-circuit logic to the pre-diagnostic renderer. */
-			bool dirty = !image->shared && (!image->target ? IOSurfaceGetSeed(image->surface) != image->seed ||
-			    surface_changed(e, image) : image->wrapped && !image->painted && surface_changed(e, image));
+            bool dirty=false;
+            if(!image->shared){
+                if(!image->target){
+                    if(IOSurfaceGetSeed(image->surface)!=image->seed){
+                        dirty=true;
+                        if(p1279_gl_on){e->p1279.seed_changed_refill++;image->p12710_baseline_stale=true;}
+                    }else dirty=surface_changed(e,image);
+                }else if(image->wrapped && !image->painted)dirty=surface_changed(e,image);
+            }
 			if (path_sample) { e->diag.bind_check_us += now_us() - checked_at; e->diag.bind_checks++; }
 			if (dirty) {
 				uint64_t filled_at = path_sample ? now_us() : 0;
